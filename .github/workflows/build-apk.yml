@@ -21,10 +21,18 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Gradle
+      - name: Setup Android SDK (including API 36.1)
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform 36.1 & Build Tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36.1" "build-tools;36.0.0" || sdkmanager "platforms;android-36" "build-tools;35.0.0" || true
+
+      - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.1.0'
+          gradle-version: '9.3.1'
 
       - name: Decode Registered Debug Keystore (for Google Sign-In SHA-1 Match)
         run: |
