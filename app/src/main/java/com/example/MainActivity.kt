@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -15,6 +16,7 @@ import com.example.data.repository.QawmiRepository
 import com.example.ui.auth.AuthScreen
 import com.example.ui.screens.MainAppScaffold
 import com.example.ui.theme.ApplicationTheme
+import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.QawmiViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
@@ -29,9 +31,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val openNotifications = intent?.getBooleanExtra("open_notifications", false) == true
         setContent {
             ApplicationTheme {
-                AppNavigation()
+                AppNavigation(openNotificationsInitially = openNotifications)
             }
         }
     }
@@ -46,7 +49,10 @@ internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 }
 
 @Composable
-fun AppNavigation(auth: FirebaseAuth = Firebase.auth) {
+fun AppNavigation(
+    auth: FirebaseAuth = Firebase.auth,
+    openNotificationsInitially: Boolean = false
+) {
     val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
     val user = currentUser
 
@@ -80,6 +86,12 @@ fun AppNavigation(auth: FirebaseAuth = Firebase.auth) {
                 }
             }
         )
+
+        LaunchedEffect(openNotificationsInitially, currentUserId) {
+            if (openNotificationsInitially) {
+                qawmiViewModel.navigateTo(MainDestination.NOTIFICATIONS)
+            }
+        }
 
         MainAppScaffold(
             viewModel = qawmiViewModel,

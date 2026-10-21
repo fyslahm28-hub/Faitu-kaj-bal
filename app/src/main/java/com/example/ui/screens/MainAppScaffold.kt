@@ -1,6 +1,10 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,7 +26,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Assignment
 import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Bookmark
@@ -54,6 +57,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,12 +75,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.FeedPost
 import com.example.data.model.UserProfile
 import com.example.ui.auth.signOutUser
 import com.example.ui.components.IslamicStarEmblem
 import com.example.ui.components.QawmiTopBar
+import com.example.ui.components.UserAvatarImage
 import com.example.ui.theme.QawmiDarkGreen
 import com.example.ui.theme.QawmiDeepGreen
 import com.example.ui.theme.QawmiGold
@@ -85,6 +94,8 @@ import com.example.ui.theme.QawmiSeekerBlue
 import com.example.ui.theme.QawmiSoftBg
 import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextSecondary
+import com.example.ui.util.IslamicDateAndPrayerHelper
+import com.example.ui.util.QawmiNotificationHelper
 import com.example.ui.viewmodel.FeedFilterTab
 import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.QawmiViewModel
@@ -97,9 +108,43 @@ fun MainAppScaffold(
     onSignedOut: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember { CredentialManager.create(context) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { /* handled gracefully by QawmiNotificationHelper */ }
+    )
+
+    LaunchedEffect(Unit) {
+        QawmiNotificationHelper.ensureChannelCreated(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !QawmiNotificationHelper.hasNotificationPermission(context)
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // Track real-time Online / Offline & Last Seen presence across app lifecycle
+    DisposableEffect(lifecycleOwner, viewModel.currentUserId) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> {
+                    viewModel.setUserOnlineStatus(true)
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    viewModel.setUserOnlineStatus(false)
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val currentDestination by viewModel.currentDestination.collectAsStateWithLifecycle()
     val selectedFeedFilter by viewModel.selectedFeedFilter.collectAsStateWithLifecycle()
@@ -121,9 +166,28 @@ fun MainAppScaffold(
     val selectedPostForApply by viewModel.selectedPostForApply.collectAsStateWithLifecycle()
     val selectedPostForDetail by viewModel.selectedPostForDetail.collectAsStateWithLifecycle()
     val messageTargetUser by viewModel.messageTargetUser.collectAsStateWithLifecycle()
+    val inspectedUserTarget by viewModel.inspectedUserTarget.collectAsStateWithLifecycle()
+    val inspectedUserProfileState by viewModel.inspectedUserProfileState.collectAsStateWithLifecycle()
+    val activeChatPartnerProfile by viewModel.activeChatPartnerProfileState.collectAsStateWithLifecycle()
+    val chatPartnerProfiles by viewModel.chatPartnerProfilesState.collectAsStateWithLifecycle()
 
     val unreadNotificationsCount = remember(notificationsState) {
         (notificationsState as? UiState.Success)?.data?.count { !it.isRead } ?: 0
+    }
+
+    val unreadDirectMessagesCount = remember(messagesState, viewModel.currentUserId) {
+        (messagesState as? UiState.Success)?.data?.count {
+            it.receiverId == viewModel.currentUserId && !it.isRead
+        } ?: 0
+    }
+
+    LaunchedEffect(notificationsState, viewModel.currentUserId) {
+        val currentList = (notificationsState as? UiState.Success)?.data ?: return@LaunchedEffect
+        QawmiNotificationHelper.deliverNewUnreadPushNotifications(
+            context = context,
+            currentUserId = viewModel.currentUserId,
+            notifications = currentList
+        )
     }
 
     // Mandatory BackHandler for custom state navigation
@@ -137,6 +201,11 @@ fun MainAppScaffold(
             ModalDrawerSheet(
                 drawerContainerColor = Color.White
             ) {
+                val currentProfile = (userProfileState as? UiState.Success)?.data
+                val profileName = currentProfile?.fullName
+                    ?.takeIf { it.isNotBlank() } ?: viewModel.currentUserDisplayName.ifBlank { "সম্মানিত দ্বীনি ভাই" }
+                val profilePhoto = currentProfile?.photoUrl.orEmpty()
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -144,29 +213,43 @@ fun MainAppScaffold(
                         .padding(20.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IslamicStarEmblem(size = 22.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "কওমি কর্মসংস্থান",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
+                        UserAvatarImage(
+                            photoUrl = profilePhoto,
+                            displayName = profileName,
+                            size = 46.dp,
+                            borderColor = QawmiGold,
+                            borderWidth = 2.dp,
+                            showOnlineIndicator = true,
+                            isOnline = currentProfile?.isOnline ?: true
                         )
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    val profileName = (userProfileState as? UiState.Success)?.data?.fullName
-                        ?.takeIf { it.isNotBlank() } ?: viewModel.currentUserDisplayName.ifBlank { "সম্মানিত দ্বীনি ভাই" }
-                    Text(
-                        text = profileName,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = QawmiGold
-                    )
-                    if (viewModel.currentUserEmail.isNotBlank()) {
-                        Text(
-                            text = viewModel.currentUserEmail,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFDDF3EC)
-                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IslamicStarEmblem(size = 18.dp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "কওমি কর্মসংস্থান",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = profileName,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = QawmiGold,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (viewModel.currentUserEmail.isNotBlank()) {
+                                Text(
+                                    text = viewModel.currentUserEmail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFDDF3EC),
+                                    fontSize = 11.5.sp
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -221,7 +304,11 @@ fun MainAppScaffold(
                     viewModel.navigateTo(MainDestination.VERIFIED_MADRASAS)
                 }
                 DrawerMenuItem(
-                    label = "পয়গাম / মেসেজিং",
+                    label = if (unreadDirectMessagesCount > 0) {
+                        "পয়গাম / মেসেজিং (${IslamicDateAndPrayerHelper.toBanglaDigits(unreadDirectMessagesCount.toString())})"
+                    } else {
+                        "পয়গাম / মেসেজিং"
+                    },
                     icon = Icons.Default.MailOutline,
                     selected = currentDestination == MainDestination.MESSAGES
                 ) {
@@ -229,7 +316,11 @@ fun MainAppScaffold(
                     viewModel.navigateTo(MainDestination.MESSAGES)
                 }
                 DrawerMenuItem(
-                    label = "নোটিফিকেশন (${unreadNotificationsCount})",
+                    label = if (unreadNotificationsCount > 0) {
+                        "নোটিফিকেশন (${IslamicDateAndPrayerHelper.toBanglaDigits(unreadNotificationsCount.toString())})"
+                    } else {
+                        "নোটিফিকেশন"
+                    },
                     icon = Icons.Default.Notifications,
                     selected = currentDestination == MainDestination.NOTIFICATIONS
                 ) {
@@ -261,6 +352,7 @@ fun MainAppScaffold(
                     icon = { Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = Color(0xFFC62828)) },
                     onClick = {
                         scope.launch { drawerState.close() }
+                        viewModel.setUserOnlineStatus(false)
                         signOutUser(
                             credentialManager = credentialManager,
                             onSignOutComplete = onSignedOut,
@@ -389,12 +481,14 @@ fun MainAppScaffold(
                                 selectedDistrict = selectedDistrict,
                                 searchQuery = searchQuery,
                                 currentUserId = viewModel.currentUserId,
+                                isAdminUser = viewModel.isAdminUser,
                                 onSelectFilter = { viewModel.setFeedFilter(it) },
                                 onSelectDistrict = { viewModel.setDistrictFilter(it) },
                                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
                                 onApplyClick = { post -> viewModel.openApplyDialog(post) },
                                 onViewProfileOrDetailClick = { post -> viewModel.openPostDetailDialog(post) },
                                 onToggleBookmark = { post, bookmarked -> viewModel.toggleBookmark(post, bookmarked) },
+                                onToggleBoostPost = { post, boost -> viewModel.adminToggleBoostPost(post, boost) },
                                 onDeletePost = { postId -> viewModel.deletePost(postId) },
                                 onNavigate = { dest -> viewModel.navigateTo(dest) }
                             )
@@ -408,12 +502,14 @@ fun MainAppScaffold(
                                 selectedDistrict = selectedDistrict,
                                 searchQuery = searchQuery,
                                 currentUserId = viewModel.currentUserId,
+                                isAdminUser = viewModel.isAdminUser,
                                 onSelectFilter = { viewModel.setFeedFilter(it) },
                                 onSelectDistrict = { viewModel.setDistrictFilter(it) },
                                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
                                 onApplyClick = { post -> viewModel.openApplyDialog(post) },
                                 onViewProfileOrDetailClick = { post -> viewModel.openPostDetailDialog(post) },
                                 onToggleBookmark = { post, bookmarked -> viewModel.toggleBookmark(post, bookmarked) },
+                                onToggleBoostPost = { post, boost -> viewModel.adminToggleBoostPost(post, boost) },
                                 onDeletePost = { postId -> viewModel.deletePost(postId) },
                                 onNavigate = { dest -> viewModel.navigateTo(dest) }
                             )
@@ -425,6 +521,7 @@ fun MainAppScaffold(
                                 receivedState = receivedSubmissionsState,
                                 onUpdateStatus = { sub, status -> viewModel.updateReceivedSubmissionStatus(sub, status) },
                                 onMessageUser = { uid, name -> viewModel.openDirectMessageTo(uid, name) },
+                                onInspectUserProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) },
                                 onNavigatePublishApplication = { viewModel.navigateTo(MainDestination.PUBLISH_APPLICATION) }
                             )
                         }
@@ -433,8 +530,10 @@ fun MainAppScaffold(
                             MadrasaDirectoryScreen(
                                 madrasasState = madrasasState,
                                 onlyVerified = false,
+                                currentUserId = viewModel.currentUserId,
                                 onRegisterMadrasaClick = { viewModel.navigateTo(MainDestination.REGISTER_MADRASA) },
-                                onMessageOwnerClick = { uid, name -> viewModel.openDirectMessageTo(uid, name) }
+                                onMessageOwnerClick = { uid, name -> viewModel.openDirectMessageTo(uid, name) },
+                                onInspectOwnerProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) }
                             )
                         }
 
@@ -442,8 +541,10 @@ fun MainAppScaffold(
                             MadrasaDirectoryScreen(
                                 madrasasState = madrasasState,
                                 onlyVerified = true,
+                                currentUserId = viewModel.currentUserId,
                                 onRegisterMadrasaClick = { viewModel.navigateTo(MainDestination.REGISTER_MADRASA) },
-                                onMessageOwnerClick = { uid, name -> viewModel.openDirectMessageTo(uid, name) }
+                                onMessageOwnerClick = { uid, name -> viewModel.openDirectMessageTo(uid, name) },
+                                onInspectOwnerProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) }
                             )
                         }
 
@@ -538,10 +639,27 @@ fun MainAppScaffold(
                         MainDestination.PROFILE -> {
                             ProfileScreen(
                                 userProfileState = userProfileState,
+                                currentUserId = viewModel.currentUserId,
                                 currentUserDisplayName = viewModel.currentUserDisplayName,
                                 currentUserEmail = viewModel.currentUserEmail,
+                                feedPostsState = feedPostsState,
+                                mySentSubmissionsState = mySentSubmissionsState,
+                                receivedSubmissionsState = receivedSubmissionsState,
+                                bookmarksState = bookmarksState,
                                 isSubmitting = isSubmitting,
-                                onSaveProfile = { name, type, dist, desig, qual, exp, pref, bio, phone, madrasa ->
+                                onUpdatePhotoImmediately = { newPhotoUrl ->
+                                    viewModel.updateProfilePhotoImmediately(newPhotoUrl)
+                                },
+                                onViewPostDetail = { post ->
+                                    viewModel.openPostDetailDialog(post)
+                                },
+                                onDeleteOwnPost = { postId ->
+                                    viewModel.deletePost(postId)
+                                },
+                                onNavigate = { dest ->
+                                    viewModel.navigateTo(dest)
+                                },
+                                onSaveProfile = { name, type, dist, desig, qual, exp, pref, bio, phone, madrasa, photoUrl ->
                                     viewModel.saveProfile(
                                         fullName = name,
                                         accountType = type,
@@ -552,7 +670,8 @@ fun MainAppScaffold(
                                         preferredDistricts = pref,
                                         bio = bio,
                                         contactInfo = phone,
-                                        madrasaName = madrasa
+                                        madrasaName = madrasa,
+                                        photoUrl = photoUrl
                                     )
                                 }
                             )
@@ -563,19 +682,25 @@ fun MainAppScaffold(
                                 messagesState = messagesState,
                                 currentUserId = viewModel.currentUserId,
                                 targetUser = messageTargetUser,
+                                partnerProfiles = chatPartnerProfiles,
+                                activePartnerProfile = activeChatPartnerProfile,
                                 isSubmitting = isSubmitting,
                                 onSendMessage = { recId, recName, subj, body ->
                                     viewModel.sendMessage(recId, recName, subj, body)
                                 },
                                 onSelectRecipient = { uid, name -> viewModel.openDirectMessageTo(uid, name) },
-                                onMarkRead = { msgId -> viewModel.markMessageRead(msgId) }
+                                onClearRecipient = { viewModel.clearMessageTarget() },
+                                onMarkRead = { msgId -> viewModel.markMessageRead(msgId) },
+                                onMarkConversationRead = { partnerUid -> viewModel.markConversationRead(partnerUid) },
+                                onInspectUserProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) }
                             )
                         }
 
                         MainDestination.NOTIFICATIONS -> {
                             NotificationsScreen(
                                 notificationsState = notificationsState,
-                                onMarkNotificationRead = { notifId -> viewModel.markNotificationRead(notifId) }
+                                onNotificationClick = { notif -> viewModel.openNotificationTarget(notif) },
+                                onMarkAllRead = { viewModel.markAllNotificationsRead() }
                             )
                         }
 
@@ -584,8 +709,11 @@ fun MainAppScaffold(
                                 isAdminUser = viewModel.isAdminUser,
                                 madrasasState = madrasasState,
                                 feedPostsState = feedPostsState,
-                                onVerifyMadrasa = { id, ver -> viewModel.adminVerifyMadrasa(id, ver) },
-                                onVerifyPost = { id, ver, status -> viewModel.adminVerifyPost(id, ver, status) },
+                                isSubmitting = isSubmitting,
+                                onVerifyMadrasa = { madrasa, ver -> viewModel.adminVerifyMadrasa(madrasa, ver) },
+                                onVerifyPost = { post, ver, status -> viewModel.adminVerifyPost(post, ver, status) },
+                                onToggleBoostPost = { post, boost -> viewModel.adminToggleBoostPost(post, boost) },
+                                onSendAnnouncement = { title, msg -> viewModel.publishAdminAnnouncement(title, msg) },
                                 onDeletePost = { id -> viewModel.deletePost(id) }
                             )
                         }
@@ -625,16 +753,53 @@ fun MainAppScaffold(
     // Post / Candidate Profile Detail Modal Dialog
     if (selectedPostForDetail != null) {
         val post = selectedPostForDetail!!
+        val isOwnPost = post.authorId == viewModel.currentUserId
         PostDetailDialog(
             post = post,
+            isOwnPost = isOwnPost,
             onDismiss = { viewModel.openPostDetailDialog(null) },
             onApplyClick = {
                 viewModel.openPostDetailDialog(null)
                 viewModel.openApplyDialog(post)
             },
+            onInspectAuthorProfileClick = {
+                viewModel.openPostDetailDialog(null)
+                viewModel.openUserProfileInspection(
+                    userId = post.authorId,
+                    fallbackName = post.authorName.ifBlank { post.title }
+                )
+            },
             onSendMessageClick = {
                 viewModel.openPostDetailDialog(null)
-                viewModel.openDirectMessageTo(post.authorId, post.title)
+                viewModel.openDirectMessageTo(
+                    userId = post.authorId,
+                    userName = post.authorName.ifBlank { post.title }
+                )
+            }
+        )
+    }
+
+    // Public User Profile Modal Dialog (with Message button only for other users)
+    if (inspectedUserTarget != null) {
+        val targetUid = inspectedUserTarget!!.first
+        val fallbackName = inspectedUserTarget!!.second
+        val targetUserPosts = remember(feedPostsState, targetUid) {
+            ((feedPostsState as? UiState.Success)?.data ?: emptyList())
+                .filter { it.authorId == targetUid }
+        }
+        PublicUserProfileDialog(
+            targetUserId = targetUid,
+            fallbackName = fallbackName,
+            currentUserId = viewModel.currentUserId,
+            inspectedProfileState = inspectedUserProfileState,
+            userPublishedPosts = targetUserPosts,
+            onDismiss = { viewModel.closeUserProfileInspection() },
+            onSendMessageClick = { uid, name ->
+                viewModel.openDirectMessageTo(uid, name)
+            },
+            onPostClick = { post ->
+                viewModel.closeUserProfileInspection()
+                viewModel.openPostDetailDialog(post)
             }
         )
     }
@@ -837,20 +1002,41 @@ private fun ApplyToKhedmotDialog(
 @Composable
 private fun PostDetailDialog(
     post: FeedPost,
+    isOwnPost: Boolean,
     onDismiss: () -> Unit,
     onApplyClick: () -> Unit,
+    onInspectAuthorProfileClick: () -> Unit,
     onSendMessageClick: () -> Unit
 ) {
     val isCircular = post.postType == "JOB_CIRCULAR"
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(
-                text = post.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = QawmiDeepGreen
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                UserAvatarImage(
+                    photoUrl = post.authorPhotoUrl,
+                    displayName = post.authorName.ifBlank { post.title },
+                    size = 42.dp,
+                    borderColor = QawmiGold,
+                    borderWidth = 1.5.dp
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = post.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = QawmiDeepGreen
+                    )
+                    if (post.authorName.isNotBlank()) {
+                        Text(
+                            text = "প্রকাশক: ${post.authorName}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = QawmiTextSecondary
+                        )
+                    }
+                }
+            }
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -882,17 +1068,29 @@ private fun PostDetailDialog(
             }
         },
         confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (isCircular) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (isCircular && !isOwnPost) {
                     Button(
                         onClick = onApplyClick,
                         colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen)
                     ) {
-                        Text("আবেদন করুন")
+                        Text("আবেদন")
                     }
                 }
-                OutlinedButton(onClick = onSendMessageClick) {
-                    Text("পয়গাম পাঠান")
+                OutlinedButton(
+                    onClick = onInspectAuthorProfileClick,
+                    modifier = Modifier.testTag("post_detail_inspect_author_btn")
+                ) {
+                    Text("প্রোফাইল")
+                }
+                if (!isOwnPost && post.authorId.isNotBlank()) {
+                    Button(
+                        onClick = onSendMessageClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = QawmiSeekerBlue),
+                        modifier = Modifier.testTag("post_detail_send_message_btn")
+                    ) {
+                        Text("পয়গাম পাঠান")
+                    }
                 }
             }
         },

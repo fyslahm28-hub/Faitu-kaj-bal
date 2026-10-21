@@ -31,8 +31,9 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() && (
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        (request.auth.token.email == 'fyslahm28@gmail.com' && request.auth.token.email_verified == true)
+        ('email' in request.auth.token &&
+         request.auth.token.email == 'fyslahm28@gmail.com') ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
@@ -49,6 +50,9 @@ service cloud.firestore {
              data.bio is string && data.bio.size() <= 1000 &&
              data.contactInfo is string && data.contactInfo.size() <= 150 &&
              data.madrasaName is string && data.madrasaName.size() <= 200 &&
+             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 250000)) &&
+             (!('isOnline' in data) || data.isOnline is bool) &&
+             (!('lastSeenAt' in data) || isValidTimestamp(data.lastSeenAt)) &&
              data.isVerified is bool &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
@@ -68,9 +72,16 @@ service cloud.firestore {
              isValidTimestamp(data.createdAt);
     }
 
+    function isValidNotificationReadReceipt(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.notificationId is string && data.notificationId.size() >= 1 && data.notificationId.size() <= 128 &&
+             isValidTimestamp(data.readAt);
+    }
+
     function isValidFeedPost(data) {
       return data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
+             (!('authorPhotoUrl' in data) || (data.authorPhotoUrl is string && data.authorPhotoUrl.size() <= 250000)) &&
              data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION') &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
              data.district is string && data.district.size() >= 1 && data.district.size() <= 100 &&
@@ -83,6 +94,7 @@ service cloud.firestore {
              data.contactNumber is string && data.contactNumber.size() <= 100 &&
              data.madrasaId is string && data.madrasaId.size() <= 128 &&
              data.isVerifiedMadrasa is bool &&
+             (!('isBoosted' in data) || data.isBoosted is bool) &&
              data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'ARCHIVED') &&
              data.approvalStatus is string && (data.approvalStatus == 'APPROVED' || data.approvalStatus == 'PENDING' || data.approvalStatus == 'REJECTED') &&
              isValidTimestamp(data.createdAt) &&
@@ -124,6 +136,7 @@ service cloud.firestore {
     function isValidDirectMessage(data) {
       return data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
+             (!('senderPhotoUrl' in data) || (data.senderPhotoUrl is string && data.senderPhotoUrl.size() <= 250000)) &&
              data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 128 &&
              data.receiverName is string && data.receiverName.size() >= 1 && data.receiverName.size() <= 150 &&
              data.subject is string && data.subject.size() <= 200 &&
@@ -138,7 +151,15 @@ service cloud.firestore {
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
              data.message is string && data.message.size() >= 1 && data.message.size() <= 1000 &&
-             data.type is string && (data.type == 'APPLICATION' || data.type == 'MESSAGE' || data.type == 'VERIFICATION') &&
+             data.type is string && (
+               data.type == 'APPLICATION' ||
+               data.type == 'MESSAGE' ||
+               data.type == 'VERIFICATION' ||
+               data.type == 'NEW_CIRCULAR' ||
+               data.type == 'NEW_APPLICATION' ||
+               data.type == 'ANNOUNCEMENT' ||
+               data.type == 'BOOST'
+             ) &&
              data.referenceId is string && data.referenceId.size() <= 128 &&
              data.isRead is bool &&
              isValidTimestamp(data.createdAt);
@@ -170,7 +191,8 @@ service cloud.firestore {
                        incoming().keys().hasOnly([
                          'userId', 'fullName', 'accountType', 'district', 'designation',
                          'qualification', 'experience', 'preferredDistricts', 'bio',
-                         'contactInfo', 'madrasaName', 'isVerified', 'createdAt', 'updatedAt'
+                         'contactInfo', 'madrasaName', 'photoUrl', 'isOnline', 'lastSeenAt',
+                         'isVerified', 'createdAt', 'updatedAt'
                        ]) &&
                        (incoming().isVerified == false || isAdmin()) &&
                        isValidUserProfile(incoming());
@@ -185,7 +207,8 @@ service cloud.firestore {
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'fullName', 'accountType', 'district', 'designation',
                             'qualification', 'experience', 'preferredDistricts', 'bio',
-                            'contactInfo', 'madrasaName', 'updatedAt'
+                            'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
+                            'lastSeenAt', 'updatedAt'
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -220,9 +243,35 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isSignedIn() && isValidId(userId) && isValidId(bookmarkId) && request.auth.uid == userId;
       }
+
+      // Per-User Notification Read Receipts (নোটিফিকেশন পঠিত অবস্থা)
+      match /notification_reads/{notificationId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(notificationId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(notificationId) &&
+                         request.auth.uid == userId &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'notificationId', 'readAt']) &&
+                         incoming().keys().hasOnly(['userId', 'notificationId', 'readAt']) &&
+                         isValidNotificationReadReceipt(incoming());
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(notificationId) &&
+                         isValidNotificationReadReceipt(incoming()) &&
+                         request.auth.uid == userId &&
+                         incoming().userId == existing().userId &&
+                         incoming().notificationId == existing().notificationId &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['readAt']);
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(notificationId) && request.auth.uid == userId;
+      }
     }
 
-    // Feed Posts (নিয়োগ বিজ্ঞপ্তি ও চাকরিপ্রার্থীর আবেদন)
+    // Feed Posts (নিয়োগ বিজ্ঞপ্তি ও চাকরিপ্রার্থীর আবেদন, Boosted সহ)
     match /feed_posts/{postId} {
       allow get: if isSignedIn() && isValidId(postId) && (
         existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
@@ -243,13 +292,14 @@ service cloud.firestore {
                          'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'authorId', 'authorName', 'postType', 'title', 'district',
+                         'authorId', 'authorName', 'authorPhotoUrl', 'postType', 'title', 'district',
                          'upazilaOrLocation', 'designation', 'qualification',
                          'salaryOrExperience', 'deadlineOrPreferredDistricts',
                          'description', 'contactNumber', 'madrasaId',
-                         'isVerifiedMadrasa', 'visibility', 'approvalStatus',
+                         'isVerifiedMadrasa', 'isBoosted', 'visibility', 'approvalStatus',
                          'createdAt', 'updatedAt'
                        ]) &&
+                       (!('isBoosted' in incoming()) || incoming().isBoosted == false || isAdmin()) &&
                        isValidFeedPost(incoming());
 
       allow update: if isSignedIn() &&
@@ -261,15 +311,16 @@ service cloud.firestore {
                          (request.auth.uid == existing().authorId &&
                           incoming().approvalStatus == existing().approvalStatus &&
                           incoming().isVerifiedMadrasa == existing().isVerifiedMadrasa &&
+                          (!('isBoosted' in incoming()) || ('isBoosted' in existing() && incoming().isBoosted == existing().isBoosted) || (!('isBoosted' in existing()) && incoming().isBoosted == false)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'authorName', 'title', 'district', 'upazilaOrLocation',
+                            'authorName', 'authorPhotoUrl', 'title', 'district', 'upazilaOrLocation',
                             'designation', 'qualification', 'salaryOrExperience',
                             'deadlineOrPreferredDistricts', 'description',
                             'contactNumber', 'visibility', 'updatedAt'
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'approvalStatus', 'isVerifiedMadrasa', 'visibility', 'updatedAt'
+                            'approvalStatus', 'isVerifiedMadrasa', 'isBoosted', 'visibility', 'updatedAt'
                           ]))
                        );
 
@@ -382,7 +433,7 @@ service cloud.firestore {
                          'subject', 'body', 'isRead', 'createdAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'senderId', 'senderName', 'receiverId', 'receiverName',
+                         'senderId', 'senderName', 'senderPhotoUrl', 'receiverId', 'receiverName',
                          'subject', 'body', 'isRead', 'createdAt'
                        ]) &&
                        isValidDirectMessage(incoming());
@@ -401,10 +452,14 @@ service cloud.firestore {
       );
     }
 
-    // App Notifications (নোটিফিকেশন)
+    // App Notifications (ব্যক্তিগত ও কমিউনিটি ব্রডকাস্ট নোটিফিকেশন)
     match /notifications/{notificationId} {
-      allow get: if isSignedIn() && isValidId(notificationId) && existing().recipientId == request.auth.uid;
-      allow list: if isSignedIn() && existing().recipientId == request.auth.uid;
+      allow get: if isSignedIn() && isValidId(notificationId) && (
+        existing().recipientId == request.auth.uid || existing().recipientId == 'ALL_USERS'
+      );
+      allow list: if isSignedIn() && (
+        existing().recipientId == request.auth.uid || existing().recipientId == 'ALL_USERS'
+      );
 
       allow create: if isSignedIn() &&
                        isValidId(notificationId) &&
@@ -418,6 +473,8 @@ service cloud.firestore {
                          'recipientId', 'senderId', 'senderName', 'title',
                          'message', 'type', 'referenceId', 'isRead', 'createdAt'
                        ]) &&
+                       (incoming().type != 'ANNOUNCEMENT' || isAdmin()) &&
+                       (incoming().type != 'BOOST' || isAdmin()) &&
                        isValidAppNotification(incoming());
 
       allow update: if isSignedIn() &&
@@ -429,7 +486,9 @@ service cloud.firestore {
                        request.auth.uid == existing().recipientId &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
 
-      allow delete: if isSignedIn() && isValidId(notificationId) && existing().recipientId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(notificationId) && (
+        existing().recipientId == request.auth.uid || isAdmin()
+      );
     }
   }
 }

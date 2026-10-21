@@ -8,6 +8,7 @@ import com.example.data.model.DirectMessage
 import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
+import com.example.data.model.NotificationReadReceipt
 import com.example.data.model.UserProfile
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -38,7 +39,7 @@ class QawmiRepository(
             ?: throw IllegalStateException("এটি সম্পন্ন করতে গুগল অ্যাকাউন্ট দিয়ে লগইন করা আবশ্যক।")
     }
 
-    // --- 1. USER PROFILE ---
+    // --- 1. USER PROFILE, PHOTO & REAL-TIME PRESENCE (ONLINE / LAST SEEN) ---
 
     fun observeUserProfile(userId: String): Flow<UserProfile?> {
         val path = "users/$userId"
@@ -77,41 +78,187 @@ class QawmiRepository(
     suspend fun saveUserProfile(profile: UserProfile): Result<Unit> {
         val uid = requireUserId()
         val docRef = db.collection("users").document(uid)
+        val resolvedName = profile.fullName.trim().ifBlank { "আবদুল্লাহ" }
+        val resolvedPhoto = profile.photoUrl.trim()
         return try {
             val existingSnap = docRef.get().await()
             if (!existingSnap.exists()) {
                 val payload = mapOf(
                     "userId" to uid,
-                    "fullName" to profile.fullName.ifBlank { "আবদুল্লাহ" },
+                    "fullName" to resolvedName,
                     "accountType" to profile.accountType.ifBlank { "khadim" },
-                    "district" to profile.district,
-                    "designation" to profile.designation,
-                    "qualification" to profile.qualification,
-                    "experience" to profile.experience,
-                    "preferredDistricts" to profile.preferredDistricts,
-                    "bio" to profile.bio,
-                    "contactInfo" to profile.contactInfo,
-                    "madrasaName" to profile.madrasaName,
+                    "district" to profile.district.trim(),
+                    "designation" to profile.designation.trim(),
+                    "qualification" to profile.qualification.trim(),
+                    "experience" to profile.experience.trim(),
+                    "preferredDistricts" to profile.preferredDistricts.trim(),
+                    "bio" to profile.bio.trim(),
+                    "contactInfo" to profile.contactInfo.trim(),
+                    "madrasaName" to profile.madrasaName.trim(),
+                    "photoUrl" to resolvedPhoto,
+                    "isOnline" to true,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
                     "isVerified" to false,
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
                 docRef.set(payload).await()
             } else {
+                val existingPhoto = existingSnap.getString("photoUrl").orEmpty()
+                val finalPhoto = resolvedPhoto.ifBlank { existingPhoto }
                 val updatePayload = mapOf(
-                    "fullName" to profile.fullName.ifBlank { "আবদুল্লাহ" },
+                    "fullName" to resolvedName,
                     "accountType" to profile.accountType.ifBlank { "khadim" },
-                    "district" to profile.district,
-                    "designation" to profile.designation,
-                    "qualification" to profile.qualification,
-                    "experience" to profile.experience,
-                    "preferredDistricts" to profile.preferredDistricts,
-                    "bio" to profile.bio,
-                    "contactInfo" to profile.contactInfo,
-                    "madrasaName" to profile.madrasaName,
+                    "district" to profile.district.trim(),
+                    "designation" to profile.designation.trim(),
+                    "qualification" to profile.qualification.trim(),
+                    "experience" to profile.experience.trim(),
+                    "preferredDistricts" to profile.preferredDistricts.trim(),
+                    "bio" to profile.bio.trim(),
+                    "contactInfo" to profile.contactInfo.trim(),
+                    "madrasaName" to profile.madrasaName.trim(),
+                    "photoUrl" to finalPhoto,
+                    "isOnline" to true,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
                 docRef.update(updatePayload).await()
+            }
+
+            // Propagate updated author photo and name to user's authored feed posts
+            try {
+                val myPostsSnap = db.collection("feed_posts")
+                    .whereEqualTo("authorId", uid)
+                    .get()
+                    .await()
+                if (!myPostsSnap.isEmpty) {
+                    val batch = db.batch()
+                    for (postDoc in myPostsSnap.documents) {
+                        val updates = mutableMapOf<String, Any>(
+                            "authorName" to resolvedName,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (resolvedPhoto.isNotBlank()) {
+                            updates["authorPhotoUrl"] = resolvedPhoto
+                        }
+                        batch.update(postDoc.reference, updates)
+                    }
+                    batch.commit().await()
+                }
+            } catch (_: Exception) {
+                // Non-fatal if user has no posts yet
+            }
+
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateProfilePhoto(photoUrl: String, fallbackName: String = "আবদুল্লাহ"): Result<Unit> {
+        val uid = requireUserId()
+        val docRef = db.collection("users").document(uid)
+        return try {
+            val existingSnap = docRef.get().await()
+            if (!existingSnap.exists()) {
+                val payload = mapOf(
+                    "userId" to uid,
+                    "fullName" to fallbackName.trim().ifBlank { "আবদুল্লাহ" },
+                    "accountType" to "khadim",
+                    "district" to "",
+                    "designation" to "",
+                    "qualification" to "",
+                    "experience" to "",
+                    "preferredDistricts" to "",
+                    "bio" to "",
+                    "contactInfo" to "",
+                    "madrasaName" to "",
+                    "photoUrl" to photoUrl,
+                    "isOnline" to true,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "isVerified" to false,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(payload).await()
+            } else {
+                docRef.update(
+                    mapOf(
+                        "photoUrl" to photoUrl,
+                        "isOnline" to true,
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+
+            try {
+                val myPostsSnap = db.collection("feed_posts")
+                    .whereEqualTo("authorId", uid)
+                    .get()
+                    .await()
+                if (!myPostsSnap.isEmpty) {
+                    val batch = db.batch()
+                    for (postDoc in myPostsSnap.documents) {
+                        batch.update(
+                            postDoc.reference,
+                            mapOf(
+                                "authorPhotoUrl" to photoUrl,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        )
+                    }
+                    batch.commit().await()
+                }
+            } catch (_: Exception) {
+            }
+
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateUserPresence(isOnline: Boolean, defaultFullName: String = "সম্মানিত দ্বীনি ভাই"): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val docRef = db.collection("users").document(uid)
+        return try {
+            val snap = docRef.get().await()
+            if (snap.exists()) {
+                docRef.update(
+                    mapOf(
+                        "isOnline" to isOnline,
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                val payload = mapOf(
+                    "userId" to uid,
+                    "fullName" to defaultFullName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" },
+                    "accountType" to "khadim",
+                    "district" to "",
+                    "designation" to "",
+                    "qualification" to "",
+                    "experience" to "",
+                    "preferredDistricts" to "",
+                    "bio" to "",
+                    "contactInfo" to "",
+                    "madrasaName" to "",
+                    "photoUrl" to "",
+                    "isOnline" to isOnline,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "isVerified" to false,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(payload).await()
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -122,7 +269,7 @@ class QawmiRepository(
         }
     }
 
-    // --- 2. FEED POSTS (নিয়োগ বিজ্ঞপ্তি ও চাকরিপ্রার্থীর আবেদন) ---
+    // --- 2. FEED POSTS (নিয়োগ বিজ্ঞপ্তি ও চাকরিপ্রার্থীর আবেদন, Boosted সহ) ---
 
     fun observePublicFeedPosts(): Flow<List<FeedPost>> {
         val path = "feed_posts"
@@ -131,7 +278,10 @@ class QawmiRepository(
             .snapshots()
             .map { snapshot ->
                 snapshot.toObjects(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    .sortedWith(
+                        compareByDescending<FeedPost> { it.isBoosted }
+                            .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    )
             }
             .catch { error ->
                 if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
@@ -152,7 +302,8 @@ class QawmiRepository(
         description: String,
         contactNumber: String,
         madrasaId: String = "",
-        isVerifiedMadrasa: Boolean = false
+        isVerifiedMadrasa: Boolean = false,
+        authorPhotoUrl: String = ""
     ): Result<String> {
         val uid = requireUserId()
         val collectionRef = db.collection("feed_posts")
@@ -161,6 +312,7 @@ class QawmiRepository(
             val payload = mapOf(
                 "authorId" to uid,
                 "authorName" to authorName.trim(),
+                "authorPhotoUrl" to authorPhotoUrl.trim(),
                 "postType" to postType,
                 "title" to title.trim(),
                 "district" to district.trim(),
@@ -173,12 +325,35 @@ class QawmiRepository(
                 "contactNumber" to contactNumber.trim(),
                 "madrasaId" to madrasaId,
                 "isVerifiedMadrasa" to isVerifiedMadrasa,
+                "isBoosted" to false,
                 "visibility" to "PUBLIC",
                 "approvalStatus" to "APPROVED",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             docRef.set(payload).await()
+
+            // Deliver community notification to other users (observeNotifications excludes senderId == uid)
+            val isCircular = postType == "JOB_CIRCULAR"
+            val notifTitle = if (isCircular) {
+                "নতুন খেদমতের নিয়োগ বিজ্ঞপ্তি"
+            } else {
+                "নতুন খেদমতপ্রার্থীর আবেদন"
+            }
+            val notifMsg = if (isCircular) {
+                "${title.trim()} (${district.trim()})-এ '${designation.trim()}' পদে নিয়োগ বিজ্ঞপ্তি প্রকাশিত হয়েছে।"
+            } else {
+                "${title.trim()} (${qualification.trim()}) '${designation.trim()}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
+            }
+            createNotification(
+                recipientId = "ALL_USERS",
+                senderName = authorName.trim().ifBlank { title.trim() },
+                title = notifTitle,
+                message = notifMsg.take(500),
+                type = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
+                referenceId = docRef.id
+            )
+
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
@@ -202,9 +377,14 @@ class QawmiRepository(
         }
     }
 
-    suspend fun adminUpdatePostVerification(postId: String, isVerified: Boolean, approvalStatus: String): Result<Unit> {
-        requireUserId()
-        val docRef = db.collection("feed_posts").document(postId)
+    suspend fun adminUpdatePostVerification(
+        post: FeedPost,
+        isVerified: Boolean,
+        approvalStatus: String,
+        adminName: String = "অ্যাডমিন প্যানেল"
+    ): Result<Unit> {
+        val uid = requireUserId()
+        val docRef = db.collection("feed_posts").document(post.id)
         return try {
             docRef.update(
                 mapOf(
@@ -213,6 +393,51 @@ class QawmiRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+
+            if (isVerified && post.authorId.isNotBlank() && post.authorId != uid) {
+                createNotification(
+                    recipientId = post.authorId,
+                    senderName = adminName,
+                    title = "বিজ্ঞপ্তি যাচাইকৃত ব্যাজ প্রাপ্তি",
+                    message = "আপনার প্রকাশিত '${post.title}' পোস্টটিতে যাচাইকৃত ব্যাজ যুক্ত করা হয়েছে।",
+                    type = "VERIFICATION",
+                    referenceId = post.id
+                )
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun adminTogglePostBoost(
+        post: FeedPost,
+        isBoosted: Boolean,
+        adminName: String = "অ্যাডমিন প্যানেল"
+    ): Result<Unit> {
+        val uid = requireUserId()
+        val docRef = db.collection("feed_posts").document(post.id)
+        return try {
+            docRef.update(
+                mapOf(
+                    "isBoosted" to isBoosted,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            if (isBoosted && post.authorId.isNotBlank() && post.authorId != uid) {
+                createNotification(
+                    recipientId = post.authorId,
+                    senderName = adminName,
+                    title = "বিজ্ঞপ্তিটি ফিডের শীর্ষে Boosted হয়েছে",
+                    message = "অ্যাডমিন প্যানেল থেকে আপনার '${post.title}' (${post.designation}) বিজ্ঞপ্তিটি ফিডের উপরে বিশেষভাবে প্রদর্শিত হচ্ছে।",
+                    type = "BOOST",
+                    referenceId = post.id
+                )
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -326,9 +551,13 @@ class QawmiRepository(
         }
     }
 
-    suspend fun adminToggleMadrasaVerification(madrasaId: String, verified: Boolean): Result<Unit> {
-        requireUserId()
-        val docRef = db.collection("madrasas").document(madrasaId)
+    suspend fun adminToggleMadrasaVerification(
+        madrasa: MadrasaProfile,
+        verified: Boolean,
+        adminName: String = "অ্যাডমিন প্যানেল"
+    ): Result<Unit> {
+        val uid = requireUserId()
+        val docRef = db.collection("madrasas").document(madrasa.id)
         return try {
             docRef.update(
                 mapOf(
@@ -336,6 +565,17 @@ class QawmiRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+
+            if (verified && madrasa.ownerId.isNotBlank() && madrasa.ownerId != uid) {
+                createNotification(
+                    recipientId = madrasa.ownerId,
+                    senderName = adminName,
+                    title = "মাদরাসা যাচাইকরণ অনুমোদিত",
+                    message = "আলহামদুলিল্লাহ, আপনার '${madrasa.name}' (${madrasa.district}) যাচাইকৃত মাদরাসা হিসেবে তালিকাভুক্ত হয়েছে।",
+                    type = "VERIFICATION",
+                    referenceId = madrasa.id
+                )
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -405,7 +645,7 @@ class QawmiRepository(
             )
             docRef.set(payload).await()
 
-            // Deliver real-time notification to the Madrasa / circular author
+            // Deliver real-time notification ONLY to the Madrasa / circular author (not to self)
             if (post.authorId.isNotBlank() && post.authorId != uid) {
                 createNotification(
                     recipientId = post.authorId,
@@ -499,14 +739,19 @@ class QawmiRepository(
         receiverId: String,
         receiverName: String,
         subject: String,
-        body: String
+        body: String,
+        senderPhotoUrl: String = ""
     ): Result<String> {
         val uid = requireUserId()
+        if (receiverId.isBlank() || receiverId == uid) {
+            return Result.failure(IllegalArgumentException("নিজের অ্যাকাউন্টে মেসেজ পাঠানো যাবে না।"))
+        }
         val docRef = db.collection("messages").document()
         return try {
             val payload = mapOf(
                 "senderId" to uid,
                 "senderName" to senderName.trim(),
+                "senderPhotoUrl" to senderPhotoUrl.trim(),
                 "receiverId" to receiverId,
                 "receiverName" to receiverName.trim(),
                 "subject" to subject.trim(),
@@ -549,21 +794,82 @@ class QawmiRepository(
         }
     }
 
-    // --- 7. NOTIFICATIONS (নোটিফিকেশন) ---
+    suspend fun markConversationMessagesAsRead(otherUserId: String, messages: List<DirectMessage>): Result<Unit> {
+        val uid = requireUserId()
+        val unreadFromPartner = messages.filter {
+            it.senderId == otherUserId && it.receiverId == uid && !it.isRead && it.id.isNotBlank()
+        }
+        if (unreadFromPartner.isEmpty()) return Result.success(Unit)
+
+        return try {
+            val batch = db.batch()
+            for (msg in unreadFromPartner) {
+                batch.update(db.collection("messages").document(msg.id), "isRead", true)
+            }
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, "messages")
+            Result.failure(e)
+        }
+    }
+
+    // --- 7. NOTIFICATIONS (ব্যক্তিগত ও কমিউনিটি নোটিফিকেশন, অপঠিত ব্যাজ ও অ্যাডমিন ঘোষণা) ---
 
     fun observeNotifications(userId: String): Flow<List<AppNotification>> {
-        val path = "notifications"
-        return db.collection(path)
+        val notifPath = "notifications"
+        val readsPath = "users/$userId/notification_reads"
+
+        val directFlow = db.collection(notifPath)
             .whereEqualTo("recipientId", userId)
             .snapshots()
             .map { snapshot ->
                 snapshot.toObjects(AppNotification::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, notifPath)
                 throw error
             }
+
+        val broadcastFlow = db.collection(notifPath)
+            .whereEqualTo("recipientId", "ALL_USERS")
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toObjects(AppNotification::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, notifPath)
+                throw error
+            }
+
+        val readReceiptsFlow = db.collection("users")
+            .document(userId)
+            .collection("notification_reads")
+            .whereEqualTo("userId", userId)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toObjects(NotificationReadReceipt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .map { it.notificationId.ifBlank { it.id } }
+                    .toSet()
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, readsPath)
+                throw error
+            }
+
+        return combine(directFlow, broadcastFlow, readReceiptsFlow) { directList, broadcastList, readIds ->
+            (directList + broadcastList)
+                .distinctBy { it.id }
+                // Never show self-generated notifications to the user who created the post/action
+                .filter { it.senderId != userId }
+                .map { notif ->
+                    val resolvedRead = notif.isRead || readIds.contains(notif.id)
+                    notif.copy(isRead = resolvedRead)
+                }
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     suspend fun createNotification(
@@ -575,12 +881,16 @@ class QawmiRepository(
         referenceId: String
     ): Result<String> {
         val uid = requireUserId()
+        // Never create a direct notification addressed to oneself
+        if (recipientId == uid) {
+            return Result.success("")
+        }
         val docRef = db.collection("notifications").document()
         return try {
             val payload = mapOf(
                 "recipientId" to recipientId,
                 "senderId" to uid,
-                "senderName" to senderName.trim(),
+                "senderName" to senderName.trim().ifBlank { "কওমি কর্মসংস্থান" },
                 "title" to title.trim(),
                 "message" to message.trim(),
                 "type" to type,
@@ -598,16 +908,83 @@ class QawmiRepository(
         }
     }
 
-    suspend fun markNotificationAsRead(notificationId: String): Result<Unit> {
+    suspend fun sendAdminAnnouncement(
+        adminName: String,
+        title: String,
+        message: String
+    ): Result<String> {
         requireUserId()
-        val docRef = db.collection("notifications").document(notificationId)
+        return createNotification(
+            recipientId = "ALL_USERS",
+            senderName = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" },
+            title = title.trim(),
+            message = message.trim(),
+            type = "ANNOUNCEMENT",
+            referenceId = "admin_announcement"
+        )
+    }
+
+    suspend fun markNotificationAsRead(notification: AppNotification): Result<Unit> {
+        val uid = requireUserId()
+        if (notification.id.isBlank()) return Result.success(Unit)
+        val readDocRef = db.collection("users")
+            .document(uid)
+            .collection("notification_reads")
+            .document(notification.id)
         return try {
-            docRef.update("isRead", true).await()
+            val readPayload = mapOf(
+                "userId" to uid,
+                "notificationId" to notification.id,
+                "readAt" to FieldValue.serverTimestamp()
+            )
+            readDocRef.set(readPayload).await()
+
+            if (notification.recipientId == uid) {
+                db.collection("notifications")
+                    .document(notification.id)
+                    .update("isRead", true)
+                    .await()
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            handleFirestoreError(e, OperationType.WRITE, readDocRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun markAllNotificationsAsRead(notifications: List<AppNotification>): Result<Unit> {
+        val uid = requireUserId()
+        val unreadList = notifications.filter { !it.isRead && it.id.isNotBlank() }
+        if (unreadList.isEmpty()) return Result.success(Unit)
+
+        return try {
+            val batch = db.batch()
+            for (notif in unreadList) {
+                val readRef = db.collection("users")
+                    .document(uid)
+                    .collection("notification_reads")
+                    .document(notif.id)
+                batch.set(
+                    readRef,
+                    mapOf(
+                        "userId" to uid,
+                        "notificationId" to notif.id,
+                        "readAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                if (notif.recipientId == uid) {
+                    val notifRef = db.collection("notifications").document(notif.id)
+                    batch.update(notifRef, "isRead", true)
+                }
+            }
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, "users/$uid/notification_reads")
             Result.failure(e)
         }
     }

@@ -1,18 +1,15 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -22,15 +19,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountBalance
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,6 +40,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -52,6 +53,8 @@ import com.example.ui.theme.QawmiGold
 import com.example.ui.theme.QawmiGoldLight
 import com.example.ui.theme.QawmiMintBorder
 import com.example.ui.theme.QawmiMintSurface
+import com.example.ui.theme.QawmiSeekerBlue
+import com.example.ui.util.ProfilePhotoHelper
 
 @Composable
 fun IslamicStarEmblem(
@@ -174,14 +177,31 @@ fun QawmiTopBar(
                     modifier = Modifier.size(25.dp)
                 )
             }
-            // Red notification dot indicator matching the reference UI
-            Box(
-                modifier = Modifier
-                    .padding(top = 10.dp, end = 10.dp)
-                    .size(if (unreadNotificationCount > 0) 10.dp else 8.dp)
-                    .clip(CircleShape)
-                    .background(QawmiAlertRed)
-            )
+            if (unreadNotificationCount > 0) {
+                val badgeText = if (unreadNotificationCount > 99) {
+                    "৯৯+"
+                } else {
+                    com.example.ui.util.IslamicDateAndPrayerHelper.toBanglaDigits(unreadNotificationCount.toString())
+                }
+                Box(
+                    modifier = Modifier
+                        .padding(top = 4.dp, end = 4.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(QawmiAlertRed)
+                        .border(1.dp, Color.White, RoundedCornerShape(50))
+                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                        .testTag("top_bar_unread_badge"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = badgeText,
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        lineHeight = 11.sp
+                    )
+                }
+            }
         }
     }
 }
@@ -360,21 +380,174 @@ fun MadrasaThumbIllustration(
 }
 
 @Composable
-fun CandidateAvatarPlaceholder(
+fun UserAvatarImage(
+    photoUrl: String,
+    displayName: String = "",
+    size: Dp = 64.dp,
+    borderColor: Color = QawmiGold,
+    borderWidth: Dp = 2.dp,
+    showOnlineIndicator: Boolean = false,
+    isOnline: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = modifier.size(64.dp),
-        shape = CircleShape,
-        color = QawmiMintSurface
+    val decodedBitmap = remember(photoUrl) {
+        ProfilePhotoHelper.decodeDataUrlToImageBitmap(photoUrl)
+    }
+
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.BottomEnd
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(
-                imageVector = Icons.Default.Person,
-                contentDescription = "প্রার্থীর ছবি",
-                tint = QawmiDeepGreen,
-                modifier = Modifier.size(40.dp)
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .border(borderWidth, borderColor, CircleShape),
+            shape = CircleShape,
+            color = QawmiMintSurface
+        ) {
+            when {
+                decodedBitmap != null -> {
+                    Image(
+                        bitmap = decodedBitmap,
+                        contentDescription = displayName.ifBlank { "প্রোফাইল ছবি" },
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                    )
+                }
+                photoUrl == ProfilePhotoHelper.PRESET_SCHOLAR_EMERALD -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(QawmiDarkGreen, QawmiDeepGreen)
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoStories,
+                            contentDescription = displayName,
+                            tint = QawmiGold,
+                            modifier = Modifier.size(size * 0.52f)
+                        )
+                    }
+                }
+                photoUrl == ProfilePhotoHelper.PRESET_SCHOLAR_GOLD -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(Color(0xFF7B5804), QawmiGold)
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.WorkspacePremium,
+                            contentDescription = displayName,
+                            tint = Color.White,
+                            modifier = Modifier.size(size * 0.52f)
+                        )
+                    }
+                }
+                photoUrl == ProfilePhotoHelper.PRESET_MUHTAMIM_ROYAL -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(Color(0xFF154360), QawmiSeekerBlue)
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Person,
+                            contentDescription = displayName,
+                            tint = Color.White,
+                            modifier = Modifier.size(size * 0.56f)
+                        )
+                    }
+                }
+                photoUrl == ProfilePhotoHelper.PRESET_MADRASA_DOME -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(QawmiDeepGreen, Color(0xFF1B5E20))
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AccountBalance,
+                            contentDescription = displayName,
+                            tint = QawmiGoldLight,
+                            modifier = Modifier.size(size * 0.52f)
+                        )
+                    }
+                }
+                else -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(QawmiMintSurface, Color(0xFFD2EFE4))
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val initial = displayName.trim().firstOrNull()?.toString().orEmpty()
+                        if (initial.isNotBlank()) {
+                            Text(
+                                text = initial,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = (size.value * 0.38f).sp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = "প্রার্থীর ছবি",
+                                tint = QawmiDeepGreen,
+                                modifier = Modifier.size(size * 0.58f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showOnlineIndicator) {
+            Box(
+                modifier = Modifier
+                    .size((size.value * 0.25f).coerceIn(10f, 18f).dp)
+                    .clip(CircleShape)
+                    .background(if (isOnline) Color(0xFF00C853) else Color(0xFF9E9E9E))
+                    .border(2.dp, Color.White, CircleShape)
             )
         }
     }
+}
+
+@Composable
+fun CandidateAvatarPlaceholder(
+    photoUrl: String = "",
+    displayName: String = "",
+    modifier: Modifier = Modifier
+) {
+    UserAvatarImage(
+        photoUrl = photoUrl,
+        displayName = displayName,
+        size = 64.dp,
+        borderColor = QawmiMintBorder,
+        borderWidth = 1.5.dp,
+        modifier = modifier
+    )
 }

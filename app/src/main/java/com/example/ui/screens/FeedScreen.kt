@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalance
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CalendarToday
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.WorkOutline
@@ -57,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -67,8 +70,11 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.BookmarkItem
 import com.example.data.model.FeedPost
 import com.example.ui.components.CandidateAvatarPlaceholder
+import com.example.ui.components.IslamicStarEmblem
 import com.example.ui.components.MadrasaThumbIllustration
+import com.example.ui.theme.QawmiDarkGreen
 import com.example.ui.theme.QawmiDeepGreen
+import com.example.ui.theme.QawmiGold
 import com.example.ui.theme.QawmiMintBorder
 import com.example.ui.theme.QawmiMintSurface
 import com.example.ui.theme.QawmiSeekerBlue
@@ -80,6 +86,7 @@ import com.example.ui.util.IslamicDateAndPrayerHelper
 import com.example.ui.viewmodel.FeedFilterTab
 import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.UiState
+import com.google.firebase.Timestamp
 
 @Composable
 fun FeedScreen(
@@ -89,12 +96,14 @@ fun FeedScreen(
     selectedDistrict: String,
     searchQuery: String,
     currentUserId: String,
+    isAdminUser: Boolean = false,
     onSelectFilter: (FeedFilterTab) -> Unit,
     onSelectDistrict: (String) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onApplyClick: (FeedPost) -> Unit,
     onViewProfileOrDetailClick: (FeedPost) -> Unit,
     onToggleBookmark: (FeedPost, Boolean) -> Unit,
+    onToggleBoostPost: (FeedPost, Boolean) -> Unit = { _, _ -> },
     onDeletePost: (String) -> Unit,
     onNavigate: (MainDestination) -> Unit
 ) {
@@ -239,25 +248,30 @@ fun FeedScreen(
                     selectedDistrict,
                     searchQuery
                 ) {
-                    feedPostsState.data.filter { post ->
-                        val matchesType = when (selectedFilter) {
-                            FeedFilterTab.ALL -> true
-                            FeedFilterTab.JOB_CIRCULAR -> post.postType == "JOB_CIRCULAR"
-                            FeedFilterTab.APPLICATIONS -> post.postType == "SEEKER_APPLICATION"
-                            FeedFilterTab.DISTRICT -> true
+                    feedPostsState.data
+                        .filter { post ->
+                            val matchesType = when (selectedFilter) {
+                                FeedFilterTab.ALL -> true
+                                FeedFilterTab.JOB_CIRCULAR -> post.postType == "JOB_CIRCULAR"
+                                FeedFilterTab.APPLICATIONS -> post.postType == "SEEKER_APPLICATION"
+                                FeedFilterTab.DISTRICT -> true
+                            }
+                            val matchesDistrict = selectedDistrict == "সকল জেলা" ||
+                                post.district.contains(selectedDistrict, ignoreCase = true) ||
+                                post.deadlineOrPreferredDistricts.contains(selectedDistrict, ignoreCase = true)
+
+                            val matchesSearch = searchQuery.isBlank() ||
+                                post.title.contains(searchQuery, ignoreCase = true) ||
+                                post.designation.contains(searchQuery, ignoreCase = true) ||
+                                post.district.contains(searchQuery, ignoreCase = true) ||
+                                post.qualification.contains(searchQuery, ignoreCase = true)
+
+                            matchesType && matchesDistrict && matchesSearch
                         }
-                        val matchesDistrict = selectedDistrict == "সকল জেলা" ||
-                            post.district.contains(selectedDistrict, ignoreCase = true) ||
-                            post.deadlineOrPreferredDistricts.contains(selectedDistrict, ignoreCase = true)
-
-                        val matchesSearch = searchQuery.isBlank() ||
-                            post.title.contains(searchQuery, ignoreCase = true) ||
-                            post.designation.contains(searchQuery, ignoreCase = true) ||
-                            post.district.contains(searchQuery, ignoreCase = true) ||
-                            post.qualification.contains(searchQuery, ignoreCase = true)
-
-                        matchesType && matchesDistrict && matchesSearch
-                    }
+                        .sortedWith(
+                            compareByDescending<FeedPost> { it.isBoosted }
+                                .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                        )
                 }
 
                 LazyColumn(
@@ -282,6 +296,7 @@ fun FeedScreen(
                                 post = post,
                                 isBookmarked = isBookmarked,
                                 isOwnPost = post.authorId == currentUserId,
+                                isAdminUser = isAdminUser,
                                 onPrimaryActionClick = {
                                     if (post.postType == "JOB_CIRCULAR") {
                                         onApplyClick(post)
@@ -291,6 +306,7 @@ fun FeedScreen(
                                 },
                                 onCardClick = { onViewProfileOrDetailClick(post) },
                                 onBookmarkToggle = { onToggleBookmark(post, isBookmarked) },
+                                onBoostToggle = { onToggleBoostPost(post, !post.isBoosted) },
                                 onDeleteClick = { onDeletePost(post.id) }
                             )
                         }
@@ -373,12 +389,15 @@ fun FeedPostCardItem(
     post: FeedPost,
     isBookmarked: Boolean,
     isOwnPost: Boolean,
+    isAdminUser: Boolean = false,
     onPrimaryActionClick: () -> Unit,
     onCardClick: () -> Unit,
     onBookmarkToggle: () -> Unit,
+    onBoostToggle: () -> Unit = {},
     onDeleteClick: () -> Unit
 ) {
     val isCircular = post.postType == "JOB_CIRCULAR"
+    val isBoosted = post.isBoosted
     val relativeTime = remember(post.createdAt) {
         IslamicDateAndPrayerHelper.formatRelativeTimeBangla(post.createdAt)
     }
@@ -386,170 +405,248 @@ fun FeedPostCardItem(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, QawmiMintBorder, RoundedCornerShape(16.dp))
+            .border(
+                width = if (isBoosted) 2.dp else 1.dp,
+                color = if (isBoosted) QawmiGold else QawmiMintBorder,
+                shape = RoundedCornerShape(16.dp)
+            )
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onCardClick)
             .testTag("feed_post_card_${post.id}"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        colors = CardDefaults.cardColors(
+            containerColor = if (isBoosted) Color(0xFFFFFDF6) else Color.White
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isBoosted) 4.dp else 1.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            // Left Thumbnail or Candidate Avatar matching UI reference
-            if (isCircular) {
-                MadrasaThumbIllustration()
-            } else {
-                CandidateAvatarPlaceholder()
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                // Top Row: Badge + Relative Time
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Attractive Boosted Top Ribbon for Admin-Boosted Circulars/Posts
+            if (isBoosted) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(QawmiDarkGreen, QawmiDeepGreen, Color(0xFF0E684D))
+                            )
+                        )
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("boosted_badge_${post.id}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IslamicStarEmblem(size = 15.dp)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isCircular) "বিশেষ খেদমত বিজ্ঞপ্তি (Boosted)" else "বিশেষ খেদমত আবেদন (Boosted)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = QawmiGold,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                     Surface(
                         shape = RoundedCornerShape(50),
-                        color = if (isCircular) QawmiDeepGreen else QawmiSeekerBlue
+                        color = QawmiGold.copy(alpha = 0.22f)
                     ) {
-                        Text(
-                            text = if (isCircular) "নিয়োগ বিজ্ঞপ্তি" else "চাকরিপ্রার্থীর আবেদন",
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Text(
-                        text = relativeTime,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = QawmiTextMuted
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Title + Verified check if verified madrasa
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = post.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = QawmiTextDark,
-                        fontWeight = FontWeight.Bold
-                    )
-                    if (post.isVerifiedMadrasa) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Default.Verified,
-                            contentDescription = "যাচাইকৃত মাদরাসা",
-                            tint = QawmiVerifiedGreen,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Info Rows matching UI reference
-                val locationDisplay = if (post.upazilaOrLocation.isNotBlank() && post.upazilaOrLocation != post.district) {
-                    "${post.upazilaOrLocation}, ${post.district}"
-                } else {
-                    post.district
-                }
-                FeedDetailLine(
-                    icon = Icons.Default.LocationOn,
-                    text = locationDisplay
-                )
-                FeedDetailLine(
-                    icon = Icons.Default.WorkOutline,
-                    text = "পদ: ${post.designation}"
-                )
-                FeedDetailLine(
-                    icon = Icons.Default.MenuBook,
-                    text = "শিক্ষাগত যোগ্যতা: ${post.qualification}"
-                )
-                if (isCircular) {
-                    FeedDetailLine(
-                        icon = Icons.Default.Payments,
-                        text = "বেতন: ${post.salaryOrExperience}"
-                    )
-                    FeedDetailLine(
-                        icon = Icons.Default.CalendarToday,
-                        text = "আবেদনের শেষ তারিখ: ${post.deadlineOrPreferredDistricts}"
-                    )
-                } else {
-                    FeedDetailLine(
-                        icon = Icons.Default.Payments,
-                        text = "অভিজ্ঞতা: ${post.salaryOrExperience}"
-                    )
-                    FeedDetailLine(
-                        icon = Icons.Default.CalendarToday,
-                        text = "পছন্দের জেলা: ${post.deadlineOrPreferredDistricts}"
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Bottom Action Button + Bookmark Icon
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Button(
-                        onClick = onPrimaryActionClick,
-                        shape = RoundedCornerShape(50),
-                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .height(34.dp)
-                            .testTag("post_action_btn_${post.id}"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = QawmiDeepGreen,
-                            contentColor = Color.White
-                        )
-                    ) {
-                        Text(
-                            text = if (isCircular) "আবেদন করুন" else "প্রোফাইল দেখুন",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (isOwnPost) {
-                            IconButton(
-                                onClick = onDeleteClick,
-                                modifier = Modifier.size(34.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.DeleteOutline,
-                                    contentDescription = "পোস্ট মুছুন",
-                                    tint = Color(0xFFC62828),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        }
-                        IconButton(
-                            onClick = onBookmarkToggle,
-                            modifier = Modifier
-                                .size(34.dp)
-                                .testTag("bookmark_btn_${post.id}")
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                                contentDescription = "পছন্দের খেদমতে সংরক্ষণ",
-                                tint = QawmiDeepGreen,
-                                modifier = Modifier.size(22.dp)
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = QawmiGold,
+                                modifier = Modifier.size(12.dp)
                             )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "শীর্ষ বিজ্ঞপ্তি",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                // Left Thumbnail or Candidate Avatar matching UI reference
+                if (isCircular) {
+                    MadrasaThumbIllustration()
+                } else {
+                    CandidateAvatarPlaceholder(
+                        photoUrl = post.authorPhotoUrl,
+                        displayName = post.authorName.ifBlank { post.title }
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    // Top Row: Badge + Relative Time
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (isCircular) QawmiDeepGreen else QawmiSeekerBlue
+                        ) {
+                            Text(
+                                text = if (isCircular) "নিয়োগ বিজ্ঞপ্তি" else "চাকরিপ্রার্থীর আবেদন",
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Text(
+                            text = relativeTime,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = QawmiTextMuted
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Title + Verified check if verified madrasa
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = post.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = QawmiTextDark,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (post.isVerifiedMadrasa) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.Verified,
+                                contentDescription = "যাচাইকৃত মাদরাসা",
+                                tint = QawmiVerifiedGreen,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Info Rows matching UI reference
+                    val locationDisplay = if (post.upazilaOrLocation.isNotBlank() && post.upazilaOrLocation != post.district) {
+                        "${post.upazilaOrLocation}, ${post.district}"
+                    } else {
+                        post.district
+                    }
+                    FeedDetailLine(
+                        icon = Icons.Default.LocationOn,
+                        text = locationDisplay
+                    )
+                    FeedDetailLine(
+                        icon = Icons.Default.WorkOutline,
+                        text = "পদ: ${post.designation}"
+                    )
+                    FeedDetailLine(
+                        icon = Icons.Default.MenuBook,
+                        text = "শিক্ষাগত যোগ্যতা: ${post.qualification}"
+                    )
+                    if (isCircular) {
+                        FeedDetailLine(
+                            icon = Icons.Default.Payments,
+                            text = "বেতন: ${post.salaryOrExperience}"
+                        )
+                        FeedDetailLine(
+                            icon = Icons.Default.CalendarToday,
+                            text = "আবেদনের শেষ তারিখ: ${post.deadlineOrPreferredDistricts}"
+                        )
+                    } else {
+                        FeedDetailLine(
+                            icon = Icons.Default.Payments,
+                            text = "অভিজ্ঞতা: ${post.salaryOrExperience}"
+                        )
+                        FeedDetailLine(
+                            icon = Icons.Default.CalendarToday,
+                            text = "পছন্দের জেলা: ${post.deadlineOrPreferredDistricts}"
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Bottom Action Button + Admin Boost + Bookmark Icon
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = onPrimaryActionClick,
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("post_action_btn_${post.id}"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = QawmiDeepGreen,
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text(
+                                text = if (isCircular) "আবেদন করুন" else "প্রোফাইল দেখুন",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isAdminUser) {
+                                IconButton(
+                                    onClick = onBoostToggle,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .testTag("admin_boost_btn_${post.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = if (isBoosted) "Boost সরান" else "বিজ্ঞপ্তি Boost করুন",
+                                        tint = if (isBoosted) QawmiGold else QawmiTextMuted,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                            if (isOwnPost || isAdminUser) {
+                                IconButton(
+                                    onClick = onDeleteClick,
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "পোস্ট মুছুন",
+                                        tint = Color(0xFFC62828),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = onBookmarkToggle,
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("bookmark_btn_${post.id}")
+                            ) {
+                                Icon(
+                                    imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                    contentDescription = "পছন্দের খেদমতে সংরক্ষণ",
+                                    tint = QawmiDeepGreen,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
                         }
                     }
                 }

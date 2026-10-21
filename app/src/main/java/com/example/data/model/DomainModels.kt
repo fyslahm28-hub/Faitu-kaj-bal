@@ -20,6 +20,11 @@ data class UserProfile(
     val bio: String = "",
     val contactInfo: String = "",
     val madrasaName: String = "",
+    val photoUrl: String = "", // Base64 data:image/jpeg;base64,... or avatar preset / URL stored in Firestore
+    @get:PropertyName("isOnline")
+    @set:PropertyName("isOnline")
+    var isOnline: Boolean = false,
+    @ServerTimestamp val lastSeenAt: Timestamp? = null,
     @get:PropertyName("isVerified")
     @set:PropertyName("isVerified")
     var isVerified: Boolean = false,
@@ -32,6 +37,7 @@ data class FeedPost(
     @DocumentId val id: String = "",
     val authorId: String = "",
     val authorName: String = "",
+    val authorPhotoUrl: String = "",
     val postType: String = "JOB_CIRCULAR", // "JOB_CIRCULAR" (নিয়োগ বিজ্ঞপ্তি) or "SEEKER_APPLICATION" (চাকরিপ্রার্থীর আবেদন)
     val title: String = "",
     val district: String = "",
@@ -46,6 +52,9 @@ data class FeedPost(
     @get:PropertyName("isVerifiedMadrasa")
     @set:PropertyName("isVerifiedMadrasa")
     var isVerifiedMadrasa: Boolean = false,
+    @get:PropertyName("isBoosted")
+    @set:PropertyName("isBoosted")
+    var isBoosted: Boolean = false,
     val visibility: String = "PUBLIC", // "PUBLIC" or "ARCHIVED"
     val approvalStatus: String = "APPROVED", // "APPROVED", "PENDING", "REJECTED"
     @ServerTimestamp val createdAt: Timestamp? = null,
@@ -111,6 +120,7 @@ data class DirectMessage(
     @DocumentId val id: String = "",
     val senderId: String = "",
     val senderName: String = "",
+    val senderPhotoUrl: String = "",
     val receiverId: String = "",
     val receiverName: String = "",
     val subject: String = "",
@@ -124,15 +134,23 @@ data class DirectMessage(
 @IgnoreExtraProperties
 data class AppNotification(
     @DocumentId val id: String = "",
-    val recipientId: String = "",
+    val recipientId: String = "", // Specific userId or "ALL_USERS"
     val senderId: String = "",
     val senderName: String = "",
     val title: String = "",
     val message: String = "",
-    val type: String = "APPLICATION", // "APPLICATION", "MESSAGE", "VERIFICATION"
+    val type: String = "APPLICATION", // "APPLICATION", "MESSAGE", "VERIFICATION", "NEW_CIRCULAR", "NEW_APPLICATION", "ANNOUNCEMENT", "BOOST"
     val referenceId: String = "",
     @get:PropertyName("isRead")
     @set:PropertyName("isRead")
     var isRead: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class NotificationReadReceipt(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val notificationId: String = "",
+    @ServerTimestamp val readAt: Timestamp? = null
 )

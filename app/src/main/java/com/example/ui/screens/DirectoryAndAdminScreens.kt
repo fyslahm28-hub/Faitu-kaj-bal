@@ -83,12 +83,21 @@ import com.example.ui.util.IslamicDateAndPrayerHelper
 import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.UiState
 
+import androidx.compose.runtime.LaunchedEffect
+import com.example.data.model.UserProfile
+import com.example.ui.components.UserAvatarImage
+import com.example.ui.theme.QawmiAlertRed
+import com.example.ui.theme.QawmiSoftBg
+import com.google.firebase.Timestamp
+
 @Composable
 fun MadrasaDirectoryScreen(
     madrasasState: UiState<List<MadrasaProfile>>,
     onlyVerified: Boolean,
+    currentUserId: String = "",
     onRegisterMadrasaClick: () -> Unit,
-    onMessageOwnerClick: (String, String) -> Unit
+    onMessageOwnerClick: (String, String) -> Unit,
+    onInspectOwnerProfile: (String, String) -> Unit = { _, _ -> }
 ) {
     Column(
         modifier = Modifier
@@ -195,6 +204,7 @@ fun MadrasaDirectoryScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         items(list, key = { it.id }) { madrasa ->
+                            val isOwnMadrasa = madrasa.ownerId == currentUserId
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -260,16 +270,28 @@ fun MadrasaDirectoryScreen(
                                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Button(
-                                                onClick = { onMessageOwnerClick(madrasa.ownerId, madrasa.name) },
-                                                shape = RoundedCornerShape(50),
-                                                colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
-                                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                                                modifier = Modifier.height(32.dp)
-                                            ) {
-                                                Icon(Icons.Default.MailOutline, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text("পয়গাম পাঠান", style = MaterialTheme.typography.labelSmall)
+                                            if (!isOwnMadrasa && madrasa.ownerId.isNotBlank()) {
+                                                Button(
+                                                    onClick = { onMessageOwnerClick(madrasa.ownerId, madrasa.name) },
+                                                    shape = RoundedCornerShape(50),
+                                                    colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(32.dp)
+                                                ) {
+                                                    Icon(Icons.Default.MailOutline, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text("পয়গাম পাঠান", style = MaterialTheme.typography.labelSmall)
+                                                }
+                                            }
+                                            if (madrasa.ownerId.isNotBlank()) {
+                                                OutlinedButton(
+                                                    onClick = { onInspectOwnerProfile(madrasa.ownerId, madrasa.name) },
+                                                    shape = RoundedCornerShape(50),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(32.dp)
+                                                ) {
+                                                    Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                                                }
                                             }
                                             if (madrasa.contactPhone.isNotBlank()) {
                                                 Text(
@@ -432,6 +454,7 @@ fun SubmissionsManagementScreen(
     receivedState: UiState<List<KhedmotSubmission>>,
     onUpdateStatus: (KhedmotSubmission, String) -> Unit,
     onMessageUser: (String, String) -> Unit,
+    onInspectUserProfile: (String, String) -> Unit = { _, _ -> },
     onNavigatePublishApplication: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) } // 0 = আমার প্রেরিত আবেদন, 1 = মাদরাসায় প্রাপ্ত আবেদন
@@ -573,6 +596,14 @@ fun SubmissionsManagementScreen(
                                                 Text("কবুল করুন", style = MaterialTheme.typography.labelSmall)
                                             }
                                             OutlinedButton(
+                                                onClick = { onInspectUserProfile(sub.applicantId, sub.applicantName) },
+                                                shape = RoundedCornerShape(50),
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                modifier = Modifier.height(32.dp)
+                                            ) {
+                                                Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                                            }
+                                            OutlinedButton(
                                                 onClick = { onMessageUser(sub.applicantId, sub.applicantName) },
                                                 shape = RoundedCornerShape(50),
                                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
@@ -582,13 +613,23 @@ fun SubmissionsManagementScreen(
                                             }
                                         }
                                     } else {
-                                        OutlinedButton(
-                                            onClick = { onMessageUser(sub.recipientId, sub.postTitle) },
-                                            shape = RoundedCornerShape(50),
-                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                            modifier = Modifier.height(32.dp)
-                                        ) {
-                                            Text("মাদরাসা কর্তৃপক্ষকে মেসেজ পাঠান", style = MaterialTheme.typography.labelSmall)
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            OutlinedButton(
+                                                onClick = { onInspectUserProfile(sub.recipientId, sub.postTitle) },
+                                                shape = RoundedCornerShape(50),
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                modifier = Modifier.height(32.dp)
+                                            ) {
+                                                Text("মাদরাসা প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                                            }
+                                            OutlinedButton(
+                                                onClick = { onMessageUser(sub.recipientId, sub.postTitle) },
+                                                shape = RoundedCornerShape(50),
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                modifier = Modifier.height(32.dp)
+                                            ) {
+                                                Text("মাদরাসা কর্তৃপক্ষকে মেসেজ পাঠান", style = MaterialTheme.typography.labelSmall)
+                                            }
                                         }
                                     }
                                 }
@@ -601,20 +642,118 @@ fun SubmissionsManagementScreen(
     }
 }
 
+private data class ConversationSummary(
+    val partnerId: String,
+    val partnerName: String,
+    val partnerPhotoUrl: String,
+    val isPartnerOnline: Boolean,
+    val partnerLastSeenAt: Timestamp?,
+    val latestMessage: DirectMessage,
+    val unreadCount: Int
+)
+
 @Composable
 fun MessagesScreen(
     messagesState: UiState<List<DirectMessage>>,
     currentUserId: String,
     targetUser: Pair<String, String>?,
+    partnerProfiles: Map<String, UserProfile> = emptyMap(),
+    activePartnerProfile: UserProfile? = null,
     isSubmitting: Boolean,
     onSendMessage: (receiverId: String, receiverName: String, subject: String, body: String) -> Unit,
     onSelectRecipient: (String, String) -> Unit,
-    onMarkRead: (String) -> Unit
+    onClearRecipient: () -> Unit = {},
+    onMarkRead: (String) -> Unit,
+    onMarkConversationRead: (String) -> Unit = {},
+    onInspectUserProfile: (String, String) -> Unit = { _, _ -> }
 ) {
     var receiverId by remember(targetUser) { mutableStateOf(targetUser?.first.orEmpty()) }
     var receiverName by remember(targetUser) { mutableStateOf(targetUser?.second.orEmpty()) }
     var subject by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
+
+    val allMessages = remember(messagesState) {
+        (messagesState as? UiState.Success)?.data ?: emptyList()
+    }
+
+    val totalUnreadMessagesCount = remember(allMessages, currentUserId) {
+        allMessages.count { it.receiverId == currentUserId && !it.isRead }
+    }
+
+    // Group messages into Conversation Threads by partnerId
+    val conversationThreads = remember(allMessages, currentUserId, partnerProfiles) {
+        allMessages
+            .groupBy { msg ->
+                if (msg.senderId == currentUserId) msg.receiverId else msg.senderId
+            }
+            .filterKeys { it.isNotBlank() && it != currentUserId }
+            .map { (partnerId, msgs) ->
+                val sortedDesc = msgs.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                val latest = sortedDesc.first()
+                val liveProfile = partnerProfiles[partnerId]
+                val fallbackName = msgs.firstNotNullOfOrNull { m ->
+                    if (m.senderId == partnerId) m.senderName.takeIf { it.isNotBlank() }
+                    else m.receiverName.takeIf { it.isNotBlank() }
+                } ?: "সম্মানিত দ্বীনি ভাই"
+                val fallbackPhoto = msgs.firstNotNullOfOrNull { m ->
+                    if (m.senderId == partnerId) m.senderPhotoUrl.takeIf { it.isNotBlank() } else null
+                }.orEmpty()
+
+                val unreadFromPartner = msgs.count { it.senderId == partnerId && it.receiverId == currentUserId && !it.isRead }
+
+                ConversationSummary(
+                    partnerId = partnerId,
+                    partnerName = liveProfile?.fullName?.takeIf { it.isNotBlank() } ?: fallbackName,
+                    partnerPhotoUrl = liveProfile?.photoUrl?.takeIf { it.isNotBlank() } ?: fallbackPhoto,
+                    isPartnerOnline = liveProfile?.isOnline == true,
+                    partnerLastSeenAt = liveProfile?.lastSeenAt,
+                    latestMessage = latest,
+                    unreadCount = unreadFromPartner
+                )
+            }
+            .sortedByDescending { it.latestMessage.createdAt ?: Timestamp(0, 0) }
+    }
+
+    // Active conversation messages sorted chronologically (oldest -> newest) for two-way chat view
+    val activeConversationMessages = remember(allMessages, currentUserId, receiverId) {
+        if (receiverId.isBlank()) {
+            emptyList()
+        } else {
+            allMessages
+                .filter {
+                    (it.senderId == currentUserId && it.receiverId == receiverId) ||
+                        (it.senderId == receiverId && it.receiverId == currentUserId)
+                }
+                .sortedBy { it.createdAt ?: Timestamp(0, 0) }
+        }
+    }
+
+    // Automatically mark unread incoming messages in the open conversation as read
+    LaunchedEffect(receiverId, activeConversationMessages.size) {
+        if (receiverId.isNotBlank()) {
+            val hasUnread = activeConversationMessages.any {
+                it.senderId == receiverId && it.receiverId == currentUserId && !it.isRead
+            }
+            if (hasUnread) {
+                onMarkConversationRead(receiverId)
+            }
+        }
+    }
+
+    val resolvedPartnerProfile = activePartnerProfile ?: partnerProfiles[receiverId]
+    val resolvedPartnerName = resolvedPartnerProfile?.fullName?.takeIf { it.isNotBlank() }
+        ?: receiverName.ifBlank { "সম্মানিত প্রাপক" }
+    val resolvedPartnerPhoto = resolvedPartnerProfile?.photoUrl.orEmpty()
+    val isPartnerOnline = resolvedPartnerProfile?.isOnline == true
+    val partnerStatusText = remember(isPartnerOnline, resolvedPartnerProfile?.lastSeenAt) {
+        if (isPartnerOnline) {
+            "অনলাইন (এখন সক্রিয়)"
+        } else if (resolvedPartnerProfile?.lastSeenAt != null) {
+            "অফলাইন • সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(resolvedPartnerProfile.lastSeenAt)}"
+        } else {
+            "অফলাইন"
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -622,7 +761,55 @@ fun MessagesScreen(
             .padding(14.dp)
             .testTag("messages_screen")
     ) {
-        // Compose Message Box if a recipient is selected
+        // 1. INBOX HEADER WITH UNREAD MESSAGE COUNT
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = QawmiMintSurface)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "পয়গাম ইনবক্স ও রিয়েল-টাইম কথোপকথন",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "মোট কথোপকথন: ${IslamicDateAndPrayerHelper.toBanglaDigits(conversationThreads.size.toString())} টি • অপঠিত পয়গাম: ${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} টি",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = QawmiTextSecondary
+                    )
+                }
+                if (totalUnreadMessagesCount > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = QawmiAlertRed,
+                        modifier = Modifier.testTag("unread_messages_count_badge")
+                    ) {
+                        Text(
+                            text = "${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} অপঠিত",
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 2. ACTIVE CONVERSATION HEADER + COMPOSER (When a recipient is selected)
         if (receiverId.isNotBlank()) {
             Card(
                 modifier = Modifier
@@ -632,15 +819,156 @@ fun MessagesScreen(
                 colors = CardDefaults.cardColors(containerColor = Color.White)
             ) {
                 Column(
-                    modifier = Modifier.padding(14.dp),
+                    modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        text = "প্রাপক: $receiverName",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = QawmiDeepGreen,
-                        fontWeight = FontWeight.Bold
-                    )
+                    // Partner Header with Avatar, Online/Offline & Last Seen, Profile Link, and Close
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(QawmiSoftBg)
+                            .clickable { onInspectUserProfile(receiverId, resolvedPartnerName) }
+                            .padding(10.dp)
+                            .testTag("active_chat_partner_header"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            UserAvatarImage(
+                                photoUrl = resolvedPartnerPhoto,
+                                displayName = resolvedPartnerName,
+                                size = 44.dp,
+                                borderColor = if (isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
+                                borderWidth = 1.5.dp,
+                                showOnlineIndicator = true,
+                                isOnline = isPartnerOnline
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "প্রাপক: $resolvedPartnerName",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = QawmiDeepGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = partnerStatusText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.testTag("active_partner_presence_text")
+                                )
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = { onInspectUserProfile(receiverId, resolvedPartnerName) },
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier
+                                    .height(28.dp)
+                                    .testTag("inspect_partner_profile_button")
+                            ) {
+                                Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    receiverId = ""
+                                    receiverName = ""
+                                    onClearRecipient()
+                                },
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("ইনবক্স", style = MaterialTheme.typography.labelSmall, color = QawmiTextSecondary)
+                            }
+                        }
+                    }
+
+                    // Two-way Conversation History inside the active chat
+                    if (activeConversationMessages.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFFF6FBF8))
+                                .padding(10.dp)
+                                .testTag("conversation_messages_list"),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "কথোপকথনের ইতিহাস (${IslamicDateAndPrayerHelper.toBanglaDigits(activeConversationMessages.size.toString())} টি বার্তা)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiTextSecondary,
+                                fontWeight = FontWeight.Bold
+                            )
+                            activeConversationMessages.takeLast(6).forEach { chatMsg ->
+                                val sentByMe = chatMsg.senderId == currentUserId
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = if (sentByMe) Alignment.CenterEnd else Alignment.CenterStart
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(
+                                            topStart = 12.dp,
+                                            topEnd = 12.dp,
+                                            bottomStart = if (sentByMe) 12.dp else 2.dp,
+                                            bottomEnd = if (sentByMe) 2.dp else 12.dp
+                                        ),
+                                        color = if (sentByMe) QawmiDeepGreen else Color.White,
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.86f)
+                                            .border(
+                                                width = 1.dp,
+                                                color = if (sentByMe) QawmiDeepGreen else QawmiMintBorder,
+                                                shape = RoundedCornerShape(12.dp)
+                                            )
+                                    ) {
+                                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                                            if (chatMsg.subject.isNotBlank() && chatMsg.subject != "খেদমত সংক্রান্ত যোগাযোগ") {
+                                                Text(
+                                                    text = "বিষয়: ${chatMsg.subject}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (sentByMe) QawmiGold else QawmiDeepGreen,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            Text(
+                                                text = chatMsg.body,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = if (sentByMe) Color.White else QawmiTextDark
+                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.End,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = buildString {
+                                                        append(IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt))
+                                                        if (sentByMe) {
+                                                            append(if (chatMsg.isRead) " • ✓✓ পঠিত" else " • ✓ প্রেরিত")
+                                                        }
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontSize = 10.sp,
+                                                    color = if (sentByMe) Color(0xFFDDF3EC) else QawmiTextMuted
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Compose Message Inputs
                     OutlinedTextField(
                         value = subject,
                         onValueChange = { subject = it },
@@ -656,12 +984,12 @@ fun MessagesScreen(
                         placeholder = { Text("আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ...") },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(86.dp)
+                            .height(78.dp)
                             .testTag("message_body_input")
                     )
                     Button(
                         onClick = {
-                            onSendMessage(receiverId, receiverName, subject, body)
+                            onSendMessage(receiverId, resolvedPartnerName, subject, body)
                             body = ""
                         },
                         enabled = !isSubmitting,
@@ -677,16 +1005,17 @@ fun MessagesScreen(
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
         }
 
+        // 3. INBOX CONVERSATION THREADS & MESSAGE HISTORY
         Text(
-            text = "আদান-প্রদানকৃত পয়গামসমূহ (মেসেজ ইনবক্স)",
+            text = "আদান-প্রদানকৃত পয়গামসমূহ (মেসেজ ইনবক্স ও ইতিহাস)",
             style = MaterialTheme.typography.titleSmall,
             color = QawmiTextDark,
             fontWeight = FontWeight.Bold
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         when (messagesState) {
             is UiState.Loading -> {
@@ -698,75 +1027,143 @@ fun MessagesScreen(
                 Text(messagesState.message, color = MaterialTheme.colorScheme.error)
             }
             is UiState.Success -> {
-                if (messagesState.data.isEmpty()) {
+                if (conversationThreads.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
-                            text = "এখনো কোনো পয়গাম আদান-প্রদান হয়নি।\nফিড বা মাদরাসা তালিকা থেকে যেকোনো প্রাপককে সরাসরি মেসেজ পাঠাতে পারবেন।",
+                            text = "এখনো কোনো পয়গাম আদান-প্রদান হয়নি।\nফিড, আবেদন বা মাদরাসা তালিকা থেকে যেকোনো প্রাপকের প্রোফাইলে গিয়ে মেসেজ পাঠাতে পারবেন।",
                             style = MaterialTheme.typography.bodyMedium,
                             color = QawmiTextSecondary,
                             textAlign = TextAlign.Center
                         )
                     }
                 } else {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(messagesState.data, key = { it.id }) { msg ->
-                            val isSentByMe = msg.senderId == currentUserId
-                            val otherUid = if (isSentByMe) msg.receiverId else msg.senderId
-                            val otherName = if (isSentByMe) msg.receiverName else msg.senderName
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("inbox_threads_list")
+                    ) {
+                        items(conversationThreads, key = { it.partnerId }) { thread ->
+                            val isSelectedThread = receiverId == thread.partnerId
+                            val latestMsg = thread.latestMessage
+                            val isLatestSentByMe = latestMsg.senderId == currentUserId
+                            val presenceBadge = if (thread.isPartnerOnline) {
+                                "অনলাইন"
+                            } else if (thread.partnerLastSeenAt != null) {
+                                "সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(thread.partnerLastSeenAt)}"
+                            } else {
+                                "অফলাইন"
+                            }
 
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp))
+                                    .border(
+                                        width = if (thread.unreadCount > 0 || isSelectedThread) 1.5.dp else 1.dp,
+                                        color = if (thread.unreadCount > 0) QawmiDeepGreen else if (isSelectedThread) QawmiGold else QawmiMintBorder,
+                                        shape = RoundedCornerShape(14.dp)
+                                    )
                                     .clickable {
-                                        if (!isSentByMe && !msg.isRead) {
-                                            onMarkRead(msg.id)
+                                        if (!isLatestSentByMe && !latestMsg.isRead) {
+                                            onMarkRead(latestMsg.id)
                                         }
-                                        receiverId = otherUid
-                                        receiverName = otherName
-                                        onSelectRecipient(otherUid, otherName)
-                                    },
+                                        onMarkConversationRead(thread.partnerId)
+                                        receiverId = thread.partnerId
+                                        receiverName = thread.partnerName
+                                        onSelectRecipient(thread.partnerId, thread.partnerName)
+                                    }
+                                    .testTag("inbox_thread_${thread.partnerId}"),
                                 shape = RoundedCornerShape(14.dp),
                                 colors = CardDefaults.cardColors(
-                                    containerColor = if (!isSentByMe && !msg.isRead) QawmiMintSurface else Color.White
+                                    containerColor = if (thread.unreadCount > 0) QawmiMintSurface else Color.White
                                 )
                             ) {
-                                Column(modifier = Modifier.padding(12.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    UserAvatarImage(
+                                        photoUrl = thread.partnerPhotoUrl,
+                                        displayName = thread.partnerName,
+                                        size = 48.dp,
+                                        borderColor = if (thread.isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
+                                        borderWidth = 1.5.dp,
+                                        showOnlineIndicator = true,
+                                        isOnline = thread.isPartnerOnline,
+                                        modifier = Modifier.clickable {
+                                            onInspectUserProfile(thread.partnerId, thread.partnerName)
+                                        }
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = thread.partnerName,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = QawmiDeepGreen,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(latestMsg.createdAt),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = QawmiTextMuted
+                                            )
+                                        }
+
                                         Text(
-                                            text = if (isSentByMe) "প্রাপক: ${msg.receiverName}" else "প্রেরক: ${msg.senderName}",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = QawmiDeepGreen,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text(
-                                            text = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(msg.createdAt),
+                                            text = presenceBadge,
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = QawmiTextMuted
+                                            color = if (thread.isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
+                                            fontSize = 10.5.sp,
+                                            fontWeight = if (thread.isPartnerOnline) FontWeight.Bold else FontWeight.Normal
                                         )
-                                    }
-                                    if (msg.subject.isNotBlank()) {
+
+                                        Spacer(modifier = Modifier.height(3.dp))
+
                                         Text(
-                                            text = "বিষয়: ${msg.subject}",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = QawmiTextDark
+                                            text = if (isLatestSentByMe) "আপনি: ${latestMsg.body}" else latestMsg.body,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = QawmiTextDark,
+                                            fontWeight = if (thread.unreadCount > 0) FontWeight.Bold else FontWeight.Normal,
+                                            maxLines = 2
                                         )
+
+                                        Spacer(modifier = Modifier.height(4.dp))
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "কথোপকথন খুলতে ট্যাপ করুন",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = QawmiSeekerBlue
+                                            )
+                                            if (thread.unreadCount > 0) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(50),
+                                                    color = QawmiDeepGreen,
+                                                    modifier = Modifier.testTag("thread_unread_badge_${thread.partnerId}")
+                                                ) {
+                                                    Text(
+                                                        text = "${IslamicDateAndPrayerHelper.toBanglaDigits(thread.unreadCount.toString())} টি নতুন",
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = Color.White,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = msg.body,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = QawmiTextDark
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = "উত্তর দিতে এখানে ট্যাপ করুন",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = QawmiSeekerBlue
-                                    )
                                 }
                             }
                         }
@@ -780,20 +1177,66 @@ fun MessagesScreen(
 @Composable
 fun NotificationsScreen(
     notificationsState: UiState<List<AppNotification>>,
-    onMarkNotificationRead: (String) -> Unit
+    onNotificationClick: (AppNotification) -> Unit,
+    onMarkAllRead: () -> Unit
 ) {
+    val unreadCount = remember(notificationsState) {
+        (notificationsState as? UiState.Success)?.data?.count { !it.isRead } ?: 0
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(14.dp)
             .testTag("notifications_screen")
     ) {
-        Text(
-            text = "সকল নোটিফিকেশন ও ইত্তেলা",
-            style = MaterialTheme.typography.titleMedium,
-            color = QawmiTextDark,
-            fontWeight = FontWeight.Bold
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "সকল নোটিফিকেশন ও ইত্তেলা",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = QawmiTextDark,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (unreadCount > 0) {
+                        "অপঠিত নোটিফিকেশন: ${IslamicDateAndPrayerHelper.toBanglaDigits(unreadCount.toString())} টি"
+                    } else {
+                        "আলহামদুলিল্লাহ, সকল নোটিফিকেশন পঠিত হয়েছে"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (unreadCount > 0) QawmiDeepGreen else QawmiTextSecondary,
+                    fontWeight = if (unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal
+                )
+            }
+
+            if (unreadCount > 0) {
+                OutlinedButton(
+                    onClick = onMarkAllRead,
+                    shape = RoundedCornerShape(50),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.testTag("mark_all_notifications_read_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = QawmiDeepGreen,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = "সব পঠিত করুন",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(10.dp))
 
         when (notificationsState) {
@@ -817,22 +1260,49 @@ fun NotificationsScreen(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "আপনার কোনো নতুন নোটিফিকেশন নেই।",
+                                text = "আপনার কোনো নোটিফিকেশন নেই।",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = QawmiTextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "নতুন নিয়োগ বিজ্ঞপ্তি, আবেদন, পয়গাম বা অ্যাডমিনের ঘোষণা আসলে এখানে তাৎক্ষণিক দেখা যাবে।",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = QawmiTextMuted,
+                                textAlign = TextAlign.Center
                             )
                         }
                     }
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(notificationsState.data, key = { it.id }) { notif ->
+                            val typeLabel = when (notif.type) {
+                                "NEW_CIRCULAR" -> "নতুন নিয়োগ বিজ্ঞপ্তি"
+                                "NEW_APPLICATION" -> "নতুন খেদমত আবেদন"
+                                "APPLICATION" -> "আবেদন সংক্রান্ত"
+                                "MESSAGE" -> "পয়গাম / মেসেজ"
+                                "ANNOUNCEMENT" -> "অ্যাডমিন ঘোষণা"
+                                "VERIFICATION" -> "যাচাইকরণ"
+                                "BOOST" -> "Boosted বিজ্ঞপ্তি"
+                                else -> "ইত্তেলা"
+                            }
+                            val badgeColor = when (notif.type) {
+                                "ANNOUNCEMENT", "BOOST" -> QawmiDarkGreen
+                                "NEW_APPLICATION", "MESSAGE" -> QawmiSeekerBlue
+                                else -> QawmiDeepGreen
+                            }
+
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp))
-                                    .clickable {
-                                        if (!notif.isRead) onMarkNotificationRead(notif.id)
-                                    },
+                                    .border(
+                                        width = if (!notif.isRead) 1.5.dp else 1.dp,
+                                        color = if (!notif.isRead) QawmiDeepGreen else QawmiMintBorder,
+                                        shape = RoundedCornerShape(14.dp)
+                                    )
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onNotificationClick(notif) }
+                                    .testTag("notification_card_${notif.id}"),
                                 shape = RoundedCornerShape(14.dp),
                                 colors = CardDefaults.cardColors(
                                     containerColor = if (!notif.isRead) QawmiMintSurface else Color.White
@@ -841,26 +1311,68 @@ fun NotificationsScreen(
                                 Column(modifier = Modifier.padding(12.dp)) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = notif.title,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = QawmiDeepGreen,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Surface(
+                                                shape = RoundedCornerShape(50),
+                                                color = badgeColor
+                                            ) {
+                                                Text(
+                                                    text = typeLabel,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color.White,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            if (!notif.isRead) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(8.dp)
+                                                        .clip(CircleShape)
+                                                        .background(Color(0xFFD32F2F))
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = "অপঠিত",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color(0xFFD32F2F),
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 10.5.sp
+                                                )
+                                            }
+                                        }
                                         Text(
                                             text = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(notif.createdAt),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = QawmiTextMuted
                                         )
                                     }
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = notif.title,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = QawmiDeepGreen,
+                                        fontWeight = if (!notif.isRead) FontWeight.Bold else FontWeight.SemiBold
+                                    )
+                                    Spacer(modifier = Modifier.height(3.dp))
                                     Text(
                                         text = notif.message,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = QawmiTextDark
                                     )
+                                    if (notif.senderName.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = "প্রেরক: ${notif.senderName}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = QawmiTextSecondary
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -876,10 +1388,16 @@ fun AdminPanelScreen(
     isAdminUser: Boolean,
     madrasasState: UiState<List<MadrasaProfile>>,
     feedPostsState: UiState<List<FeedPost>>,
-    onVerifyMadrasa: (String, Boolean) -> Unit,
-    onVerifyPost: (String, Boolean, String) -> Unit,
+    isSubmitting: Boolean = false,
+    onVerifyMadrasa: (MadrasaProfile, Boolean) -> Unit,
+    onVerifyPost: (FeedPost, Boolean, String) -> Unit,
+    onToggleBoostPost: (FeedPost, Boolean) -> Unit,
+    onSendAnnouncement: (title: String, message: String) -> Unit,
     onDeletePost: (String) -> Unit
 ) {
+    var announcementTitle by remember { mutableStateOf("") }
+    var announcementBody by remember { mutableStateOf("") }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -913,9 +1431,9 @@ fun AdminPanelScreen(
                     )
                     Text(
                         text = if (isAdminUser) {
-                            "আপনি অনুমোদিত অ্যাডমিন হিসেবে মাদরাসা যাচাইকরণ ও বিজ্ঞপ্তি তদারকি করতে পারবেন।"
+                            "আপনি অনুমোদিত অ্যাডমিন হিসেবে ঘোষণা প্রেরণ, বিজ্ঞপ্তি Boost এবং মাদরাসা যাচাইকরণ নিয়ন্ত্রণ করতে পারবেন।"
                         } else {
-                            "শুধুমাত্র অনুমোদিত অ্যাডমিন মাদরাসা যাচাইকরণ স্ট্যাটাস পরিবর্তন করতে পারেন।"
+                            "শুধুমাত্র অনুমোদিত অ্যাডমিন ঘোষণা প্রকাশ, বিজ্ঞপ্তি Boost ও মাদরাসা যাচাইকরণ নিয়ন্ত্রণ করতে পারেন।"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = QawmiTextSecondary
@@ -930,7 +1448,179 @@ fun AdminPanelScreen(
         val posts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (isAdminUser) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, QawmiDeepGreen, RoundedCornerShape(14.dp)),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "সকল ব্যবহারকারীর জন্য অ্যাডমিনের ঘোষণা (Push ও ইন-অ্যাপ ইত্তেলা)",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold
+                            )
+                            OutlinedTextField(
+                                value = announcementTitle,
+                                onValueChange = { announcementTitle = it },
+                                label = { Text("ঘোষণার শিরোনাম *") },
+                                placeholder = { Text("যেমন: নতুন শিক্ষাবর্ষের খেদমত বিজ্ঞপ্তি সংক্রান্ত জরুরি এলান") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("admin_announcement_title_input")
+                            )
+                            OutlinedTextField(
+                                value = announcementBody,
+                                onValueChange = { announcementBody = it },
+                                label = { Text("বিস্তারিত ঘোষণা / বার্তা *") },
+                                placeholder = { Text("সকল মুহতামিম ও মুদাররিস ভাইদের অবগতির জন্য জানানো যাচ্ছে যে...") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(88.dp)
+                                    .testTag("admin_announcement_body_input")
+                            )
+                            Button(
+                                onClick = {
+                                    onSendAnnouncement(announcementTitle, announcementBody)
+                                    announcementTitle = ""
+                                    announcementBody = ""
+                                },
+                                enabled = !isSubmitting,
+                                colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier
+                                    .align(Alignment.End)
+                                    .testTag("admin_send_announcement_button")
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("ঘোষণা প্রকাশ করুন")
+                            }
+                        }
+                    }
+                }
+            }
+
             item {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "প্রকাশিত বিজ্ঞপ্তি ও Boost নিয়ন্ত্রণ (${posts.size})",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = QawmiDeepGreen,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            items(posts, key = { "adm_p_${it.id}" }) { post ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = if (post.isBoosted) 2.dp else 1.dp,
+                            color = if (post.isBoosted) QawmiGold else QawmiMintBorder,
+                            shape = RoundedCornerShape(14.dp)
+                        ),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (post.isBoosted) Color(0xFFFFFDF6) else Color.White
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(post.title, fontWeight = FontWeight.Bold, color = QawmiTextDark)
+                                    if (post.isBoosted) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(50),
+                                            color = QawmiDarkGreen
+                                        ) {
+                                            Text(
+                                                text = "★ Boosted",
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = QawmiGold,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                                Text(
+                                    text = "পদ: ${post.designation} (${post.district})",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = QawmiTextSecondary
+                                )
+                            }
+                            if (isAdminUser) {
+                                IconButton(onClick = { onDeletePost(post.id) }) {
+                                    Icon(Icons.Default.DeleteOutline, contentDescription = "মুছুন", tint = Color(0xFFC62828))
+                                }
+                            }
+                        }
+
+                        if (isAdminUser) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Button(
+                                    onClick = { onToggleBoostPost(post, !post.isBoosted) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (post.isBoosted) QawmiDarkGreen else QawmiGold,
+                                        contentColor = if (post.isBoosted) Color.White else QawmiTextDark
+                                    ),
+                                    shape = RoundedCornerShape(50),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier
+                                        .height(32.dp)
+                                        .testTag("admin_panel_boost_btn_${post.id}")
+                                ) {
+                                    Text(
+                                        text = if (post.isBoosted) "★ Boost সরান" else "★ ফিডে Boost করুন",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                Button(
+                                    onClick = { onVerifyPost(post, !post.isVerifiedMadrasa, "APPROVED") },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (post.isVerifiedMadrasa) QawmiSeekerBlue else QawmiDeepGreen
+                                    ),
+                                    shape = RoundedCornerShape(50),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Text(
+                                        text = if (post.isVerifiedMadrasa) "আনভেরিফাই" else "ভেরিফাই ব্যাজ দিন",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "মাদরাসা যাচাইকরণ তালিকা (${madrasas.size})",
                     style = MaterialTheme.typography.titleSmall,
@@ -964,7 +1654,7 @@ fun AdminPanelScreen(
                         }
                         if (isAdminUser) {
                             Button(
-                                onClick = { onVerifyMadrasa(madrasa.id, !madrasa.isVerified) },
+                                onClick = { onVerifyMadrasa(madrasa, !madrasa.isVerified) },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = if (madrasa.isVerified) QawmiSeekerBlue else QawmiDeepGreen
                                 ),
@@ -974,57 +1664,6 @@ fun AdminPanelScreen(
                                     text = if (madrasa.isVerified) "বাতিল" else "যাচাইকৃত করুন",
                                     style = MaterialTheme.typography.labelSmall
                                 )
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "প্রকাশিত ফিড পোস্ট তদারকি (${posts.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = QawmiDeepGreen,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            items(posts, key = { "adm_p_${it.id}" }) { post ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(post.title, fontWeight = FontWeight.Bold, color = QawmiTextDark)
-                            Text("পদ: ${post.designation} (${post.district})", style = MaterialTheme.typography.bodySmall)
-                        }
-                        if (isAdminUser) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Button(
-                                    onClick = { onVerifyPost(post.id, !post.isVerifiedMadrasa, "APPROVED") },
-                                    colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
-                                    shape = RoundedCornerShape(50),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    modifier = Modifier.height(32.dp)
-                                ) {
-                                    Text(
-                                        if (post.isVerifiedMadrasa) "আনভেরিফাই" else "ভেরিফাই ব্যাজ",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                                IconButton(onClick = { onDeletePost(post.id) }) {
-                                    Icon(Icons.Default.DeleteOutline, contentDescription = "মুছুন", tint = Color(0xFFC62828))
-                                }
                             }
                         }
                     }

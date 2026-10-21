@@ -11,11 +11,15 @@ import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
 import com.example.data.model.UserProfile
 import com.example.data.repository.QawmiRepository
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -51,6 +55,7 @@ enum class FeedFilterTab {
     DISTRICT        // জেলা
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class QawmiViewModel(
     private val repository: QawmiRepository,
     val currentUserId: String,
@@ -91,12 +96,31 @@ class QawmiViewModel(
     private val _messageTargetUser = MutableStateFlow<Pair<String, String>?>(null) // (uid, name)
     val messageTargetUser: StateFlow<Pair<String, String>?> = _messageTargetUser.asStateFlow()
 
+    // Public profile inspection target (uid to fallbackName)
+    private val _inspectedUserTarget = MutableStateFlow<Pair<String, String>?>(null)
+    val inspectedUserTarget: StateFlow<Pair<String, String>?> = _inspectedUserTarget.asStateFlow()
+
     // Real-time Firestore StateFlows (Two-tier error handling)
     val userProfileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
         .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
         .catch { e ->
             Log.w(TAG, "Error observing user profile", e)
             emit(UiState.Error(e.localizedMessage ?: "প্রোফাইল লোড করা যায়নি"))
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    val inspectedUserProfileState: StateFlow<UiState<UserProfile?>> = _inspectedUserTarget
+        .flatMapLatest { target ->
+            if (target == null || target.first.isBlank()) {
+                flowOf(UiState.Success(null))
+            } else {
+                repository.observeUserProfile(target.first)
+                    .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
+                    .catch { e ->
+                        Log.w(TAG, "Error observing inspected user profile", e)
+                        emit(UiState.Error(e.localizedMessage ?: "ব্যবহারকারীর প্রোফাইল লোড করা যায়নি"))
+                    }
+            }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
@@ -148,6 +172,44 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
+    // Real-time profiles of all conversation partners in the inbox (for Online/Offline, Last Seen & Avatar)
+    val chatPartnerProfilesState: StateFlow<Map<String, UserProfile>> = messagesState
+        .flatMapLatest { msgState ->
+            val messages = (msgState as? UiState.Success)?.data ?: emptyList()
+            val partnerIds = messages.map { msg ->
+                if (msg.senderId == currentUserId) msg.receiverId else msg.senderId
+            }.toMutableSet()
+            _messageTargetUser.value?.first?.takeIf { it.isNotBlank() }?.let { partnerIds.add(it) }
+            val validIds = partnerIds.filter { it.isNotBlank() && it != currentUserId }
+            if (validIds.isEmpty()) {
+                flowOf(emptyMap())
+            } else {
+                val flows = validIds.map { partnerUid ->
+                    repository.observeUserProfile(partnerUid)
+                        .map { profile -> partnerUid to profile }
+                        .catch { emit(partnerUid to null) }
+                }
+                combine(flows) { pairs ->
+                    pairs.mapNotNull { (uid, profile) ->
+                        if (profile != null) uid to profile else null
+                    }.toMap()
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyMap())
+
+    val activeChatPartnerProfileState: StateFlow<UserProfile?> = _messageTargetUser
+        .flatMapLatest { target ->
+            val uid = target?.first.orEmpty()
+            if (uid.isBlank() || uid == currentUserId) {
+                flowOf(null)
+            } else {
+                repository.observeUserProfile(uid)
+                    .catch { emit(null) }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+
     val notificationsState: StateFlow<UiState<List<AppNotification>>> = repository.observeNotifications(currentUserId)
         .map<List<AppNotification>, UiState<List<AppNotification>>> { UiState.Success(it) }
         .catch { e ->
@@ -158,6 +220,29 @@ class QawmiViewModel(
 
     val isAdminUser: Boolean
         get() = currentUserEmail.equals("fyslahm28@gmail.com", ignoreCase = true)
+
+    init {
+        setUserOnlineStatus(true)
+    }
+
+    fun setUserOnlineStatus(isOnline: Boolean) {
+        viewModelScope.launch {
+            repository.updateUserPresence(
+                isOnline = isOnline,
+                defaultFullName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
+            )
+        }
+    }
+
+    private fun resolveActorDisplayName(fallback: String = "কওমি কর্মসংস্থান"): String {
+        return (userProfileState.value as? UiState.Success)?.data?.fullName
+            ?.takeIf { it.isNotBlank() }
+            ?: currentUserDisplayName.ifBlank { fallback }
+    }
+
+    private fun resolveActorPhotoUrl(): String {
+        return (userProfileState.value as? UiState.Success)?.data?.photoUrl.orEmpty()
+    }
 
     fun navigateTo(destination: MainDestination) {
         if (_currentDestination.value != destination) {
@@ -208,9 +293,26 @@ class QawmiViewModel(
         _selectedPostForDetail.value = post
     }
 
+    fun openUserProfileInspection(userId: String, fallbackName: String) {
+        if (userId.isBlank()) return
+        if (userId == currentUserId) {
+            _inspectedUserTarget.value = null
+            navigateTo(MainDestination.PROFILE)
+        } else {
+            _inspectedUserTarget.value = userId to fallbackName
+        }
+    }
+
+    fun closeUserProfileInspection() {
+        _inspectedUserTarget.value = null
+    }
+
     fun openDirectMessageTo(userId: String, userName: String) {
+        if (userId.isBlank() || userId == currentUserId) return
+        _inspectedUserTarget.value = null
         _messageTargetUser.value = userId to userName
         navigateTo(MainDestination.MESSAGES)
+        markConversationRead(userId)
     }
 
     fun clearMessageTarget() {
@@ -233,6 +335,7 @@ class QawmiViewModel(
         bio: String,
         contactInfo: String,
         madrasaName: String,
+        photoUrl: String = "",
         onComplete: () -> Unit = {}
     ) {
         if (fullName.isBlank()) {
@@ -242,6 +345,7 @@ class QawmiViewModel(
         viewModelScope.launch {
             _isSubmitting.value = true
             clearBanners()
+            val existingPhoto = (userProfileState.value as? UiState.Success)?.data?.photoUrl.orEmpty()
             val profile = UserProfile(
                 userId = currentUserId,
                 fullName = fullName.trim(),
@@ -253,15 +357,32 @@ class QawmiViewModel(
                 preferredDistricts = preferredDistricts.trim(),
                 bio = bio.trim(),
                 contactInfo = contactInfo.trim(),
-                madrasaName = madrasaName.trim()
+                madrasaName = madrasaName.trim(),
+                photoUrl = photoUrl.ifBlank { existingPhoto },
+                isOnline = true
             )
             val result = repository.saveUserProfile(profile)
             _isSubmitting.value = false
             result.onSuccess {
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার প্রোফাইল তথ্য সংরক্ষিত হয়েছে।"
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার প্রোফাইল তথ্য ও ছবি সংরক্ষিত হয়েছে।"
                 onComplete()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "প্রোফাইল সংরক্ষণে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun updateProfilePhotoImmediately(photoUrl: String) {
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val fallbackName = resolveActorDisplayName("আবদুল্লাহ")
+            val result = repository.updateProfilePhoto(photoUrl, fallbackName)
+            _isSubmitting.value = false
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার প্রোফাইল ছবি সফলভাবে সংরক্ষিত হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "প্রোফাইল ছবি সংরক্ষণে ত্রুটি হয়েছে।"
             }
         }
     }
@@ -288,7 +409,7 @@ class QawmiViewModel(
             _isSubmitting.value = true
             clearBanners()
             val result = repository.createFeedPost(
-                authorName = authorName.ifBlank { title },
+                authorName = authorName.ifBlank { resolveActorDisplayName(title) },
                 postType = postType,
                 title = title,
                 district = district,
@@ -298,7 +419,8 @@ class QawmiViewModel(
                 salaryOrExperience = salaryOrExperience.ifBlank { "আলোচনা সাপেক্ষ" },
                 deadlineOrPreferredDistricts = deadlineOrPreferredDistricts.ifBlank { "চলমান" },
                 description = description,
-                contactNumber = contactNumber
+                contactNumber = contactNumber,
+                authorPhotoUrl = resolveActorPhotoUrl()
             )
             _isSubmitting.value = false
             result.onSuccess {
@@ -418,8 +540,7 @@ class QawmiViewModel(
     fun updateReceivedSubmissionStatus(submission: KhedmotSubmission, newStatus: String) {
         viewModelScope.launch {
             clearBanners()
-            val actorName = (userProfileState.value as? UiState.Success)?.data?.fullName
-                ?.takeIf { it.isNotBlank() } ?: currentUserDisplayName.ifBlank { "মাদরাসা কর্তৃপক্ষ" }
+            val actorName = resolveActorDisplayName("মাদরাসা কর্তৃপক্ষ")
             val result = repository.updateSubmissionStatus(submission, newStatus, actorName)
             result.onSuccess {
                 _feedbackBanner.value = "আবেদনের অবস্থা হালনাগাদ করা হয়েছে এবং প্রার্থীকে নোটিফিকেশন পাঠানো হয়েছে।"
@@ -436,6 +557,10 @@ class QawmiViewModel(
         body: String,
         onSent: () -> Unit = {}
     ) {
+        if (receiverId.isBlank() || receiverId == currentUserId) {
+            _errorBanner.value = "সঠিক প্রাপক নির্বাচন করুন।"
+            return
+        }
         if (body.isBlank()) {
             _errorBanner.value = "অনুগ্রহ করে মেসেজের মূল বক্তব্য লিখুন।"
             return
@@ -443,14 +568,15 @@ class QawmiViewModel(
         viewModelScope.launch {
             _isSubmitting.value = true
             clearBanners()
-            val senderName = (userProfileState.value as? UiState.Success)?.data?.fullName
-                ?.takeIf { it.isNotBlank() } ?: currentUserDisplayName.ifBlank { "দ্বীনি ভাই" }
+            val senderName = resolveActorDisplayName("দ্বীনি ভাই")
+            val senderPhoto = resolveActorPhotoUrl()
             val result = repository.sendDirectMessage(
                 senderName = senderName,
                 receiverId = receiverId,
                 receiverName = receiverName,
                 subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                body = body
+                body = body,
+                senderPhotoUrl = senderPhoto
             )
             _isSubmitting.value = false
             result.onSuccess {
@@ -468,17 +594,73 @@ class QawmiViewModel(
         }
     }
 
-    fun markNotificationRead(notificationId: String) {
+    fun markConversationRead(otherUserId: String) {
+        if (otherUserId.isBlank() || otherUserId == currentUserId) return
+        val currentMessages = (messagesState.value as? UiState.Success)?.data ?: return
         viewModelScope.launch {
-            repository.markNotificationAsRead(notificationId)
+            repository.markConversationMessagesAsRead(otherUserId, currentMessages)
+        }
+    }
+
+    fun markNotificationRead(notification: AppNotification) {
+        if (notification.isRead) return
+        viewModelScope.launch {
+            repository.markNotificationAsRead(notification)
+        }
+    }
+
+    fun markAllNotificationsRead() {
+        val currentList = (notificationsState.value as? UiState.Success)?.data ?: return
+        val unreadList = currentList.filter { !it.isRead }
+        if (unreadList.isEmpty()) return
+        viewModelScope.launch {
+            val result = repository.markAllNotificationsAsRead(unreadList)
+            result.onSuccess {
+                _feedbackBanner.value = "সকল নোটিফিকেশন পঠিত হিসেবে চিহ্নিত করা হয়েছে।"
+            }
+        }
+    }
+
+    fun openNotificationTarget(notification: AppNotification) {
+        markNotificationRead(notification)
+        when (notification.type) {
+            "MESSAGE" -> {
+                if (notification.senderId.isNotBlank() && notification.senderId != currentUserId) {
+                    openDirectMessageTo(notification.senderId, notification.senderName)
+                } else {
+                    navigateTo(MainDestination.MESSAGES)
+                }
+            }
+            "APPLICATION" -> navigateTo(MainDestination.ABEDON)
+            "VERIFICATION" -> navigateTo(MainDestination.VERIFIED_MADRASAS)
+            "NEW_CIRCULAR", "BOOST" -> {
+                val matchingPost = (feedPostsState.value as? UiState.Success)?.data
+                    ?.find { it.id == notification.referenceId }
+                openFeedWithFilter(FeedFilterTab.JOB_CIRCULAR)
+                if (matchingPost != null) {
+                    openPostDetailDialog(matchingPost)
+                }
+            }
+            "NEW_APPLICATION" -> {
+                val matchingPost = (feedPostsState.value as? UiState.Success)?.data
+                    ?.find { it.id == notification.referenceId }
+                openFeedWithFilter(FeedFilterTab.APPLICATIONS)
+                if (matchingPost != null) {
+                    openPostDetailDialog(matchingPost)
+                }
+            }
+            "ANNOUNCEMENT" -> {
+                // Remains on Notifications after marking read
+            }
         }
     }
 
     // Admin Actions
-    fun adminVerifyMadrasa(madrasaId: String, verified: Boolean) {
+    fun adminVerifyMadrasa(madrasa: MadrasaProfile, verified: Boolean) {
         viewModelScope.launch {
             clearBanners()
-            val result = repository.adminToggleMadrasaVerification(madrasaId, verified)
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.adminToggleMadrasaVerification(madrasa, verified, adminName)
             result.onSuccess {
                 _feedbackBanner.value = if (verified) {
                     "মাদরাসাটি 'যাচাইকৃত মাদরাসা' হিসেবে অনুমোদিত হয়েছে।"
@@ -491,14 +673,56 @@ class QawmiViewModel(
         }
     }
 
-    fun adminVerifyPost(postId: String, isVerified: Boolean, approvalStatus: String) {
+    fun adminVerifyPost(post: FeedPost, isVerified: Boolean, approvalStatus: String) {
         viewModelScope.launch {
             clearBanners()
-            val result = repository.adminUpdatePostVerification(postId, isVerified, approvalStatus)
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.adminUpdatePostVerification(post, isVerified, approvalStatus, adminName)
             result.onSuccess {
                 _feedbackBanner.value = "পোস্টের অনুমোদন অবস্থা হালনাগাদ হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ ব্যর্থ হয়েছে।"
+            }
+        }
+    }
+
+    fun adminToggleBoostPost(post: FeedPost, isBoosted: Boolean) {
+        viewModelScope.launch {
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.adminTogglePostBoost(post, isBoosted, adminName)
+            result.onSuccess {
+                _feedbackBanner.value = if (isBoosted) {
+                    "আলহামদুলিল্লাহ, বিজ্ঞপ্তিটি Boosted হিসেবে ফিডের উপরে স্থাপন করা হয়েছে।"
+                } else {
+                    "বিজ্ঞপ্তিটির Boosted অবস্থা সরানো হয়েছে।"
+                }
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "Boost অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
+            }
+        }
+    }
+
+    fun publishAdminAnnouncement(
+        title: String,
+        message: String,
+        onSent: () -> Unit = {}
+    ) {
+        if (title.isBlank() || message.isBlank()) {
+            _errorBanner.value = "অনুগ্রহ করে ঘোষণার শিরোনাম ও বিস্তারিত বার্তা লিখুন।"
+            return
+        }
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.sendAdminAnnouncement(adminName, title, message)
+            _isSubmitting.value = false
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, অ্যাডমিন ঘোষণা সকল ব্যবহারকারীর কাছে প্রেরিত হয়েছে।"
+                onSent()
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "ঘোষণা প্রেরণ করা যায়নি।"
             }
         }
     }
