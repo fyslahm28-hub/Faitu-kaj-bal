@@ -826,11 +826,17 @@ class QawmiViewModel(
             val result = repository.sendAdminTestTelegramNotification(adminName, customMessage)
             _isSubmitting.value = false
             result.onSuccess {
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, টেলিগ্রাম নোটিফিকেশন ইত্তেলা সফলভাবে প্রেরিত ও সংরক্ষিত হয়েছে।"
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, টেলিগ্রাম চ্যানেল (${com.example.ui.util.TelegramNotificationHelper.DEFAULT_TELEGRAM_CHANNEL}) ও অডিট লগে ইত্তেলা সফলভাবে সংরক্ষিত হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "টেলিগ্রাম নোটিফিকেশন পাঠাতে সমস্যা হয়েছে।"
             }
         }
+    }
+
+    suspend fun recordAdminLogoutBeforeSignOut() {
+        if (!isAdminUser) return
+        val adminName = currentUserEmail.ifBlank { resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)") }
+        repository.recordAdminLogoutActivity(adminName)
     }
 
     private companion object {

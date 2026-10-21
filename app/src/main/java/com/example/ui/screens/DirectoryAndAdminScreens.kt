@@ -1629,7 +1629,13 @@ fun AdminPanelScreen(
                         }
 
                         Text(
-                            text = "নতুন নিয়োগ বিজ্ঞপ্তি, খেদমত আবেদন, মাদরাসা নিবন্ধন ও অ্যাডমিনের ঘোষণার তাৎক্ষণিক টেলিগ্রাম ইত্তেলা (হটলাইন: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER})।",
+                            text = buildString {
+                                append("প্রধান অ্যাডমিন টেলিগ্রাম আইডি: ${TelegramNotificationHelper.DEFAULT_TELEGRAM_CHANNEL}")
+                                if (isBotConfigured) {
+                                    append(" • Bot Token ও Chat ID সংযুক্ত ও সচল ✓")
+                                }
+                                append("\nঅ্যাডমিন লগইন/লগআউট, বিজ্ঞপ্তি, আবেদন, মাদরাসা যাচাই ও নিরাপত্তা অডিট লগ স্বয়ংক্রিয়ভাবে বটের মাধ্যমে সরাসরি আপনার ইনবক্সে প্রেরিত হচ্ছে (হটলাইন: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER})।")
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = QawmiTextSecondary
                         )
@@ -1637,7 +1643,7 @@ fun AdminPanelScreen(
                         OutlinedTextField(
                             value = customTelegramMessage,
                             onValueChange = { customTelegramMessage = it },
-                            label = { Text("টেলিগ্রাম বট / চ্যানেলে তাৎক্ষণিক বার্তা (ঐচ্ছিক)") },
+                            label = { Text("প্রধান অ্যাডমিনের টেলিগ্রামে তাৎক্ষণিক বার্তা (ঐচ্ছিক)") },
                             placeholder = { Text("যেমন: নতুন বিজ্ঞপ্তি ও মাদরাসা যাচাইকরণ সম্পন্ন হয়েছে...") },
                             singleLine = true,
                             modifier = Modifier
@@ -1647,8 +1653,22 @@ fun AdminPanelScreen(
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            OutlinedButton(
+                                onClick = { TelegramNotificationHelper.openTelegramChannel(context) },
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.testTag("admin_open_telegram_channel_button")
+                            ) {
+                                Text(
+                                    text = TelegramNotificationHelper.DEFAULT_TELEGRAM_CHANNEL,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiDeepGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
                             Button(
                                 onClick = {
                                     onSendTestTelegramAlert(customTelegramMessage)

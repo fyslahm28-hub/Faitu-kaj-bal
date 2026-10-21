@@ -205,7 +205,12 @@ service cloud.firestore {
                data.eventType == 'NEW_MADRASA' ||
                data.eventType == 'ADMIN_ANNOUNCEMENT' ||
                data.eventType == 'ADMIN_VERIFICATION' ||
-               data.eventType == 'ADMIN_SECURITY'
+               data.eventType == 'ADMIN_SECURITY' ||
+               data.eventType == 'ADMIN_LOGIN' ||
+               data.eventType == 'ADMIN_LOGOUT' ||
+               data.eventType == 'ADMIN_SETTINGS_CHANGE' ||
+               data.eventType == 'FAILED_AUTH_ATTEMPT' ||
+               data.eventType == 'CONTENT_MODERATION'
              ) &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 250 &&
              data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&

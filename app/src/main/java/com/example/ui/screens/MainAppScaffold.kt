@@ -355,13 +355,16 @@ fun MainAppScaffold(
                     selected = false,
                     icon = { Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = Color(0xFFC62828)) },
                     onClick = {
-                        scope.launch { drawerState.close() }
-                        viewModel.setUserOnlineStatus(false)
-                        signOutUser(
-                            credentialManager = credentialManager,
-                            onSignOutComplete = onSignedOut,
-                            scope = scope
-                        )
+                        scope.launch {
+                            drawerState.close()
+                            viewModel.setUserOnlineStatus(false)
+                            viewModel.recordAdminLogoutBeforeSignOut()
+                            signOutUser(
+                                credentialManager = credentialManager,
+                                onSignOutComplete = onSignedOut,
+                                scope = scope
+                            )
+                        }
                     },
                     modifier = Modifier
                         .padding(horizontal = 12.dp)

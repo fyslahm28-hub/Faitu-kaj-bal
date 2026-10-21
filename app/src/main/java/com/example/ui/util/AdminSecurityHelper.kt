@@ -3,6 +3,7 @@ package com.example.ui.util
 import com.google.firebase.auth.FirebaseUser
 import kotlinx.coroutines.tasks.await
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 object AdminSecurityHelper {
 
@@ -14,6 +15,12 @@ object AdminSecurityHelper {
 
     const val ADMIN_MOBILE_NUMBER = "01300448147"
     const val ADMIN_MOBILE_E164 = "+8801300448147"
+
+    // Password reset rate-limiting: max 3 requests per hour, minimum 60s cooldown per email
+    private const val RESET_COOLDOWN_MS = 60_000L
+    private const val RESET_WINDOW_MS = 3_600_000L
+    private const val MAX_RESETS_PER_WINDOW = 3
+    private val passwordResetHistory = ConcurrentHashMap<String, MutableList<Long>>()
 
     fun normalizeEmail(email: String?): String {
         return email?.trim()?.lowercase(Locale.ROOT).orEmpty()
@@ -36,6 +43,39 @@ object AdminSecurityHelper {
     fun isAuthorizedAdminPhone(phone: String?): Boolean {
         val normalized = normalizeBdPhone(phone)
         return normalized == ADMIN_MOBILE_NUMBER
+    }
+
+    /**
+     * Checks rate-limiting and cooldown for Admin Password Reset requests.
+     * Returns null if allowed, or a Bangla error message if rate-limited.
+     */
+    @Synchronized
+    fun checkPasswordResetRateLimit(email: String, nowMs: Long = System.currentTimeMillis()): String? {
+        val normalized = normalizeEmail(email)
+        val timestamps = passwordResetHistory.getOrPut(normalized) { mutableListOf() }
+        timestamps.removeAll { nowMs - it > RESET_WINDOW_MS }
+
+        val lastRequest = timestamps.maxOrNull()
+        if (lastRequest != null && (nowMs - lastRequest) < RESET_COOLDOWN_MS) {
+            val remainingSec = ((RESET_COOLDOWN_MS - (nowMs - lastRequest)) / 1000L).coerceAtLeast(1L)
+            return "নিরাপত্তার স্বার্থে অনুগ্রহ করে $remainingSec সেকেন্ড পর পুনরায় চেষ্টা করুন।"
+        }
+        if (timestamps.size >= MAX_RESETS_PER_WINDOW) {
+            return "অতিরিক্ত অনুরোধ করা হয়েছে। নিরাপত্তার স্বার্থে ১ ঘণ্টায় সর্বোচ্চ ৩ বার পাসওয়ার্ড রিসেট লিংক পাঠানো যায়।"
+        }
+        return null
+    }
+
+    @Synchronized
+    fun recordPasswordResetRequest(email: String, nowMs: Long = System.currentTimeMillis()) {
+        val normalized = normalizeEmail(email)
+        val timestamps = passwordResetHistory.getOrPut(normalized) { mutableListOf() }
+        timestamps.add(nowMs)
+    }
+
+    @Synchronized
+    fun clearPasswordResetRateLimitsForTest() {
+        passwordResetHistory.clear()
     }
 
     /**

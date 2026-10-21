@@ -87,6 +87,14 @@ class QawmiRepository(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             docRef.set(payload).await()
+
+            enqueueAndDispatchTelegramNotification(
+                eventType = "ADMIN_LOGIN",
+                title = "অ্যাডমিন প্যানেল সেশন লগইন",
+                message = "অনুমোদিত অ্যাডমিন ($normalizedEmail) যাচাইকৃত সেশনে লগইন করেছেন।",
+                actorName = normalizedEmail,
+                referenceId = uid
+            )
             Result.success(true)
         } catch (e: CancellationException) {
             throw e
@@ -96,27 +104,60 @@ class QawmiRepository(
         }
     }
 
+    suspend fun recordAdminLogoutActivity(adminEmailOrName: String): Result<Unit> {
+        val currentUser = auth.currentUser ?: return Result.success(Unit)
+        if (!AdminSecurityHelper.verifyServerTokenAdminClaims(currentUser)) {
+            return Result.success(Unit)
+        }
+        val actor = adminEmailOrName.ifBlank { currentUser.email ?: "নাজিমে আলা (অ্যাডমিন)" }
+        enqueueAndDispatchTelegramNotification(
+            eventType = "ADMIN_LOGOUT",
+            title = "অ্যাডমিন সেশন লগআউট",
+            message = "অনুমোদিত অ্যাডমিন ($actor) অ্যাপ থেকে লগআউট করেছেন।",
+            actorName = actor,
+            referenceId = currentUser.uid
+        )
+        return Result.success(Unit)
+    }
+
     /**
      * Sends a secure Firebase Authentication Password Reset Link to a verified, registered
      * Admin email address (`foysalahamad102@gmail.com`, `foysalahamad204@gmail.com`, `fyslahm28@gmail.com`).
-     * Strictly rejects any non-admin or invalid email address.
+     * Enforces strict identity verification, cooldown/rate-limiting, and security logging without
+     * ever storing or transmitting passwords, OTPs, or reset links.
      */
     suspend fun sendAdminPasswordResetLink(email: String): Result<String> {
         val normalizedEmail = AdminSecurityHelper.normalizeEmail(email)
         if (!AdminSecurityHelper.isAuthorizedAdminEmail(normalizedEmail)) {
+            if (auth.currentUser != null) {
+                enqueueAndDispatchTelegramNotification(
+                    eventType = "FAILED_AUTH_ATTEMPT",
+                    title = "অননুমোদিত পাসওয়ার্ড রিসেট প্রচেষ্টা প্রতিহত",
+                    message = "অননুমোদিত ইমেইলে ($normalizedEmail) অ্যাডমিন পাসওয়ার্ড রিসেট করার চেষ্টা প্রতিহত করা হয়েছে।",
+                    actorName = auth.currentUser?.email ?: auth.currentUser?.uid.orEmpty(),
+                    referenceId = "failed_reset_attempt"
+                )
+            }
             return Result.failure(
                 IllegalArgumentException(
                     "শুধুমাত্র অনুমোদিত অ্যাডমিন ইমেইলে (foysalahamad102@gmail.com, foysalahamad204@gmail.com, fyslahm28@gmail.com) পাসওয়ার্ড রিসেট লিংক পাঠানো যাবে।"
                 )
             )
         }
+
+        val rateLimitError = AdminSecurityHelper.checkPasswordResetRateLimit(normalizedEmail)
+        if (rateLimitError != null) {
+            return Result.failure(IllegalStateException(rateLimitError))
+        }
+
         return try {
             auth.sendPasswordResetEmail(normalizedEmail).await()
+            AdminSecurityHelper.recordPasswordResetRequest(normalizedEmail)
             if (auth.currentUser != null && AdminSecurityHelper.verifyServerTokenAdminClaims(auth.currentUser)) {
                 enqueueAndDispatchTelegramNotification(
                     eventType = "ADMIN_SECURITY",
-                    title = "অ্যাডমিন পাসওয়ার্ড রিসেট লিংক প্রেরণ",
-                    message = "অনুমোদিত অ্যাডমিন ইমেইল ($normalizedEmail)-এ Firebase Authentication থেকে নিরাপদ Password Reset Link পাঠানো হয়েছে।",
+                    title = "অ্যাডমিন পাসওয়ার্ড পুনরুদ্ধার অনুরোধ",
+                    message = "অনুমোদিত অ্যাডমিন ইমেইল ($normalizedEmail)-এর জন্য Firebase Authentication পাসওয়ার্ড রিসেট প্রক্রিয়া শুরু হয়েছে (রিসেট লিংক গোপন রাখা হয়েছে)।",
                     actorName = normalizedEmail,
                     referenceId = "password_reset"
                 )
@@ -468,6 +509,16 @@ class QawmiRepository(
         val docRef = db.collection("feed_posts").document(postId)
         return try {
             docRef.delete().await()
+            val currentUser = auth.currentUser
+            if (currentUser != null && AdminSecurityHelper.verifyServerTokenAdminClaims(currentUser)) {
+                enqueueAndDispatchTelegramNotification(
+                    eventType = "CONTENT_MODERATION",
+                    title = "ফিড পোস্ট অপসারণ (মডারেশন)",
+                    message = "পোস্ট আইডি ($postId) ফিড থেকে অপসারণ করা হয়েছে।",
+                    actorName = currentUser.email ?: "নাজিমে আলা (অ্যাডমিন)",
+                    referenceId = postId
+                )
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1167,9 +1218,15 @@ class QawmiRepository(
         val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
         val docRef = db.collection("telegram_notifications").document()
         return try {
-            val resolvedActor = actorName.trim().ifBlank { "কওমি কর্মসংস্থান" }.take(200)
-            val resolvedTitle = title.trim().ifBlank { "কওমি কর্মসংস্থান ইত্তেলা" }.take(250)
-            val resolvedMessage = message.trim().ifBlank { resolvedTitle }.take(2000)
+            val resolvedActor = TelegramNotificationHelper.sanitizeSensitiveContent(actorName)
+                .ifBlank { "কওমি কর্মসংস্থান" }
+                .take(200)
+            val resolvedTitle = TelegramNotificationHelper.sanitizeSensitiveContent(title)
+                .ifBlank { "কওমি কর্মসংস্থান ইত্তেলা" }
+                .take(250)
+            val resolvedMessage = TelegramNotificationHelper.sanitizeSensitiveContent(message)
+                .ifBlank { resolvedTitle }
+                .take(2000)
 
             val payload = mapOf(
                 "eventType" to eventType,
