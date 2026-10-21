@@ -32,15 +32,12 @@ abstract class FirestoreEmulatorTestBase {
 
     protected lateinit var firestore: FirebaseFirestore
     protected lateinit var auth: FirebaseAuth
-    protected lateinit var databaseId: String
 
     @Before
     open fun setUpFirebase() {
         syncRulesWithRunningEmulator()
 
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val resId = context.resources.getIdentifier("firestore_database_id", "string", context.packageName)
-        databaseId = if (resId != 0) context.getString(resId) else "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c"
 
         val app = if (FirebaseApp.getApps(context).isEmpty()) {
             val newApp = FirebaseApp.initializeApp(
@@ -51,7 +48,7 @@ abstract class FirestoreEmulatorTestBase {
                     .setApiKey("fake-api-key-for-emulator")
                     .build()
             )
-            val newFirestore = FirebaseFirestore.getInstance(newApp, databaseId)
+            val newFirestore = FirebaseFirestore.getInstance(newApp)
             newFirestore.useEmulator(EMULATOR_HOST, FIRESTORE_PORT)
             newFirestore.firestoreSettings = FirebaseFirestoreSettings.Builder()
                 .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
@@ -64,7 +61,7 @@ abstract class FirestoreEmulatorTestBase {
             FirebaseApp.getInstance()
         }
 
-        firestore = FirebaseFirestore.getInstance(app, databaseId)
+        firestore = FirebaseFirestore.getInstance(app)
         auth = FirebaseAuth.getInstance(app)
     }
 

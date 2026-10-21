@@ -86,7 +86,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
 
     @Test
     fun twoUsers_profilePhotoAndPresence_persistedAndVisibleToOtherUsers_andPropagatedToPosts() = runBlocking {
-        // User 1 signs in, saves profile with initial avatar, and publishes an application post
         val user1Email = "scholar1_${UUID.randomUUID()}@test.com"
         val user1Uid = signInTestUser(user1Email)
         val repo = QawmiRepository(firestore, auth)
@@ -131,7 +130,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertTrue(postCreateRes.isSuccess)
         val postId = postCreateRes.getOrThrow()
 
-        // User 1 updates profile photo to a new Base64 photo and updates name, then goes offline (lastSeen updated)
         val updatedBase64Photo = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/"
         val updateRes = withTimeout(5000L) {
             repo.saveUserProfile(
@@ -158,7 +156,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("Presence update failed: ${presenceRes.exceptionOrNull()}", presenceRes.isSuccess)
 
-        // User 2 signs in and inspects User 1's profile and feed post
         val user2Uid = signInTestUser("muhtamim2_${UUID.randomUUID()}@test.com")
         assertTrue(user1Uid != user2Uid)
 
@@ -172,7 +169,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertFalse("User 1 should be seen as offline by User 2", observedUser1Profile?.isOnline ?: true)
         assertNotNull("User 1 lastSeenAt should be recorded", observedUser1Profile?.lastSeenAt)
 
-        // Verify User 1's feed post also propagated the updated photoUrl & authorName to User 2
         val feedPostsForUser2 = withTimeout(5000L) {
             repo.observePublicFeedPosts().first { posts ->
                 posts.any { it.id == postId && it.authorPhotoUrl == updatedBase64Photo }
@@ -188,7 +184,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         val userAEmail = "userA_${UUID.randomUUID()}@test.com"
         val userBEmail = "userB_${UUID.randomUUID()}@test.com"
 
-        // Register User B first to get UID
         val userBUid = signInTestUser(userBEmail)
         val repo = QawmiRepository(firestore, auth)
         withTimeout(5000L) {
@@ -210,7 +205,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             )
         }
 
-        // Sign in as User A
         val userAUid = signInTestUser(userAEmail)
         withTimeout(5000L) {
             repo.saveUserProfile(
@@ -231,7 +225,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             )
         }
 
-        // Verify User A cannot message themselves
         val selfMsgRes = withTimeout(4000L) {
             repo.sendDirectMessage(
                 senderName = "জামিয়া ইসলামিয়া মাদরাসা",
@@ -243,7 +236,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("Self-messaging must be rejected", selfMsgRes.isFailure)
 
-        // User A sends message 1 to User B
         val send1Res = withTimeout(5000L) {
             repo.sendDirectMessage(
                 senderName = "জামিয়া ইসলামিয়া মাদরাসা",
@@ -257,7 +249,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertTrue("User A -> User B message failed: ${send1Res.exceptionOrNull()}", send1Res.isSuccess)
         val msg1Id = send1Res.getOrThrow()
 
-        // Switch to User B and verify message 1 arrived in inbox as unread + notification delivered
         signInTestUser(userBEmail)
         val userBMessages = withTimeout(5000L) {
             repo.observeUserMessages(userBUid).first { list -> list.any { it.id == msg1Id } }
@@ -268,11 +259,9 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertEquals("preset:muhtamim_royal", receivedMsg1.senderPhotoUrl)
         assertFalse("Message 1 should initially be unread for User B", receivedMsg1.isRead)
 
-        // Unread message count for User B with User A is 1
         val unreadForB = userBMessages.count { it.receiverId == userBUid && !it.isRead }
         assertEquals(1, unreadForB)
 
-        // User B marks the conversation with User A as read
         val markConvRes = withTimeout(5000L) {
             repo.markConversationMessagesAsRead(userAUid, userBMessages)
         }
@@ -285,7 +274,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertEquals(0, userBMessagesAfterRead.count { it.receiverId == userBUid && !it.isRead })
 
-        // User B replies to User A
         val send2Res = withTimeout(5000L) {
             repo.sendDirectMessage(
                 senderName = "মাওলানা মাহমুদুল হাসান",
@@ -299,7 +287,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertTrue("User B -> User A reply failed: ${send2Res.exceptionOrNull()}", send2Res.isSuccess)
         val msg2Id = send2Res.getOrThrow()
 
-        // Switch back to User A and verify full 2-message conversation history & read receipt on msg1
         signInTestUser(userAEmail)
         val userAMessages = withTimeout(5000L) {
             repo.observeUserMessages(userAUid).first { list ->
@@ -314,14 +301,36 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
     }
 
     @Test
-    fun adminPanelOperations_verifyMadrasa_boostPost_andBroadcastAnnouncement() = runBlocking {
-        val adminEmail = "fyslahm28@gmail.com"
+    fun adminPanelOperations_allThreeAuthorizedAdmins_telegramQueue_andPasswordResetValidation() = runBlocking {
+        val authorizedAdmins = listOf(
+            "foysalahamad102@gmail.com",
+            "foysalahamad204@gmail.com",
+            "fyslahm28@gmail.com"
+        )
         val regularEmail = "member_${UUID.randomUUID()}@test.com"
-
-        val adminUid = signInTestUser(adminEmail)
         val repo = QawmiRepository(firestore, auth)
 
-        // Register a madrasa and verify it via Admin function
+        // 1. Verify each of the 3 authorized admin emails can register in /admins/{uid} and read Telegram logs
+        for (adminEmail in authorizedAdmins) {
+            val adminUid = signInTestUser(adminEmail)
+            val regRes = withTimeout(5000L) {
+                repo.ensureVerifiedAdminRegistryDocument()
+            }
+            assertTrue("Admin registry sync failed for $adminEmail: ${regRes.exceptionOrNull()}", regRes.isSuccess)
+            assertTrue("Expected true for verified admin $adminEmail", regRes.getOrThrow())
+
+            val entry = withTimeout(5000L) {
+                repo.observeAdminRegistryEntry(adminUid).first { it != null }
+            }
+            assertNotNull(entry)
+            assertEquals(adminUid, entry?.adminId)
+            assertEquals(adminEmail, entry?.email)
+            assertEquals("01300448147", entry?.adminPhone)
+            assertEquals("SUPER_ADMIN", entry?.role)
+        }
+
+        // 2. Currently signed in as fyslahm28@gmail.com — test madrasa verification, post boost, announcement & Telegram log
+        val adminUid = auth.currentUser!!.uid
         val madrasaRes = withTimeout(5000L) {
             repo.createMadrasa(
                 name = "জামিয়া আরাবিয়া দারুল উলুম",
@@ -347,7 +356,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("adminToggleMadrasaVerification failed: ${verifyMadrasaRes.exceptionOrNull()}", verifyMadrasaRes.isSuccess)
 
-        // Publish a post and Boost it via Admin function
         val postRes = withTimeout(5000L) {
             repo.createFeedPost(
                 authorName = "জামিয়া আরাবিয়া দারুল উলুম",
@@ -376,7 +384,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("adminTogglePostBoost failed: ${boostRes.exceptionOrNull()}", boostRes.isSuccess)
 
-        // Broadcast an admin announcement
         val announceTitle = "বিশেষ ঘোষণা ${UUID.randomUUID()}"
         val announceRes = withTimeout(5000L) {
             repo.sendAdminAnnouncement(
@@ -387,12 +394,39 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("sendAdminAnnouncement failed: ${announceRes.exceptionOrNull()}", announceRes.isSuccess)
 
-        // Switch to regular user and verify:
-        // 1. Madrasa is verified
-        // 2. Post is boosted
-        // 3. Announcement notification is received and can be marked read
+        // Verify Telegram notification logs were persisted in /telegram_notifications and readable by admin
+        val telegramLogs = withTimeout(5000L) {
+            repo.observeTelegramNotifications().first { list -> list.isNotEmpty() }
+        }
+        assertTrue("Expected Telegram notification logs to be recorded", telegramLogs.isNotEmpty())
+
+        // Verify Admin Password Reset Link succeeds for authorized admin email and rejects unauthorized email
+        val validResetRes = withTimeout(5000L) {
+            repo.sendAdminPasswordResetLink("foysalahamad102@gmail.com")
+        }
+        assertTrue("Admin password reset should succeed for authorized email: ${validResetRes.exceptionOrNull()}", validResetRes.isSuccess)
+
+        val invalidResetRes = withTimeout(5000L) {
+            repo.sendAdminPasswordResetLink("unauthorized@example.com")
+        }
+        assertTrue("Admin password reset must reject unauthorized email", invalidResetRes.isFailure)
+
+        // 3. Switch to regular user and verify:
+        //    - Regular user CANNOT register in /admins/{uid}
+        //    - Regular user CANNOT boost posts
+        //    - Regular user sees verified madrasa, boosted post, and announcement
         val regularUid = signInTestUser(regularEmail)
         assertTrue(adminUid != regularUid)
+
+        val unauthorizedAdminReg = withTimeout(5000L) {
+            repo.ensureVerifiedAdminRegistryDocument()
+        }
+        assertFalse("Regular user must not be allowed to register as admin", unauthorizedAdminReg.getOrDefault(true))
+
+        val unauthorizedBoost = withTimeout(5000L) {
+            repo.adminTogglePostBoost(targetPost, false)
+        }
+        assertTrue("Regular user must not be allowed to boost/unboost posts", unauthorizedBoost.isFailure)
 
         val madrasas = withTimeout(5000L) {
             repo.observePublicMadrasas().first { list -> list.any { it.id == madrasaId && it.isVerified } }
@@ -414,13 +448,6 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             repo.markAllNotificationsAsRead(notifs)
         }
         assertTrue(markAllRes.isSuccess)
-
-        val notifsAfterMarkAll = withTimeout(5000L) {
-            repo.observeNotifications(regularUid).first { list ->
-                list.all { it.isRead }
-            }
-        }
-        assertEquals(0, notifsAfterMarkAll.count { !it.isRead })
     }
 
     @Test

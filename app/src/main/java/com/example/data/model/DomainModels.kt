@@ -7,6 +7,34 @@ import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
 
 @IgnoreExtraProperties
+data class AdminRegistryEntry(
+    @DocumentId val id: String = "",
+    val adminId: String = "",
+    val email: String = "",
+    val adminPhone: String = "01300448147",
+    val role: String = "SUPER_ADMIN",
+    @get:PropertyName("verifiedByAuthToken")
+    @set:PropertyName("verifiedByAuthToken")
+    var verifiedByAuthToken: Boolean = true,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class TelegramNotificationLog(
+    @DocumentId val id: String = "",
+    val eventType: String = "NEW_CIRCULAR",
+    val title: String = "",
+    val message: String = "",
+    val actorId: String = "",
+    val actorName: String = "",
+    val targetPhone: String = "01300448147",
+    val referenceId: String = "",
+    val deliveryStatus: String = "QUEUED", // "DELIVERED", "QUEUED", "FAILED"
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
 data class UserProfile(
     @DocumentId val id: String = "",
     val userId: String = "",

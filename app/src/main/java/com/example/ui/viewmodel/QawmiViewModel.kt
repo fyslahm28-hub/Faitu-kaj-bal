@@ -3,14 +3,17 @@ package com.example.ui.viewmodel
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.AppNotification
 import com.example.data.model.BookmarkItem
 import com.example.data.model.DirectMessage
 import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
+import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.data.repository.QawmiRepository
+import com.example.ui.util.AdminSecurityHelper
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -99,6 +102,32 @@ class QawmiViewModel(
     // Public profile inspection target (uid to fallbackName)
     private val _inspectedUserTarget = MutableStateFlow<Pair<String, String>?>(null)
     val inspectedUserTarget: StateFlow<Pair<String, String>?> = _inspectedUserTarget.asStateFlow()
+
+    // Server-side Admin Registry & Token Claim state
+    private val _serverTokenVerifiedAdmin = MutableStateFlow(
+        AdminSecurityHelper.isAuthorizedAdminEmail(currentUserEmail)
+    )
+
+    val adminRegistryEntryState: StateFlow<AdminRegistryEntry?> = repository.observeAdminRegistryEntry(currentUserId)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+
+    val isAdminState: StateFlow<Boolean> = combine(
+        _serverTokenVerifiedAdmin,
+        adminRegistryEntryState
+    ) { tokenVerified, registryEntry ->
+        AdminSecurityHelper.isFirebaseAuthUserAdmin(
+            authEmail = currentUserEmail,
+            hasCustomAdminClaim = tokenVerified,
+            hasServerRegistryEntry = registryEntry?.verifiedByAuthToken == true
+        )
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        AdminSecurityHelper.isAuthorizedAdminEmail(currentUserEmail)
+    )
+
+    val isAdminUser: Boolean
+        get() = isAdminState.value
 
     // Real-time Firestore StateFlows (Two-tier error handling)
     val userProfileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
@@ -218,11 +247,34 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val isAdminUser: Boolean
-        get() = currentUserEmail.equals("fyslahm28@gmail.com", ignoreCase = true)
+    // Real-time Telegram notifications queue (strictly observed ONLY when verified Admin is logged in)
+    val telegramNotificationsState: StateFlow<UiState<List<TelegramNotificationLog>>> = isAdminState
+        .flatMapLatest { isAdmin ->
+            if (!isAdmin) {
+                flowOf(UiState.Success(emptyList()))
+            } else {
+                repository.observeTelegramNotifications()
+                    .map<List<TelegramNotificationLog>, UiState<List<TelegramNotificationLog>>> { UiState.Success(it) }
+                    .catch { e ->
+                        Log.w(TAG, "Error observing Telegram notifications", e)
+                        emit(UiState.Error(e.localizedMessage ?: "টেলিগ্রাম নোটিফিকেশন লগ লোড করা যায়নি"))
+                    }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
     init {
         setUserOnlineStatus(true)
+        verifyAndSyncAdminIdentity()
+    }
+
+    private fun verifyAndSyncAdminIdentity() {
+        viewModelScope.launch {
+            val result = repository.ensureVerifiedAdminRegistryDocument()
+            result.onSuccess { isVerifiedAdmin ->
+                _serverTokenVerifiedAdmin.value = isVerifiedAdmin
+            }
+        }
     }
 
     fun setUserOnlineStatus(isOnline: Boolean) {
@@ -245,6 +297,10 @@ class QawmiViewModel(
     }
 
     fun navigateTo(destination: MainDestination) {
+        if (destination == MainDestination.ADMIN_PANEL && !isAdminUser) {
+            _errorBanner.value = "অনুমোদনহীন প্রবেশাধিকার: শুধুমাত্র যাচাইকৃত অ্যাডমিন অ্যাকাউন্ট দিয়ে অ্যাডমিন প্যানেল ব্যবহার করা যাবে।"
+            return
+        }
         if (_currentDestination.value != destination) {
             _navigationStack.addLast(_currentDestination.value)
             _currentDestination.value = destination
@@ -655,15 +711,20 @@ class QawmiViewModel(
         }
     }
 
-    // Admin Actions
+    // --- ADMIN PANEL & SECURITY ACTIONS (Strictly gated by verified Admin Identity) ---
+
     fun adminVerifyMadrasa(madrasa: MadrasaProfile, verified: Boolean) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
+            return
+        }
         viewModelScope.launch {
             clearBanners()
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val result = repository.adminToggleMadrasaVerification(madrasa, verified, adminName)
             result.onSuccess {
                 _feedbackBanner.value = if (verified) {
-                    "মাদরাসাটি 'যাচাইকৃত মাদরাসা' হিসেবে অনুমোদিত হয়েছে।"
+                    "মাদরাসাটি 'যাচাইকৃত মাদরাসা' হিসেবে অনুমোদিত হয়েছে এবং টেলিগ্রাম ইত্তেলা লগ করা হয়েছে।"
                 } else {
                     "মাদরাসার যাচাইকরণ স্ট্যাটাস পরিবর্তন করা হয়েছে।"
                 }
@@ -674,6 +735,10 @@ class QawmiViewModel(
     }
 
     fun adminVerifyPost(post: FeedPost, isVerified: Boolean, approvalStatus: String) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
+            return
+        }
         viewModelScope.launch {
             clearBanners()
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
@@ -687,6 +752,10 @@ class QawmiViewModel(
     }
 
     fun adminToggleBoostPost(post: FeedPost, isBoosted: Boolean) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন বিজ্ঞপ্তি Boost করতে পারবেন।"
+            return
+        }
         viewModelScope.launch {
             clearBanners()
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
@@ -708,6 +777,10 @@ class QawmiViewModel(
         message: String,
         onSent: () -> Unit = {}
     ) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন ঘোষণা প্রকাশ করতে পারবেন।"
+            return
+        }
         if (title.isBlank() || message.isBlank()) {
             _errorBanner.value = "অনুগ্রহ করে ঘোষণার শিরোনাম ও বিস্তারিত বার্তা লিখুন।"
             return
@@ -719,10 +792,43 @@ class QawmiViewModel(
             val result = repository.sendAdminAnnouncement(adminName, title, message)
             _isSubmitting.value = false
             result.onSuccess {
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, অ্যাডমিন ঘোষণা সকল ব্যবহারকারীর কাছে প্রেরিত হয়েছে।"
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, অ্যাডমিন ঘোষণা সকল ব্যবহারকারীর কাছে ও টেলিগ্রাম লগে প্রেরিত হয়েছে।"
                 onSent()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "ঘোষণা প্রেরণ করা যায়নি।"
+            }
+        }
+    }
+
+    fun requestAdminPasswordReset(email: String) {
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val result = repository.sendAdminPasswordResetLink(email)
+            _isSubmitting.value = false
+            result.onSuccess { sentEmail ->
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, অনুমোদিত অ্যাডমিন ইমেইল ($sentEmail)-এ Firebase Authentication থেকে নিরাপদ Password Reset Link পাঠানো হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "পাসওয়ার্ড রিসেট লিংক পাঠানো যায়নি।"
+            }
+        }
+    }
+
+    fun sendTestTelegramNotification(customMessage: String = "") {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন টেলিগ্রাম নোটিফিকেশন পরীক্ষা করতে পারবেন।"
+            return
+        }
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.sendAdminTestTelegramNotification(adminName, customMessage)
+            _isSubmitting.value = false
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, টেলিগ্রাম নোটিফিকেশন ইত্তেলা সফলভাবে প্রেরিত ও সংরক্ষিত হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "টেলিগ্রাম নোটিফিকেশন পাঠাতে সমস্যা হয়েছে।"
             }
         }
     }

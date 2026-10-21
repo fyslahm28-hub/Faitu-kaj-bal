@@ -162,6 +162,8 @@ fun MainAppScaffold(
     val receivedSubmissionsState by viewModel.receivedSubmissionsState.collectAsStateWithLifecycle()
     val messagesState by viewModel.messagesState.collectAsStateWithLifecycle()
     val notificationsState by viewModel.notificationsState.collectAsStateWithLifecycle()
+    val isAdminState by viewModel.isAdminState.collectAsStateWithLifecycle()
+    val telegramNotificationsState by viewModel.telegramNotificationsState.collectAsStateWithLifecycle()
 
     val selectedPostForApply by viewModel.selectedPostForApply.collectAsStateWithLifecycle()
     val selectedPostForDetail by viewModel.selectedPostForDetail.collectAsStateWithLifecycle()
@@ -335,13 +337,15 @@ fun MainAppScaffold(
                     scope.launch { drawerState.close() }
                     viewModel.navigateTo(MainDestination.PROFILE)
                 }
-                DrawerMenuItem(
-                    label = "অ্যাডমিন প্যানেল",
-                    icon = Icons.Default.AdminPanelSettings,
-                    selected = currentDestination == MainDestination.ADMIN_PANEL
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.ADMIN_PANEL)
+                if (isAdminState) {
+                    DrawerMenuItem(
+                        label = "অ্যাডমিন প্যানেল",
+                        icon = Icons.Default.AdminPanelSettings,
+                        selected = currentDestination == MainDestination.ADMIN_PANEL
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.ADMIN_PANEL)
+                    }
                 }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -481,7 +485,7 @@ fun MainAppScaffold(
                                 selectedDistrict = selectedDistrict,
                                 searchQuery = searchQuery,
                                 currentUserId = viewModel.currentUserId,
-                                isAdminUser = viewModel.isAdminUser,
+                                isAdminUser = isAdminState,
                                 onSelectFilter = { viewModel.setFeedFilter(it) },
                                 onSelectDistrict = { viewModel.setDistrictFilter(it) },
                                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
@@ -502,7 +506,7 @@ fun MainAppScaffold(
                                 selectedDistrict = selectedDistrict,
                                 searchQuery = searchQuery,
                                 currentUserId = viewModel.currentUserId,
-                                isAdminUser = viewModel.isAdminUser,
+                                isAdminUser = isAdminState,
                                 onSelectFilter = { viewModel.setFeedFilter(it) },
                                 onSelectDistrict = { viewModel.setDistrictFilter(it) },
                                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
@@ -706,14 +710,18 @@ fun MainAppScaffold(
 
                         MainDestination.ADMIN_PANEL -> {
                             AdminPanelScreen(
-                                isAdminUser = viewModel.isAdminUser,
+                                isAdminUser = isAdminState,
+                                adminEmail = viewModel.currentUserEmail,
                                 madrasasState = madrasasState,
                                 feedPostsState = feedPostsState,
+                                telegramNotificationsState = telegramNotificationsState,
                                 isSubmitting = isSubmitting,
                                 onVerifyMadrasa = { madrasa, ver -> viewModel.adminVerifyMadrasa(madrasa, ver) },
                                 onVerifyPost = { post, ver, status -> viewModel.adminVerifyPost(post, ver, status) },
                                 onToggleBoostPost = { post, boost -> viewModel.adminToggleBoostPost(post, boost) },
                                 onSendAnnouncement = { title, msg -> viewModel.publishAdminAnnouncement(title, msg) },
+                                onRequestPasswordReset = { email -> viewModel.requestAdminPasswordReset(email) },
+                                onSendTestTelegramAlert = { customMsg -> viewModel.sendTestTelegramNotification(customMsg) },
                                 onDeletePost = { id -> viewModel.deletePost(id) }
                             )
                         }

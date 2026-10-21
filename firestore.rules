@@ -29,15 +29,47 @@ service cloud.firestore {
       return ts is timestamp && ts <= request.time;
     }
 
+    // Server-side Admin Role, Custom Claims & Authorized Admin Identity verification
+    function isTokenVerifiedAdmin() {
+      return isSignedIn() && (
+        ('admin' in request.auth.token && request.auth.token.admin == true) ||
+        ('role' in request.auth.token && request.auth.token.role == 'admin') ||
+        ('email' in request.auth.token && (
+          request.auth.token.email == 'foysalahamad102@gmail.com' ||
+          request.auth.token.email == 'foysalahamad204@gmail.com' ||
+          request.auth.token.email == 'fyslahm28@gmail.com'
+        )) ||
+        ('phone_number' in request.auth.token && (
+          request.auth.token.phone_number == '+8801300448147' ||
+          request.auth.token.phone_number == '01300448147'
+        ))
+      );
+    }
+
     function isAdmin() {
       return isSignedIn() && (
-        ('email' in request.auth.token &&
-         request.auth.token.email == 'fyslahm28@gmail.com') ||
+        isTokenVerifiedAdmin() ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
     // 3. Entity Validation Blueprints
+    function isValidAdminRegistryEntry(data) {
+      return data.adminId is string && data.adminId.size() >= 1 && data.adminId.size() <= 128 &&
+             data.email is string && (
+               data.email == 'foysalahamad102@gmail.com' ||
+               data.email == 'foysalahamad204@gmail.com' ||
+               data.email == 'fyslahm28@gmail.com'
+             ) &&
+             data.adminPhone is string && (
+               data.adminPhone == '01300448147' ||
+               data.adminPhone == '+8801300448147'
+             ) &&
+             data.role is string && data.role == 'SUPER_ADMIN' &&
+             data.verifiedByAuthToken is bool && data.verifiedByAuthToken == true &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     function isValidUserProfile(data) {
       return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 150 &&
@@ -165,13 +197,53 @@ service cloud.firestore {
              isValidTimestamp(data.createdAt);
     }
 
+    function isValidTelegramNotificationLog(data) {
+      return data.eventType is string && (
+               data.eventType == 'NEW_CIRCULAR' ||
+               data.eventType == 'NEW_APPLICATION' ||
+               data.eventType == 'KHEDMOT_SUBMISSION' ||
+               data.eventType == 'NEW_MADRASA' ||
+               data.eventType == 'ADMIN_ANNOUNCEMENT' ||
+               data.eventType == 'ADMIN_VERIFICATION' ||
+               data.eventType == 'ADMIN_SECURITY'
+             ) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 250 &&
+             data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&
+             data.actorId is string && data.actorId.size() >= 1 && data.actorId.size() <= 128 &&
+             data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 200 &&
+             data.targetPhone is string && data.targetPhone.size() <= 50 &&
+             data.referenceId is string && data.referenceId.size() <= 128 &&
+             data.deliveryStatus is string && (
+               data.deliveryStatus == 'DELIVERED' ||
+               data.deliveryStatus == 'QUEUED' ||
+               data.deliveryStatus == 'FAILED'
+             ) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     // 4. Collection Rules
 
-    // Admins Registry
+    // Admins Registry (সার্ভার-সাইড অ্যাডমিন পরিচয় ও অ্যাক্সেস)
     match /admins/{adminId} {
       allow get: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
       allow list: if isAdmin();
-      allow write: if false;
+
+      allow create, update: if isTokenVerifiedAdmin() &&
+                               isValidId(adminId) &&
+                               request.auth.uid == adminId &&
+                               incoming().adminId == request.auth.uid &&
+                               incoming().keys().hasAll([
+                                 'adminId', 'email', 'adminPhone', 'role',
+                                 'verifiedByAuthToken', 'updatedAt'
+                               ]) &&
+                               incoming().keys().hasOnly([
+                                 'adminId', 'email', 'adminPhone', 'role',
+                                 'verifiedByAuthToken', 'updatedAt'
+                               ]) &&
+                               isValidAdminRegistryEntry(incoming());
+
+      allow delete: if false;
     }
 
     // Users Profile Collection
@@ -489,6 +561,40 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(notificationId) && (
         existing().recipientId == request.auth.uid || isAdmin()
       );
+    }
+
+    // Telegram Notification Queue & Audit Log (টেলিগ্রাম নোটিফিকেশন সিস্টেম)
+    match /telegram_notifications/{logId} {
+      allow get: if isAdmin();
+      allow list: if isAdmin();
+
+      allow create: if isSignedIn() &&
+                       isValidId(logId) &&
+                       incoming().actorId == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'eventType', 'title', 'message', 'actorId', 'actorName',
+                         'targetPhone', 'referenceId', 'deliveryStatus',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'eventType', 'title', 'message', 'actorId', 'actorName',
+                         'targetPhone', 'referenceId', 'deliveryStatus',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       (incoming().eventType in [
+                         'NEW_CIRCULAR', 'NEW_APPLICATION', 'KHEDMOT_SUBMISSION', 'NEW_MADRASA'
+                       ] || isAdmin()) &&
+                       isValidTelegramNotificationLog(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(logId) &&
+                       isValidTelegramNotificationLog(incoming()) &&
+                       incoming().actorId == existing().actorId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (request.auth.uid == existing().actorId || isAdmin()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['deliveryStatus', 'updatedAt']);
+
+      allow delete: if isAdmin();
     }
   }
 }

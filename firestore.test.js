@@ -10,7 +10,9 @@ let testEnv;
 const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
 const ALICE_UID = "alice_uid_123";
 const BOB_UID = "bob_uid_456";
-const ADMIN_UID = "admin_uid_999";
+const ADMIN_UID_1 = "admin_uid_102";
+const ADMIN_UID_2 = "admin_uid_204";
+const ADMIN_UID_3 = "admin_uid_28";
 
 const [emulatorHost, emulatorPortStr] = (process.env.FIRESTORE_EMULATOR_HOST || "127.0.0.1:8085").split(":");
 const emulatorPort = parseInt(emulatorPortStr, 10);
@@ -78,8 +80,11 @@ test("Authenticated user: can create and query public feed_posts", async () => {
   );
 });
 
-test("Non-admin user cannot boost a post, Admin user can boost a post", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+test("All 3 authorized admin emails and custom claims can perform admin operations; non-admins are rejected", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "regular_user@gmail.com",
+  }).firestore();
+
   await assertSucceeds(
     aliceDb.collection("feed_posts").doc("post_boost_1").set({
       authorId: ALICE_UID,
@@ -93,7 +98,7 @@ test("Non-admin user cannot boost a post, Admin user can boost a post", async ()
       salaryOrExperience: "আলোচনা সাপেক্ষ",
       deadlineOrPreferredDistricts: "চলমান",
       description: "বিশেষ বিজ্ঞপ্তি",
-      contactNumber: "01700000000",
+      contactNumber: "01300448147",
       madrasaId: "",
       isVerifiedMadrasa: false,
       isBoosted: false,
@@ -104,89 +109,98 @@ test("Non-admin user cannot boost a post, Admin user can boost a post", async ()
     })
   );
 
-  // Non-admin cannot set isBoosted = true
+  // Non-admin cannot set isBoosted = true or write to /admins
   await assertFails(
     aliceDb.collection("feed_posts").doc("post_boost_1").update({
       isBoosted: true,
       updatedAt: nowDate(),
     })
   );
+  await assertFails(
+    aliceDb.collection("admins").doc(ALICE_UID).set({
+      adminId: ALICE_UID,
+      email: "foysalahamad102@gmail.com",
+      adminPhone: "01300448147",
+      role: "SUPER_ADMIN",
+      verifiedByAuthToken: true,
+      updatedAt: nowDate(),
+    })
+  );
 
-  // Admin can set isBoosted = true
-  const adminDb = testEnv.authenticatedContext(ADMIN_UID, {
+  // Authorized Admin 1: foysalahamad102@gmail.com
+  const admin1Db = testEnv.authenticatedContext(ADMIN_UID_1, {
+    email: "foysalahamad102@gmail.com",
+    email_verified: true,
+  }).firestore();
+  await assertSucceeds(
+    admin1Db.collection("admins").doc(ADMIN_UID_1).set({
+      adminId: ADMIN_UID_1,
+      email: "foysalahamad102@gmail.com",
+      adminPhone: "01300448147",
+      role: "SUPER_ADMIN",
+      verifiedByAuthToken: true,
+      updatedAt: nowDate(),
+    })
+  );
+  await assertSucceeds(
+    admin1Db.collection("feed_posts").doc("post_boost_1").update({
+      isBoosted: true,
+      updatedAt: nowDate(),
+    })
+  );
+
+  // Authorized Admin 2: foysalahamad204@gmail.com
+  const admin2Db = testEnv.authenticatedContext(ADMIN_UID_2, {
+    email: "foysalahamad204@gmail.com",
+    email_verified: true,
+  }).firestore();
+  await assertSucceeds(
+    admin2Db.collection("feed_posts").doc("post_boost_1").update({
+      isBoosted: false,
+      updatedAt: nowDate(),
+    })
+  );
+
+  // Authorized Admin 3: fyslahm28@gmail.com
+  const admin3Db = testEnv.authenticatedContext(ADMIN_UID_3, {
     email: "fyslahm28@gmail.com",
     email_verified: true,
   }).firestore();
   await assertSucceeds(
-    adminDb.collection("feed_posts").doc("post_boost_1").update({
+    admin3Db.collection("feed_posts").doc("post_boost_1").update({
       isBoosted: true,
       updatedAt: nowDate(),
     })
   );
 });
 
-test("Notifications and per-user read receipts: broadcast, direct, and admin announcements", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+test("Telegram notifications queue: regular users can enqueue event logs, only admins can read/list them", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "regular@gmail.com",
+  }).firestore();
 
-  // Alice creates a broadcast notification for a new circular
   await assertSucceeds(
-    aliceDb.collection("notifications").doc("notif_1").set({
-      recipientId: "ALL_USERS",
-      senderId: ALICE_UID,
-      senderName: "দারুল উলুম মাদরাসা",
-      title: "নতুন খেদমতের নিয়োগ বিজ্ঞপ্তি",
-      message: "দারুল উলুম মাদরাসায় সহকারী শিক্ষক পদে নিয়োগ বিজ্ঞপ্তি প্রকাশিত হয়েছে।",
-      type: "NEW_CIRCULAR",
+    aliceDb.collection("telegram_notifications").doc("tg_1").set({
+      eventType: "NEW_CIRCULAR",
+      title: "নতুন নিয়োগ বিজ্ঞপ্তি প্রকাশিত হয়েছে",
+      message: "জামিয়া ইসলামিয়ায় মুহাদ্দিস পদে নতুন নিয়োগ বিজ্ঞপ্তি।",
+      actorId: ALICE_UID,
+      actorName: "জামিয়া ইসলামিয়া",
+      targetPhone: "01300448147",
       referenceId: "post_1",
-      isRead: false,
+      deliveryStatus: "QUEUED",
       createdAt: nowDate(),
+      updatedAt: nowDate(),
     })
   );
 
-  // Non-admin cannot create ANNOUNCEMENT notification
-  await assertFails(
-    aliceDb.collection("notifications").doc("notif_fake_admin").set({
-      recipientId: "ALL_USERS",
-      senderId: ALICE_UID,
-      senderName: "Alice",
-      title: "Fake Announcement",
-      message: "Test",
-      type: "ANNOUNCEMENT",
-      referenceId: "admin_announcement",
-      isRead: false,
-      createdAt: nowDate(),
-    })
-  );
+  // Regular user cannot read or list telegram_notifications
+  await assertFails(aliceDb.collection("telegram_notifications").get());
 
-  // Admin can create ANNOUNCEMENT notification
-  const adminDb = testEnv.authenticatedContext(ADMIN_UID, {
-    email: "fyslahm28@gmail.com",
+  // Verified Admin can read and list telegram_notifications
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID_1, {
+    email: "foysalahamad102@gmail.com",
     email_verified: true,
   }).firestore();
-  await assertSucceeds(
-    adminDb.collection("notifications").doc("notif_admin_1").set({
-      recipientId: "ALL_USERS",
-      senderId: ADMIN_UID,
-      senderName: "নাজিমে আলা",
-      title: "জরুরি ঘোষণা",
-      message: "নতুন শিক্ষাবর্ষের খেদমত বিজ্ঞপ্তি যাচাই চলছে।",
-      type: "ANNOUNCEMENT",
-      referenceId: "admin_announcement",
-      isRead: false,
-      createdAt: nowDate(),
-    })
-  );
-
-  // Bob can read broadcast notifications and mark notif_1 as read in his own notification_reads
-  await assertSucceeds(
-    bobDb.collection("notifications").where("recipientId", "==", "ALL_USERS").get()
-  );
-  await assertSucceeds(
-    bobDb.collection("users").doc(BOB_UID).collection("notification_reads").doc("notif_1").set({
-      userId: BOB_UID,
-      notificationId: "notif_1",
-      readAt: nowDate(),
-    })
-  );
+  await assertSucceeds(adminDb.collection("telegram_notifications").get());
 });

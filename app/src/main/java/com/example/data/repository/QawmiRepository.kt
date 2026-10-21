@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.R
+import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.AppNotification
 import com.example.data.model.BookmarkItem
 import com.example.data.model.DirectMessage
@@ -9,7 +10,10 @@ import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
 import com.example.data.model.NotificationReadReceipt
+import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
+import com.example.ui.util.AdminSecurityHelper
+import com.example.ui.util.TelegramNotificationHelper
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
@@ -37,6 +41,92 @@ class QawmiRepository(
     private fun requireUserId(): String {
         return auth.currentUser?.uid
             ?: throw IllegalStateException("এটি সম্পন্ন করতে গুগল অ্যাকাউন্ট দিয়ে লগইন করা আবশ্যক।")
+    }
+
+    // --- 0. ADMIN IDENTITY, SERVER REGISTRY & PASSWORD RECOVERY ---
+
+    fun observeAdminRegistryEntry(userId: String): Flow<AdminRegistryEntry?> {
+        val path = "admins/$userId"
+        return db.collection("admins").document(userId)
+            .snapshots()
+            .map { snapshot ->
+                if (snapshot.exists()) {
+                    snapshot.toObject(AdminRegistryEntry::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                } else {
+                    null
+                }
+            }
+            .catch {
+                emit(null)
+            }
+    }
+
+    /**
+     * Verifies the signed Firebase Auth ID token / Custom Claims and syncs the server-side
+     * `/admins/{uid}` registry document when an authorized Admin logs in.
+     * Protected on the backend by `isTokenVerifiedAdmin()` in `firestore.rules`.
+     */
+    suspend fun ensureVerifiedAdminRegistryDocument(): Result<Boolean> {
+        val currentUser = auth.currentUser ?: return Result.success(false)
+        val isVerifiedAdmin = AdminSecurityHelper.verifyServerTokenAdminClaims(currentUser)
+        if (!isVerifiedAdmin) {
+            return Result.success(false)
+        }
+        val uid = currentUser.uid
+        val normalizedEmail = AdminSecurityHelper.normalizeEmail(currentUser.email)
+            .takeIf { AdminSecurityHelper.isAuthorizedAdminEmail(it) }
+            ?: "fyslahm28@gmail.com"
+        val docRef = db.collection("admins").document(uid)
+        return try {
+            val payload = mapOf(
+                "adminId" to uid,
+                "email" to normalizedEmail,
+                "adminPhone" to AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+                "role" to "SUPER_ADMIN",
+                "verifiedByAuthToken" to true,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).await()
+            Result.success(true)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Sends a secure Firebase Authentication Password Reset Link to a verified, registered
+     * Admin email address (`foysalahamad102@gmail.com`, `foysalahamad204@gmail.com`, `fyslahm28@gmail.com`).
+     * Strictly rejects any non-admin or invalid email address.
+     */
+    suspend fun sendAdminPasswordResetLink(email: String): Result<String> {
+        val normalizedEmail = AdminSecurityHelper.normalizeEmail(email)
+        if (!AdminSecurityHelper.isAuthorizedAdminEmail(normalizedEmail)) {
+            return Result.failure(
+                IllegalArgumentException(
+                    "শুধুমাত্র অনুমোদিত অ্যাডমিন ইমেইলে (foysalahamad102@gmail.com, foysalahamad204@gmail.com, fyslahm28@gmail.com) পাসওয়ার্ড রিসেট লিংক পাঠানো যাবে।"
+                )
+            )
+        }
+        return try {
+            auth.sendPasswordResetEmail(normalizedEmail).await()
+            if (auth.currentUser != null && AdminSecurityHelper.verifyServerTokenAdminClaims(auth.currentUser)) {
+                enqueueAndDispatchTelegramNotification(
+                    eventType = "ADMIN_SECURITY",
+                    title = "অ্যাডমিন পাসওয়ার্ড রিসেট লিংক প্রেরণ",
+                    message = "অনুমোদিত অ্যাডমিন ইমেইল ($normalizedEmail)-এ Firebase Authentication থেকে নিরাপদ Password Reset Link পাঠানো হয়েছে।",
+                    actorName = normalizedEmail,
+                    referenceId = "password_reset"
+                )
+            }
+            Result.success(normalizedEmail)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     // --- 1. USER PROFILE, PHOTO & REAL-TIME PRESENCE (ONLINE / LAST SEEN) ---
@@ -345,12 +435,22 @@ class QawmiRepository(
             } else {
                 "${title.trim()} (${qualification.trim()}) '${designation.trim()}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
             }
+            val resolvedSender = authorName.trim().ifBlank { title.trim() }
             createNotification(
                 recipientId = "ALL_USERS",
-                senderName = authorName.trim().ifBlank { title.trim() },
+                senderName = resolvedSender,
                 title = notifTitle,
                 message = notifMsg.take(500),
                 type = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
+                referenceId = docRef.id
+            )
+
+            // Enqueue & dispatch Telegram notification for Admin oversight
+            enqueueAndDispatchTelegramNotification(
+                eventType = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
+                title = notifTitle,
+                message = "$notifMsg (যোগাযোগ: ${contactNumber.trim().ifBlank { "অপ্রদত্ত" }})",
+                actorName = resolvedSender,
                 referenceId = docRef.id
             )
 
@@ -404,6 +504,13 @@ class QawmiRepository(
                     referenceId = post.id
                 )
             }
+            enqueueAndDispatchTelegramNotification(
+                eventType = "ADMIN_VERIFICATION",
+                title = "পোস্ট যাচাইকরণ হালনাগাদ",
+                message = "'${post.title}' (${post.designation}) পোস্টের যাচাইকরণ অবস্থা: ${if (isVerified) "যাচাইকৃত ✓" else "আনভেরিফাই"}",
+                actorName = adminName,
+                referenceId = post.id
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -438,6 +545,13 @@ class QawmiRepository(
                     referenceId = post.id
                 )
             }
+            enqueueAndDispatchTelegramNotification(
+                eventType = "ADMIN_VERIFICATION",
+                title = if (isBoosted) "বিজ্ঞপ্তি Boosted করা হয়েছে" else "বিজ্ঞপ্তির Boost সরানো হয়েছে",
+                message = "'${post.title}' (${post.designation} - ${post.district}) বিজ্ঞপ্তির Boost অবস্থা হালনাগাদ করা হয়েছে।",
+                actorName = adminName,
+                referenceId = post.id
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -542,6 +656,15 @@ class QawmiRepository(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             docRef.set(payload).await()
+
+            enqueueAndDispatchTelegramNotification(
+                eventType = "NEW_MADRASA",
+                title = "নতুন মাদরাসা নিবন্ধন: ${name.trim()}",
+                message = "জেলা: ${district.trim()} | সর্বোচ্চ মারহালা: ${highestMarhala.trim()} | যোগাযোগ: ${contactPhone.trim()}",
+                actorName = name.trim(),
+                referenceId = docRef.id
+            )
+
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
@@ -576,6 +699,15 @@ class QawmiRepository(
                     referenceId = madrasa.id
                 )
             }
+
+            enqueueAndDispatchTelegramNotification(
+                eventType = "ADMIN_VERIFICATION",
+                title = if (verified) "মাদরাসা যাচাইকৃত অনুমোদিত" else "মাদরাসা যাচাইকরণ পরিবর্তন",
+                message = "'${madrasa.name}' (${madrasa.district}) মাদরাসার যাচাইকরণ স্ট্যাটাস: ${if (verified) "যাচাইকৃত ✓" else "অযাচাইকৃত"}",
+                actorName = adminName,
+                referenceId = madrasa.id
+            )
+
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -656,6 +788,15 @@ class QawmiRepository(
                     referenceId = docRef.id
                 )
             }
+
+            enqueueAndDispatchTelegramNotification(
+                eventType = "KHEDMOT_SUBMISSION",
+                title = "বিজ্ঞপ্তিতে নতুন খেদমত আবেদন: ${post.title}",
+                message = "প্রার্থী: ${applicantName.trim()} (${applicantQualification.trim()}) | পদ: ${post.designation} | ফোন: ${applicantPhone.trim()}",
+                actorName = applicantName.trim(),
+                referenceId = docRef.id
+            )
+
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
@@ -914,14 +1055,25 @@ class QawmiRepository(
         message: String
     ): Result<String> {
         requireUserId()
-        return createNotification(
+        val resolvedAdmin = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" }
+        val notifResult = createNotification(
             recipientId = "ALL_USERS",
-            senderName = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" },
+            senderName = resolvedAdmin,
             title = title.trim(),
             message = message.trim(),
             type = "ANNOUNCEMENT",
             referenceId = "admin_announcement"
         )
+        notifResult.onSuccess { notifId ->
+            enqueueAndDispatchTelegramNotification(
+                eventType = "ADMIN_ANNOUNCEMENT",
+                title = title.trim(),
+                message = message.trim(),
+                actorName = resolvedAdmin,
+                referenceId = notifId.ifBlank { "admin_announcement" }
+            )
+        }
+        return notifResult
     }
 
     suspend fun markNotificationAsRead(notification: AppNotification): Result<Unit> {
@@ -987,5 +1139,90 @@ class QawmiRepository(
             handleFirestoreError(e, OperationType.WRITE, "users/$uid/notification_reads")
             Result.failure(e)
         }
+    }
+
+    // --- 8. TELEGRAM NOTIFICATION SYSTEM (টেলিগ্রাম নোটিফিকেশন সিস্টেম ও অ্যাডমিন অডিট লগ) ---
+
+    fun observeTelegramNotifications(): Flow<List<TelegramNotificationLog>> {
+        val path = "telegram_notifications"
+        return db.collection(path)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toObjects(TelegramNotificationLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    suspend fun enqueueAndDispatchTelegramNotification(
+        eventType: String,
+        title: String,
+        message: String,
+        actorName: String,
+        referenceId: String
+    ): Result<String> {
+        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
+        val docRef = db.collection("telegram_notifications").document()
+        return try {
+            val resolvedActor = actorName.trim().ifBlank { "কওমি কর্মসংস্থান" }.take(200)
+            val resolvedTitle = title.trim().ifBlank { "কওমি কর্মসংস্থান ইত্তেলা" }.take(250)
+            val resolvedMessage = message.trim().ifBlank { resolvedTitle }.take(2000)
+
+            val payload = mapOf(
+                "eventType" to eventType,
+                "title" to resolvedTitle,
+                "message" to resolvedMessage,
+                "actorId" to uid,
+                "actorName" to resolvedActor,
+                "targetPhone" to AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+                "referenceId" to referenceId.take(128),
+                "deliveryStatus" to "QUEUED",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).await()
+
+            val delivered = TelegramNotificationHelper.dispatchToTelegramBot(
+                eventType = eventType,
+                title = resolvedTitle,
+                message = resolvedMessage,
+                actorName = resolvedActor,
+                targetPhone = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
+            )
+            if (delivered) {
+                docRef.update(
+                    mapOf(
+                        "deliveryStatus" to "DELIVERED",
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(docRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun sendAdminTestTelegramNotification(
+        adminName: String,
+        customAlertText: String = ""
+    ): Result<String> {
+        requireUserId()
+        val msg = customAlertText.trim().ifBlank {
+            "আলহামদুলিল্লাহ, অ্যাডমিন প্যানেল ও টেলিগ্রাম নোটিফিকেশন সিস্টেম সক্রিয় ও সংযুক্ত রয়েছে (অ্যাডমিন মোবাইল: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER})।"
+        }
+        return enqueueAndDispatchTelegramNotification(
+            eventType = "ADMIN_SECURITY",
+            title = "অ্যাডমিন টেলিগ্রাম সিস্টেম যাচাই",
+            message = msg,
+            actorName = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" },
+            referenceId = "telegram_test_alert"
+        )
     }
 }

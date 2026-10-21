@@ -1,5 +1,16 @@
 {
   "entities": {
+    "AdminRegistryEntry": {
+      "description": "Server-verified administrator identity record bound to Firebase Auth UID, email, and admin phone.",
+      "properties": {
+        "adminId": { "type": "string", "required": true },
+        "email": { "type": "string", "required": true },
+        "adminPhone": { "type": "string", "required": true },
+        "role": { "type": "string", "required": true, "enum": ["SUPER_ADMIN"] },
+        "verifiedByAuthToken": { "type": "boolean", "required": true },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
+    },
     "UserProfile": {
       "description": "Authenticated user profile for Qawmi Madrasa teachers/seekers (Khadim) and Madrasa authorities (Muhtamim) with profile photo and real-time online/last-seen presence.",
       "properties": {
@@ -134,9 +145,29 @@
         "notificationId": { "type": "string", "required": true },
         "readAt": { "type": "timestamp", "required": true }
       }
+    },
+    "TelegramNotificationLog": {
+      "description": "Server-backed Telegram alert queue and audit log for platform events and admin actions.",
+      "properties": {
+        "eventType": { "type": "string", "required": true, "enum": ["NEW_CIRCULAR", "NEW_APPLICATION", "KHEDMOT_SUBMISSION", "NEW_MADRASA", "ADMIN_ANNOUNCEMENT", "ADMIN_VERIFICATION", "ADMIN_SECURITY"] },
+        "title": { "type": "string", "required": true },
+        "message": { "type": "string", "required": true },
+        "actorId": { "type": "string", "required": true },
+        "actorName": { "type": "string", "required": true },
+        "targetPhone": { "type": "string", "required": true },
+        "referenceId": { "type": "string", "required": true },
+        "deliveryStatus": { "type": "string", "required": true, "enum": ["DELIVERED", "QUEUED", "FAILED"] },
+        "createdAt": { "type": "timestamp", "required": true },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
     }
   },
   "collections": [
+    {
+      "path": "/admins/{adminId}",
+      "entity": "AdminRegistryEntry",
+      "access": "Only verified admins (authenticated via Firebase Auth token / Custom Claims) can read or sync their own registry entry."
+    },
     {
       "path": "/users/{userId}",
       "entity": "UserProfile",
@@ -176,6 +207,11 @@
       "path": "/notifications/{notificationId}",
       "entity": "AppNotification",
       "access": "Authenticated users can create notifications where senderId == auth.uid; recipient or ALL_USERS can read; recipient can mark isRead; only admin can create ANNOUNCEMENT or BOOST notifications."
+    },
+    {
+      "path": "/telegram_notifications/{logId}",
+      "entity": "TelegramNotificationLog",
+      "access": "Authenticated users can enqueue event notifications for their own actions; only verified admins can read, list, or delete logs."
     }
   ]
 }

@@ -83,11 +83,16 @@ import com.example.ui.util.IslamicDateAndPrayerHelper
 import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.UiState
 
+import androidx.compose.material.icons.filled.LockReset
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
+import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.ui.components.UserAvatarImage
 import com.example.ui.theme.QawmiAlertRed
 import com.example.ui.theme.QawmiSoftBg
+import com.example.ui.util.AdminSecurityHelper
+import com.example.ui.util.TelegramNotificationHelper
 import com.google.firebase.Timestamp
 
 @Composable
@@ -1386,17 +1391,27 @@ fun NotificationsScreen(
 @Composable
 fun AdminPanelScreen(
     isAdminUser: Boolean,
+    adminEmail: String = "",
     madrasasState: UiState<List<MadrasaProfile>>,
     feedPostsState: UiState<List<FeedPost>>,
+    telegramNotificationsState: UiState<List<TelegramNotificationLog>> = UiState.Success(emptyList()),
     isSubmitting: Boolean = false,
     onVerifyMadrasa: (MadrasaProfile, Boolean) -> Unit,
     onVerifyPost: (FeedPost, Boolean, String) -> Unit,
     onToggleBoostPost: (FeedPost, Boolean) -> Unit,
     onSendAnnouncement: (title: String, message: String) -> Unit,
+    onRequestPasswordReset: (email: String) -> Unit = {},
+    onSendTestTelegramAlert: (customMessage: String) -> Unit = {},
     onDeletePost: (String) -> Unit
 ) {
+    val context = LocalContext.current
     var announcementTitle by remember { mutableStateOf("") }
     var announcementBody by remember { mutableStateOf("") }
+    var resetEmailInput by remember(adminEmail) {
+        mutableStateOf(adminEmail.ifBlank { "fyslahm28@gmail.com" })
+    }
+    var customTelegramMessage by remember { mutableStateOf("") }
+    val isBotConfigured = remember { TelegramNotificationHelper.isTelegramBotConfigured() }
 
     Column(
         modifier = Modifier
@@ -1431,12 +1446,13 @@ fun AdminPanelScreen(
                     )
                     Text(
                         text = if (isAdminUser) {
-                            "আপনি অনুমোদিত অ্যাডমিন হিসেবে ঘোষণা প্রেরণ, বিজ্ঞপ্তি Boost এবং মাদরাসা যাচাইকরণ নিয়ন্ত্রণ করতে পারবেন।"
+                            "যাচাইকৃত অ্যাডমিন: ${adminEmail.ifBlank { "নাজিমে আলা" }} • মোবাইল: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER}"
                         } else {
-                            "শুধুমাত্র অনুমোদিত অ্যাডমিন ঘোষণা প্রকাশ, বিজ্ঞপ্তি Boost ও মাদরাসা যাচাইকরণ নিয়ন্ত্রণ করতে পারেন।"
+                            "অনুমোদনহীন প্রবেশাধিকার: শুধুমাত্র যাচাইকৃত অ্যাডমিন এই প্যানেল ব্যবহার করতে পারবেন।"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = QawmiTextSecondary
+                        color = if (isAdminUser) QawmiDeepGreen else Color(0xFFC62828),
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
             }
@@ -1444,66 +1460,357 @@ fun AdminPanelScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
+        if (!isAdminUser) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Color(0xFFEF9A9A), RoundedCornerShape(14.dp)),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "অ্যাডমিন অ্যাক্সেস সংরক্ষিত",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color(0xFFC62828),
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "শুধুমাত্র অনুমোদিত অ্যাডমিন অ্যাকাউন্ট (Firebase Authentication ও সার্ভার-সাইড Security Rules দ্বারা যাচাইকৃত) দিয়ে লগইন করলে অ্যাডমিন প্যানেল ব্যবহার করা যাবে।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = QawmiTextDark
+                    )
+                }
+            }
+            return@Column
+        }
+
         val madrasas = (madrasasState as? UiState.Success)?.data ?: emptyList()
         val posts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
+        val telegramLogs = (telegramNotificationsState as? UiState.Success)?.data ?: emptyList()
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (isAdminUser) {
-                item {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, QawmiDeepGreen, RoundedCornerShape(14.dp)),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White)
+            // 1. ADMIN IDENTITY, SECURITY & PASSWORD RECOVERY CARD
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "সকল ব্যবহারকারীর জন্য অ্যাডমিনের ঘোষণা (Push ও ইন-অ্যাপ ইত্তেলা)",
+                                text = "১. অনুমোদিত অ্যাডমিন পরিচয় ও পাসওয়ার্ড পুনরুদ্ধার",
                                 style = MaterialTheme.typography.titleSmall,
                                 color = QawmiDeepGreen,
                                 fontWeight = FontWeight.Bold
                             )
-                            OutlinedTextField(
-                                value = announcementTitle,
-                                onValueChange = { announcementTitle = it },
-                                label = { Text("ঘোষণার শিরোনাম *") },
-                                placeholder = { Text("যেমন: নতুন শিক্ষাবর্ষের খেদমত বিজ্ঞপ্তি সংক্রান্ত জরুরি এলান") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("admin_announcement_title_input")
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = QawmiDeepGreen
+                            ) {
+                                Text(
+                                    text = "SUPER_ADMIN ✓",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiGold,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = QawmiSoftBg,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Text(
+                                    text = "সার্ভার-যাচাইকৃত অনুমোদিত অ্যাডমিন ইমেইলসমূহ:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiDeepGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                AdminSecurityHelper.AUTHORIZED_ADMIN_EMAILS.forEach { mail ->
+                                    Text(
+                                        text = "• $mail",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = QawmiTextDark,
+                                        fontWeight = if (mail.equals(adminEmail, ignoreCase = true)) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                }
+                                Text(
+                                    text = "অ্যাডমিন মোবাইল নম্বর: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiDeepGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = resetEmailInput,
+                            onValueChange = { resetEmailInput = it },
+                            label = { Text("পাসওয়ার্ড পুনরুদ্ধারের জন্য নিবন্ধিত অ্যাডমিন ইমেইল") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_panel_reset_email_input")
+                        )
+
+                        Button(
+                            onClick = { onRequestPasswordReset(resetEmailInput) },
+                            enabled = !isSubmitting,
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiSeekerBlue),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .align(Alignment.End)
+                                .testTag("admin_panel_reset_password_button")
+                        ) {
+                            Icon(Icons.Default.LockReset, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Password Reset Link পাঠান")
+                        }
+                    }
+                }
+            }
+
+            // 2. TELEGRAM NOTIFICATION SYSTEM & REAL-TIME DISPATCH CENTER
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, QawmiDeepGreen, RoundedCornerShape(14.dp)),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "২. টেলিগ্রাম নোটিফিকেশন সিস্টেম ও ইত্তেলা লগ",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold
                             )
-                            OutlinedTextField(
-                                value = announcementBody,
-                                onValueChange = { announcementBody = it },
-                                label = { Text("বিস্তারিত ঘোষণা / বার্তা *") },
-                                placeholder = { Text("সকল মুহতামিম ও মুদাররিস ভাইদের অবগতির জন্য জানানো যাচ্ছে যে...") },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(88.dp)
-                                    .testTag("admin_announcement_body_input")
-                            )
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = if (isBotConfigured) QawmiVerifiedGreen else QawmiDarkGreen
+                            ) {
+                                Text(
+                                    text = if (isBotConfigured) "Bot API সংযুক্ত ✓" else "Firestore Queue সক্রিয়",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = "নতুন নিয়োগ বিজ্ঞপ্তি, খেদমত আবেদন, মাদরাসা নিবন্ধন ও অ্যাডমিনের ঘোষণার তাৎক্ষণিক টেলিগ্রাম ইত্তেলা (হটলাইন: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER})।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiTextSecondary
+                        )
+
+                        OutlinedTextField(
+                            value = customTelegramMessage,
+                            onValueChange = { customTelegramMessage = it },
+                            label = { Text("টেলিগ্রাম বট / চ্যানেলে তাৎক্ষণিক বার্তা (ঐচ্ছিক)") },
+                            placeholder = { Text("যেমন: নতুন বিজ্ঞপ্তি ও মাদরাসা যাচাইকরণ সম্পন্ন হয়েছে...") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_telegram_custom_input")
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
                             Button(
                                 onClick = {
-                                    onSendAnnouncement(announcementTitle, announcementBody)
-                                    announcementTitle = ""
-                                    announcementBody = ""
+                                    onSendTestTelegramAlert(customTelegramMessage)
+                                    customTelegramMessage = ""
                                 },
                                 enabled = !isSubmitting,
                                 colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
                                 shape = RoundedCornerShape(50),
-                                modifier = Modifier
-                                    .align(Alignment.End)
-                                    .testTag("admin_send_announcement_button")
+                                modifier = Modifier.testTag("admin_send_telegram_test_button")
                             ) {
                                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(15.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("ঘোষণা প্রকাশ করুন")
+                                Text("টেলিগ্রাম ইত্তেলা পাঠান")
                             }
+                        }
+
+                        if (telegramLogs.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "সাম্প্রতিক টেলিগ্রাম ইত্তেলা সমূহ (${IslamicDateAndPrayerHelper.toBanglaDigits(telegramLogs.size.toString())} টি):",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold
+                            )
+                            telegramLogs.take(5).forEach { tgLog ->
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = QawmiSoftBg,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
+                                        .testTag("telegram_log_item_${tgLog.id}")
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = tgLog.title,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = QawmiDeepGreen,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Surface(
+                                                shape = RoundedCornerShape(50),
+                                                color = if (tgLog.deliveryStatus == "DELIVERED") QawmiVerifiedGreen else QawmiGold
+                                            ) {
+                                                Text(
+                                                    text = if (tgLog.deliveryStatus == "DELIVERED") "DELIVERED" else "QUEUED",
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontSize = 9.5.sp,
+                                                    color = if (tgLog.deliveryStatus == "DELIVERED") Color.White else QawmiTextDark,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = tgLog.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = QawmiTextDark
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "${tgLog.actorName} • ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(tgLog.createdAt)}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = QawmiTextMuted
+                                            )
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val formatted = TelegramNotificationHelper.formatTelegramEventMessage(
+                                                        eventType = tgLog.eventType,
+                                                        title = tgLog.title,
+                                                        message = tgLog.message,
+                                                        actorName = tgLog.actorName,
+                                                        targetPhone = tgLog.targetPhone
+                                                    )
+                                                    TelegramNotificationHelper.shareAlertToTelegram(context, formatted)
+                                                },
+                                                shape = RoundedCornerShape(50),
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                modifier = Modifier.height(26.dp)
+                                            ) {
+                                                Text(
+                                                    text = "টেলিগ্রামে ফরোয়ার্ড",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = QawmiDeepGreen
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. ADMIN BROADCAST ANNOUNCEMENT CARD
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, QawmiDeepGreen, RoundedCornerShape(14.dp)),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "৩. সকল ব্যবহারকারীর জন্য অ্যাডমিনের ঘোষণা (Push ও ইন-অ্যাপ ইত্তেলা)",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = QawmiDeepGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                        OutlinedTextField(
+                            value = announcementTitle,
+                            onValueChange = { announcementTitle = it },
+                            label = { Text("ঘোষণার শিরোনাম *") },
+                            placeholder = { Text("যেমন: নতুন শিক্ষাবর্ষের খেদমত বিজ্ঞপ্তি সংক্রান্ত জরুরি এলান") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_announcement_title_input")
+                        )
+                        OutlinedTextField(
+                            value = announcementBody,
+                            onValueChange = { announcementBody = it },
+                            label = { Text("বিস্তারিত ঘোষণা / বার্তা *") },
+                            placeholder = { Text("সকল মুহতামিম ও মুদাররিস ভাইদের অবগতির জন্য জানানো যাচ্ছে যে...") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(88.dp)
+                                .testTag("admin_announcement_body_input")
+                        )
+                        Button(
+                            onClick = {
+                                onSendAnnouncement(announcementTitle, announcementBody)
+                                announcementTitle = ""
+                                announcementBody = ""
+                            },
+                            enabled = !isSubmitting,
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .align(Alignment.End)
+                                .testTag("admin_send_announcement_button")
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("ঘোষণা প্রকাশ করুন")
                         }
                     }
                 }
@@ -1567,52 +1874,48 @@ fun AdminPanelScreen(
                                     color = QawmiTextSecondary
                                 )
                             }
-                            if (isAdminUser) {
-                                IconButton(onClick = { onDeletePost(post.id) }) {
-                                    Icon(Icons.Default.DeleteOutline, contentDescription = "মুছুন", tint = Color(0xFFC62828))
-                                }
+                            IconButton(onClick = { onDeletePost(post.id) }) {
+                                Icon(Icons.Default.DeleteOutline, contentDescription = "মুছুন", tint = Color(0xFFC62828))
                             }
                         }
 
-                        if (isAdminUser) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = { onToggleBoostPost(post, !post.isBoosted) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (post.isBoosted) QawmiDarkGreen else QawmiGold,
+                                    contentColor = if (post.isBoosted) Color.White else QawmiTextDark
+                                ),
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .testTag("admin_panel_boost_btn_${post.id}")
                             ) {
-                                Button(
-                                    onClick = { onToggleBoostPost(post, !post.isBoosted) },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (post.isBoosted) QawmiDarkGreen else QawmiGold,
-                                        contentColor = if (post.isBoosted) Color.White else QawmiTextDark
-                                    ),
-                                    shape = RoundedCornerShape(50),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                    modifier = Modifier
-                                        .height(32.dp)
-                                        .testTag("admin_panel_boost_btn_${post.id}")
-                                ) {
-                                    Text(
-                                        text = if (post.isBoosted) "★ Boost সরান" else "★ ফিডে Boost করুন",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
+                                Text(
+                                    text = if (post.isBoosted) "★ Boost সরান" else "★ ফিডে Boost করুন",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
 
-                                Button(
-                                    onClick = { onVerifyPost(post, !post.isVerifiedMadrasa, "APPROVED") },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (post.isVerifiedMadrasa) QawmiSeekerBlue else QawmiDeepGreen
-                                    ),
-                                    shape = RoundedCornerShape(50),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                    modifier = Modifier.height(32.dp)
-                                ) {
-                                    Text(
-                                        text = if (post.isVerifiedMadrasa) "আনভেরিফাই" else "ভেরিফাই ব্যাজ দিন",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
+                            Button(
+                                onClick = { onVerifyPost(post, !post.isVerifiedMadrasa, "APPROVED") },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (post.isVerifiedMadrasa) QawmiSeekerBlue else QawmiDeepGreen
+                                ),
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text(
+                                    text = if (post.isVerifiedMadrasa) "আনভেরিফাই" else "ভেরিফাই ব্যাজ দিন",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
                             }
                         }
                     }
@@ -1652,19 +1955,17 @@ fun AdminPanelScreen(
                                 color = if (madrasa.isVerified) QawmiVerifiedGreen else QawmiTextMuted
                             )
                         }
-                        if (isAdminUser) {
-                            Button(
-                                onClick = { onVerifyMadrasa(madrasa, !madrasa.isVerified) },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (madrasa.isVerified) QawmiSeekerBlue else QawmiDeepGreen
-                                ),
-                                shape = RoundedCornerShape(50)
-                            ) {
-                                Text(
-                                    text = if (madrasa.isVerified) "বাতিল" else "যাচাইকৃত করুন",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
+                        Button(
+                            onClick = { onVerifyMadrasa(madrasa, !madrasa.isVerified) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (madrasa.isVerified) QawmiSeekerBlue else QawmiDeepGreen
+                            ),
+                            shape = RoundedCornerShape(50)
+                        ) {
+                            Text(
+                                text = if (madrasa.isVerified) "বাতিল" else "যাচাইকৃত করুন",
+                                style = MaterialTheme.typography.labelSmall
+                            )
                         }
                     }
                 }
