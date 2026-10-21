@@ -98,4 +98,18 @@ class ExampleUnitTest {
         assertTrue(sanitized.contains("[REDACTED_BOT_TOKEN]"))
         assertTrue(sanitized.contains("[REDACTED_FIREBASE_SECRET]"))
     }
+
+    @Test
+    fun telegramNotificationHelper_resolvesConfiguredChatIdAndDispatchesSafely() = kotlinx.coroutines.runBlocking {
+        val targetChatId = TelegramNotificationHelper.resolveTargetChatId()
+        assertEquals("6255562134", targetChatId)
+        // Attempt dispatch using BuildConfig credentials (gracefully returns Boolean without throwing)
+        val dispatched = TelegramNotificationHelper.dispatchToTelegramBot(
+            eventType = "ADMIN_SECURITY",
+            title = "অ্যাডমিন প্যানেল সংযোগ পরীক্ষা",
+            message = "কওমি কর্মসংস্থান অ্যাপ থেকে টেলিগ্রাম নোটিফিকেশন সিস্টেম সফলভাবে সচল রয়েছে।",
+            actorName = "fyslahm28@gmail.com"
+        )
+        println("Telegram dispatch result in test environment: $dispatched (chatId=$targetChatId)")
+    }
 }

@@ -17,6 +17,7 @@ import java.util.TimeZone
 object TelegramNotificationHelper {
 
     const val DEFAULT_TELEGRAM_CHANNEL = "@Q_kormosongsthan_Bangladesh"
+    const val DEFAULT_ADMIN_CHAT_ID = "6255562134"
     const val TELEGRAM_CHANNEL_URL = "https://t.me/Q_kormosongsthan_Bangladesh"
 
     private const val PLACEHOLDER_TOKEN = "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE"
@@ -33,7 +34,7 @@ object TelegramNotificationHelper {
         return if (configured.isNotBlank() && configured != PLACEHOLDER_CHAT_ID) {
             configured
         } else {
-            DEFAULT_TELEGRAM_CHANNEL
+            DEFAULT_ADMIN_CHAT_ID
         }
     }
 
