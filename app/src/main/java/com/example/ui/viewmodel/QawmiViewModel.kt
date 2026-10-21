@@ -136,7 +136,7 @@ class QawmiViewModel(
             Log.w(TAG, "Error observing user profile", e)
             emit(UiState.Error(e.localizedMessage ?: "প্রোফাইল লোড করা যায়নি"))
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val inspectedUserProfileState: StateFlow<UiState<UserProfile?>> = _inspectedUserTarget
         .flatMapLatest { target ->
@@ -199,33 +199,35 @@ class QawmiViewModel(
             Log.w(TAG, "Error observing messages", e)
             emit(UiState.Error(e.localizedMessage ?: "মেসেজ লোড করা যায়নি"))
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     // Real-time profiles of all conversation partners in the inbox (for Online/Offline, Last Seen & Avatar)
-    val chatPartnerProfilesState: StateFlow<Map<String, UserProfile>> = messagesState
-        .flatMapLatest { msgState ->
-            val messages = (msgState as? UiState.Success)?.data ?: emptyList()
-            val partnerIds = messages.map { msg ->
-                if (msg.senderId == currentUserId) msg.receiverId else msg.senderId
-            }.toMutableSet()
-            _messageTargetUser.value?.first?.takeIf { it.isNotBlank() }?.let { partnerIds.add(it) }
-            val validIds = partnerIds.filter { it.isNotBlank() && it != currentUserId }
-            if (validIds.isEmpty()) {
-                flowOf(emptyMap())
-            } else {
-                val flows = validIds.map { partnerUid ->
-                    repository.observeUserProfile(partnerUid)
-                        .map { profile -> partnerUid to profile }
-                        .catch { emit(partnerUid to null) }
-                }
-                combine(flows) { pairs ->
-                    pairs.mapNotNull { (uid, profile) ->
-                        if (profile != null) uid to profile else null
-                    }.toMap()
-                }
+    val chatPartnerProfilesState: StateFlow<Map<String, UserProfile>> = combine(
+        messagesState,
+        _messageTargetUser
+    ) { msgState, targetUser ->
+        val messages = (msgState as? UiState.Success)?.data ?: emptyList()
+        val partnerIds = messages.map { msg ->
+            if (msg.senderId == currentUserId) msg.receiverId else msg.senderId
+        }.toMutableSet()
+        targetUser?.first?.takeIf { it.isNotBlank() }?.let { partnerIds.add(it) }
+        partnerIds.filter { it.isNotBlank() && it != currentUserId }
+    }.flatMapLatest { validIds ->
+        if (validIds.isEmpty()) {
+            flowOf(emptyMap())
+        } else {
+            val flows = validIds.map { partnerUid ->
+                repository.observeUserProfile(partnerUid)
+                    .map { profile -> partnerUid to profile }
+                    .catch { emit(partnerUid to null) }
+            }
+            combine(flows) { pairs ->
+                pairs.mapNotNull { (uid, profile) ->
+                    if (profile != null) uid to profile else null
+                }.toMap()
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyMap())
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     val activeChatPartnerProfileState: StateFlow<UserProfile?> = _messageTargetUser
         .flatMapLatest { target ->
@@ -237,7 +239,7 @@ class QawmiViewModel(
                     .catch { emit(null) }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val notificationsState: StateFlow<UiState<List<AppNotification>>> = repository.observeNotifications(currentUserId)
         .map<List<AppNotification>, UiState<List<AppNotification>>> { UiState.Success(it) }
@@ -245,7 +247,7 @@ class QawmiViewModel(
             Log.w(TAG, "Error observing notifications", e)
             emit(UiState.Error(e.localizedMessage ?: "নোটিফিকেশন লোড করা যায়নি"))
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     // Real-time Telegram notifications queue (strictly observed ONLY when verified Admin is logged in)
     val telegramNotificationsState: StateFlow<UiState<List<TelegramNotificationLog>>> = isAdminState
