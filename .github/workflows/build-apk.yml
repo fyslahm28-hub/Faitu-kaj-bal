@@ -30,10 +30,66 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Decode Registered Debug Keystore (for Google Sign-In SHA-1 Match)
+      - name: Restore Debug Keystore & Firebase Config for CI Build
         run: |
           if [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+            base64 -d debug.keystore.base64 > "${GITHUB_WORKSPACE}/debug.keystore"
+          else
+            cat << 'EOF' | base64 -d > "${GITHUB_WORKSPACE}/debug.keystore"
+          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
+          EOF
+          fi
+
+          if [ ! -f app/google-services.json ]; then
+            cat << 'EOF' > app/google-services.json
+          {
+            "project_info": {
+              "project_number": "629586749547",
+              "project_id": "gen-lang-client-0048059944",
+              "storage_bucket": "gen-lang-client-0048059944.firebasestorage.app"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:629586749547:android:7000d427f8ef952b29292e",
+                  "android_client_info": {
+                    "package_name": "com.aistudio.qawmikormo.khedmt"
+                  }
+                },
+                "oauth_client": [
+                  {
+                    "client_id": "629586749547-ia6cd950d81nioteuamgrlktof3pksqq.apps.googleusercontent.com",
+                    "client_type": 1,
+                    "android_info": {
+                      "package_name": "com.aistudio.qawmikormo.khedmt",
+                      "certificate_hash": "50a99a090dc181a418bb43bb4d1a56f0591fbc46"
+                    }
+                  },
+                  {
+                    "client_id": "629586749547-ubgo99u8c72n63t1pujt7dlof51mqn5e.apps.googleusercontent.com",
+                    "client_type": 3
+                  }
+                ],
+                "api_key": [
+                  {
+                    "current_key": "AIzaSyA741d3nFPja5GipgQ4oA0SWnrSysfAVTk"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": [
+                      {
+                        "client_id": "629586749547-ubgo99u8c72n63t1pujt7dlof51mqn5e.apps.googleusercontent.com",
+                        "client_type": 3
+                      }
+                    ]
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
           fi
 
       - name: Build Debug APK
