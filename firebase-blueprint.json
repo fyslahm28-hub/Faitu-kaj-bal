@@ -1,0 +1,552 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public profile for Qawmi Madrasa teachers/applicants and madrasa representatives.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full display name in Bengali."
+        },
+        "accountType": {
+          "type": "string",
+          "description": "Role type: khadim or muhtamim."
+        },
+        "district": {
+          "type": "string",
+          "description": "Current or home district."
+        },
+        "designation": {
+          "type": "string",
+          "description": "Preferred or current designation."
+        },
+        "qualification": {
+          "type": "string",
+          "description": "Academic/Qawmi qualification (e.g., দাওরায়ে হাদীস, ইফতা)."
+        },
+        "experience": {
+          "type": "string",
+          "description": "Experience summary."
+        },
+        "preferredDistricts": {
+          "type": "string",
+          "description": "Comma-separated preferred districts."
+        },
+        "bio": {
+          "type": "string",
+          "description": "Brief introduction and Dini background."
+        },
+        "contactInfo": {
+          "type": "string",
+          "description": "Public contact instructions or number."
+        },
+        "madrasaName": {
+          "type": "string",
+          "description": "Associated madrasa name if applicable."
+        },
+        "isVerified": {
+          "type": "boolean",
+          "description": "Whether the profile is verified by admin."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": [
+        "userId",
+        "fullName",
+        "accountType",
+        "district",
+        "designation",
+        "qualification",
+        "experience",
+        "preferredDistricts",
+        "bio",
+        "contactInfo",
+        "madrasaName",
+        "isVerified",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "FeedPost": {
+      "title": "FeedPost",
+      "description": "A unified feed post representing either a খেদমতের বিজ্ঞপ্তি (JOB_CIRCULAR) or খেদমতপ্রার্থীর আবেদন (SEEKER_APPLICATION).",
+      "type": "object",
+      "properties": {
+        "authorId": {
+          "type": "string",
+          "description": "UID of the user who created the post."
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Name of the author or Madrasa."
+        },
+        "postType": {
+          "type": "string",
+          "description": "JOB_CIRCULAR or SEEKER_APPLICATION."
+        },
+        "title": {
+          "type": "string",
+          "description": "Headline (Madrasa name for circulars, Candidate name for applications)."
+        },
+        "district": {
+          "type": "string",
+          "description": "District location in Bengali."
+        },
+        "upazilaOrLocation": {
+          "type": "string",
+          "description": "Upazila or detailed address."
+        },
+        "designation": {
+          "type": "string",
+          "description": "Position or subject (e.g., সহকারী শিক্ষক, মুহতামিম)."
+        },
+        "qualification": {
+          "type": "string",
+          "description": "Educational qualification required or held."
+        },
+        "salaryOrExperience": {
+          "type": "string",
+          "description": "Hadya/Salary range for circulars or years of experience for applicants."
+        },
+        "deadlineOrPreferredDistricts": {
+          "type": "string",
+          "description": "Application deadline for circulars or preferred districts for applicants."
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description, facilities, or skills."
+        },
+        "contactNumber": {
+          "type": "string",
+          "description": "Contact information for communication."
+        },
+        "madrasaId": {
+          "type": "string",
+          "description": "Optional associated Madrasa ID."
+        },
+        "isVerifiedMadrasa": {
+          "type": "boolean",
+          "description": "Whether this post belongs to a verified madrasa."
+        },
+        "visibility": {
+          "type": "string",
+          "description": "PUBLIC or ARCHIVED."
+        },
+        "approvalStatus": {
+          "type": "string",
+          "description": "APPROVED, PENDING, or REJECTED."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of update."
+        }
+      },
+      "required": [
+        "authorId",
+        "authorName",
+        "postType",
+        "title",
+        "district",
+        "upazilaOrLocation",
+        "designation",
+        "qualification",
+        "salaryOrExperience",
+        "deadlineOrPreferredDistricts",
+        "description",
+        "contactNumber",
+        "madrasaId",
+        "isVerifiedMadrasa",
+        "visibility",
+        "approvalStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MadrasaProfile": {
+      "title": "MadrasaProfile",
+      "description": "Directory profile of a Qawmi Madrasa.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the creator/representative."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the Madrasa."
+        },
+        "district": {
+          "type": "string",
+          "description": "District where the Madrasa is located."
+        },
+        "address": {
+          "type": "string",
+          "description": "Full address."
+        },
+        "establishedYear": {
+          "type": "string",
+          "description": "Year of establishment."
+        },
+        "highestMarhala": {
+          "type": "string",
+          "description": "Highest educational department (e.g., দাওরায়ে হাদীস, ইফতা, হিফয)."
+        },
+        "facilities": {
+          "type": "string",
+          "description": "Special facilities (আবাসন, খানা, কুতুবখানা)."
+        },
+        "studentCount": {
+          "type": "string",
+          "description": "Approximate student count."
+        },
+        "contactPhone": {
+          "type": "string",
+          "description": "Official contact phone."
+        },
+        "isVerified": {
+          "type": "boolean",
+          "description": "Whether the Madrasa is verified by Admin."
+        },
+        "visibility": {
+          "type": "string",
+          "description": "PUBLIC or HIDDEN."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of update."
+        }
+      },
+      "required": [
+        "ownerId",
+        "name",
+        "district",
+        "address",
+        "establishedYear",
+        "highestMarhala",
+        "facilities",
+        "studentCount",
+        "contactPhone",
+        "isVerified",
+        "visibility",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "KhedmotSubmission": {
+      "title": "KhedmotSubmission",
+      "description": "A direct application submitted by a candidate to a job circular.",
+      "type": "object",
+      "properties": {
+        "postId": {
+          "type": "string",
+          "description": "ID of the job circular post."
+        },
+        "postTitle": {
+          "type": "string",
+          "description": "Title/Madrasa name of the job circular."
+        },
+        "postDesignation": {
+          "type": "string",
+          "description": "Designation applied for."
+        },
+        "applicantId": {
+          "type": "string",
+          "description": "UID of the applicant."
+        },
+        "applicantName": {
+          "type": "string",
+          "description": "Name of the applicant."
+        },
+        "applicantQualification": {
+          "type": "string",
+          "description": "Qualification of the applicant."
+        },
+        "applicantExperience": {
+          "type": "string",
+          "description": "Experience of the applicant."
+        },
+        "applicantPhone": {
+          "type": "string",
+          "description": "Contact number of the applicant."
+        },
+        "coverNote": {
+          "type": "string",
+          "description": "Message or note to the Muhtamim."
+        },
+        "recipientId": {
+          "type": "string",
+          "description": "UID of the job circular author."
+        },
+        "status": {
+          "type": "string",
+          "description": "PENDING, SHORTLISTED, ACCEPTED, or REJECTED."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of submission."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of update."
+        }
+      },
+      "required": [
+        "postId",
+        "postTitle",
+        "postDesignation",
+        "applicantId",
+        "applicantName",
+        "applicantQualification",
+        "applicantExperience",
+        "applicantPhone",
+        "coverNote",
+        "recipientId",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BookmarkItem": {
+      "title": "BookmarkItem",
+      "description": "A bookmarked feed post saved under a user's personal collection.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who saved the post."
+        },
+        "postId": {
+          "type": "string",
+          "description": "ID of the saved feed post."
+        },
+        "postType": {
+          "type": "string",
+          "description": "JOB_CIRCULAR or SEEKER_APPLICATION."
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the saved post."
+        },
+        "district": {
+          "type": "string",
+          "description": "District of the saved post."
+        },
+        "designation": {
+          "type": "string",
+          "description": "Designation of the saved post."
+        },
+        "qualification": {
+          "type": "string",
+          "description": "Qualification of the saved post."
+        },
+        "salaryOrExperience": {
+          "type": "string",
+          "description": "Salary or experience summary."
+        },
+        "deadlineOrPreferredDistricts": {
+          "type": "string",
+          "description": "Deadline or preferred districts."
+        },
+        "authorId": {
+          "type": "string",
+          "description": "Author UID of the original post."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when bookmarked."
+        }
+      },
+      "required": [
+        "userId",
+        "postId",
+        "postType",
+        "title",
+        "district",
+        "designation",
+        "qualification",
+        "salaryOrExperience",
+        "deadlineOrPreferredDistricts",
+        "authorId",
+        "createdAt"
+      ]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Direct message between an applicant/teacher and a madrasa representative.",
+      "type": "object",
+      "properties": {
+        "senderId": {
+          "type": "string",
+          "description": "UID of the sender."
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Display name of the sender."
+        },
+        "receiverId": {
+          "type": "string",
+          "description": "UID of the recipient."
+        },
+        "receiverName": {
+          "type": "string",
+          "description": "Display name of the recipient."
+        },
+        "subject": {
+          "type": "string",
+          "description": "Context or post title."
+        },
+        "body": {
+          "type": "string",
+          "description": "Message body."
+        },
+        "isRead": {
+          "type": "boolean",
+          "description": "Whether the recipient has read the message."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of message."
+        }
+      },
+      "required": [
+        "senderId",
+        "senderName",
+        "receiverId",
+        "receiverName",
+        "subject",
+        "body",
+        "isRead",
+        "createdAt"
+      ]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "Real-time notification delivered to a specific user.",
+      "type": "object",
+      "properties": {
+        "recipientId": {
+          "type": "string",
+          "description": "UID of the user receiving the notification."
+        },
+        "senderId": {
+          "type": "string",
+          "description": "UID of the user triggering the notification."
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Name of the sender."
+        },
+        "title": {
+          "type": "string",
+          "description": "Notification title in Bengali."
+        },
+        "message": {
+          "type": "string",
+          "description": "Notification body in Bengali."
+        },
+        "type": {
+          "type": "string",
+          "description": "APPLICATION, MESSAGE, or VERIFICATION."
+        },
+        "referenceId": {
+          "type": "string",
+          "description": "Associated post or item ID."
+        },
+        "isRead": {
+          "type": "boolean",
+          "description": "Whether the notification has been marked read."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp."
+        }
+      },
+      "required": [
+        "recipientId",
+        "senderId",
+        "senderName",
+        "title",
+        "message",
+        "type",
+        "referenceId",
+        "isRead",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Stores public profiles of teachers/applicants and madrasa authorities."
+    },
+    "/users/{userId}/bookmarks/{bookmarkId}": {
+      "schema": {
+        "$ref": "#/entities/BookmarkItem"
+      },
+      "description": "Stores user-specific bookmarked feed posts (পছন্দের খেদমত)."
+    },
+    "/feed_posts/{postId}": {
+      "schema": {
+        "$ref": "#/entities/FeedPost"
+      },
+      "description": "Stores both খেদমতের বিজ্ঞপ্তি (job circulars) and খেদমতের আবেদন (seeker applications)."
+    },
+    "/madrasas/{madrasaId}": {
+      "schema": {
+        "$ref": "#/entities/MadrasaProfile"
+      },
+      "description": "Stores Qawmi Madrasa directory profiles and verification status."
+    },
+    "/khedmot_submissions/{submissionId}": {
+      "schema": {
+        "$ref": "#/entities/KhedmotSubmission"
+      },
+      "description": "Stores applications submitted by seekers to specific job circulars."
+    },
+    "/messages/{messageId}": {
+      "schema": {
+        "$ref": "#/entities/DirectMessage"
+      },
+      "description": "Stores direct messages between users."
+    },
+    "/notifications/{notificationId}": {
+      "schema": {
+        "$ref": "#/entities/AppNotification"
+      },
+      "description": "Stores user notifications for applications, messages, and admin updates."
+    }
+  }
+}

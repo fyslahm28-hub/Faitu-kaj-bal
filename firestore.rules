@@ -1,0 +1,435 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Reusable Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == 'fyslahm28@gmail.com' && request.auth.token.email_verified == true)
+      );
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 150 &&
+             data.accountType is string && (data.accountType == 'khadim' || data.accountType == 'muhtamim') &&
+             data.district is string && data.district.size() <= 100 &&
+             data.designation is string && data.designation.size() <= 150 &&
+             data.qualification is string && data.qualification.size() <= 200 &&
+             data.experience is string && data.experience.size() <= 150 &&
+             data.preferredDistricts is string && data.preferredDistricts.size() <= 300 &&
+             data.bio is string && data.bio.size() <= 1000 &&
+             data.contactInfo is string && data.contactInfo.size() <= 150 &&
+             data.madrasaName is string && data.madrasaName.size() <= 200 &&
+             data.isVerified is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidBookmarkItem(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
+             data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION') &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             data.district is string && data.district.size() <= 100 &&
+             data.designation is string && data.designation.size() <= 150 &&
+             data.qualification is string && data.qualification.size() <= 200 &&
+             data.salaryOrExperience is string && data.salaryOrExperience.size() <= 150 &&
+             data.deadlineOrPreferredDistricts is string && data.deadlineOrPreferredDistricts.size() <= 250 &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidFeedPost(data) {
+      return data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
+             data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION') &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             data.district is string && data.district.size() >= 1 && data.district.size() <= 100 &&
+             data.upazilaOrLocation is string && data.upazilaOrLocation.size() <= 200 &&
+             data.designation is string && data.designation.size() >= 1 && data.designation.size() <= 150 &&
+             data.qualification is string && data.qualification.size() >= 1 && data.qualification.size() <= 200 &&
+             data.salaryOrExperience is string && data.salaryOrExperience.size() <= 150 &&
+             data.deadlineOrPreferredDistricts is string && data.deadlineOrPreferredDistricts.size() <= 250 &&
+             data.description is string && data.description.size() <= 2000 &&
+             data.contactNumber is string && data.contactNumber.size() <= 100 &&
+             data.madrasaId is string && data.madrasaId.size() <= 128 &&
+             data.isVerifiedMadrasa is bool &&
+             data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'ARCHIVED') &&
+             data.approvalStatus is string && (data.approvalStatus == 'APPROVED' || data.approvalStatus == 'PENDING' || data.approvalStatus == 'REJECTED') &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidMadrasaProfile(data) {
+      return data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 200 &&
+             data.district is string && data.district.size() >= 1 && data.district.size() <= 100 &&
+             data.address is string && data.address.size() <= 300 &&
+             data.establishedYear is string && data.establishedYear.size() <= 50 &&
+             data.highestMarhala is string && data.highestMarhala.size() <= 150 &&
+             data.facilities is string && data.facilities.size() <= 500 &&
+             data.studentCount is string && data.studentCount.size() <= 50 &&
+             data.contactPhone is string && data.contactPhone.size() <= 100 &&
+             data.isVerified is bool &&
+             data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'HIDDEN') &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidKhedmotSubmission(data) {
+      return data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
+             data.postTitle is string && data.postTitle.size() >= 1 && data.postTitle.size() <= 200 &&
+             data.postDesignation is string && data.postDesignation.size() <= 150 &&
+             data.applicantId is string && data.applicantId.size() >= 1 && data.applicantId.size() <= 128 &&
+             data.applicantName is string && data.applicantName.size() >= 1 && data.applicantName.size() <= 150 &&
+             data.applicantQualification is string && data.applicantQualification.size() <= 200 &&
+             data.applicantExperience is string && data.applicantExperience.size() <= 150 &&
+             data.applicantPhone is string && data.applicantPhone.size() <= 100 &&
+             data.coverNote is string && data.coverNote.size() <= 1000 &&
+             data.recipientId is string && data.recipientId.size() >= 1 && data.recipientId.size() <= 128 &&
+             data.status is string && (data.status == 'PENDING' || data.status == 'SHORTLISTED' || data.status == 'ACCEPTED' || data.status == 'REJECTED') &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidDirectMessage(data) {
+      return data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
+             data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 128 &&
+             data.receiverName is string && data.receiverName.size() >= 1 && data.receiverName.size() <= 150 &&
+             data.subject is string && data.subject.size() <= 200 &&
+             data.body is string && data.body.size() >= 1 && data.body.size() <= 1500 &&
+             data.isRead is bool &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidAppNotification(data) {
+      return data.recipientId is string && data.recipientId.size() >= 1 && data.recipientId.size() <= 128 &&
+             data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             data.message is string && data.message.size() >= 1 && data.message.size() <= 1000 &&
+             data.type is string && (data.type == 'APPLICATION' || data.type == 'MESSAGE' || data.type == 'VERIFICATION') &&
+             data.referenceId is string && data.referenceId.size() <= 128 &&
+             data.isRead is bool &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    // 4. Collection Rules
+
+    // Admins Registry
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
+    // Users Profile Collection
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'userId', 'fullName', 'accountType', 'district', 'designation',
+                         'qualification', 'experience', 'preferredDistricts', 'bio',
+                         'contactInfo', 'madrasaName', 'isVerified', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'fullName', 'accountType', 'district', 'designation',
+                         'qualification', 'experience', 'preferredDistricts', 'bio',
+                         'contactInfo', 'madrasaName', 'isVerified', 'createdAt', 'updatedAt'
+                       ]) &&
+                       (incoming().isVerified == false || isAdmin()) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt && (
+                         (request.auth.uid == userId &&
+                          incoming().isVerified == existing().isVerified &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'fullName', 'accountType', 'district', 'designation',
+                            'qualification', 'experience', 'preferredDistricts', 'bio',
+                            'contactInfo', 'madrasaName', 'updatedAt'
+                          ])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'isVerified', 'updatedAt'
+                          ]))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+
+      // User Bookmarks Subcollection (পছন্দের খেদমত)
+      match /bookmarks/{bookmarkId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(bookmarkId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(bookmarkId) &&
+                         request.auth.uid == userId &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'userId', 'postId', 'postType', 'title', 'district',
+                           'designation', 'qualification', 'salaryOrExperience',
+                           'deadlineOrPreferredDistricts', 'authorId', 'createdAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'postId', 'postType', 'title', 'district',
+                           'designation', 'qualification', 'salaryOrExperience',
+                           'deadlineOrPreferredDistricts', 'authorId', 'createdAt'
+                         ]) &&
+                         isValidBookmarkItem(incoming());
+
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(bookmarkId) && request.auth.uid == userId;
+      }
+    }
+
+    // Feed Posts (নিয়োগ বিজ্ঞপ্তি ও চাকরিপ্রার্থীর আবেদন)
+    match /feed_posts/{postId} {
+      allow get: if isSignedIn() && isValidId(postId) && (
+        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(postId) &&
+                       incoming().authorId == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'authorId', 'authorName', 'postType', 'title', 'district',
+                         'upazilaOrLocation', 'designation', 'qualification',
+                         'salaryOrExperience', 'deadlineOrPreferredDistricts',
+                         'description', 'contactNumber', 'madrasaId',
+                         'isVerifiedMadrasa', 'visibility', 'approvalStatus',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'authorId', 'authorName', 'postType', 'title', 'district',
+                         'upazilaOrLocation', 'designation', 'qualification',
+                         'salaryOrExperience', 'deadlineOrPreferredDistricts',
+                         'description', 'contactNumber', 'madrasaId',
+                         'isVerifiedMadrasa', 'visibility', 'approvalStatus',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidFeedPost(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(postId) &&
+                       isValidFeedPost(incoming()) &&
+                       incoming().authorId == existing().authorId &&
+                       incoming().postType == existing().postType &&
+                       incoming().createdAt == existing().createdAt && (
+                         (request.auth.uid == existing().authorId &&
+                          incoming().approvalStatus == existing().approvalStatus &&
+                          incoming().isVerifiedMadrasa == existing().isVerifiedMadrasa &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'authorName', 'title', 'district', 'upazilaOrLocation',
+                            'designation', 'qualification', 'salaryOrExperience',
+                            'deadlineOrPreferredDistricts', 'description',
+                            'contactNumber', 'visibility', 'updatedAt'
+                          ])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'approvalStatus', 'isVerifiedMadrasa', 'visibility', 'updatedAt'
+                          ]))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(postId) && (existing().authorId == request.auth.uid || isAdmin());
+    }
+
+    // Madrasas Directory (মাদরাসা ও যাচাইকৃত মাদরাসা)
+    match /madrasas/{madrasaId} {
+      allow get: if isSignedIn() && isValidId(madrasaId) && (
+        existing().visibility == 'PUBLIC' || existing().ownerId == request.auth.uid || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        existing().visibility == 'PUBLIC' || existing().ownerId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(madrasaId) &&
+                       incoming().ownerId == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'ownerId', 'name', 'district', 'address', 'establishedYear',
+                         'highestMarhala', 'facilities', 'studentCount', 'contactPhone',
+                         'isVerified', 'visibility', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'ownerId', 'name', 'district', 'address', 'establishedYear',
+                         'highestMarhala', 'facilities', 'studentCount', 'contactPhone',
+                         'isVerified', 'visibility', 'createdAt', 'updatedAt'
+                       ]) &&
+                       (incoming().isVerified == false || isAdmin()) &&
+                       isValidMadrasaProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(madrasaId) &&
+                       isValidMadrasaProfile(incoming()) &&
+                       incoming().ownerId == existing().ownerId &&
+                       incoming().createdAt == existing().createdAt && (
+                         (request.auth.uid == existing().ownerId &&
+                          incoming().isVerified == existing().isVerified &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'name', 'district', 'address', 'establishedYear',
+                            'highestMarhala', 'facilities', 'studentCount',
+                            'contactPhone', 'visibility', 'updatedAt'
+                          ])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'isVerified', 'visibility', 'updatedAt'
+                          ]))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(madrasaId) && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // Khedmot Submissions (আবেদনসমূহ)
+    match /khedmot_submissions/{submissionId} {
+      allow get: if isSignedIn() && isValidId(submissionId) && (
+        existing().applicantId == request.auth.uid || existing().recipientId == request.auth.uid || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        existing().applicantId == request.auth.uid || existing().recipientId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(submissionId) &&
+                       incoming().applicantId == request.auth.uid &&
+                       incoming().status == 'PENDING' &&
+                       incoming().keys().hasAll([
+                         'postId', 'postTitle', 'postDesignation', 'applicantId',
+                         'applicantName', 'applicantQualification', 'applicantExperience',
+                         'applicantPhone', 'coverNote', 'recipientId', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'postId', 'postTitle', 'postDesignation', 'applicantId',
+                         'applicantName', 'applicantQualification', 'applicantExperience',
+                         'applicantPhone', 'coverNote', 'recipientId', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidKhedmotSubmission(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(submissionId) &&
+                       isValidKhedmotSubmission(incoming()) &&
+                       incoming().applicantId == existing().applicantId &&
+                       incoming().recipientId == existing().recipientId &&
+                       incoming().postId == existing().postId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (request.auth.uid == existing().recipientId || isAdmin()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(submissionId) && (
+        existing().applicantId == request.auth.uid || isAdmin()
+      );
+    }
+
+    // Direct Messages (মেসেজিং)
+    match /messages/{messageId} {
+      allow get: if isSignedIn() && isValidId(messageId) && (
+        existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(messageId) &&
+                       incoming().senderId == request.auth.uid &&
+                       incoming().isRead == false &&
+                       incoming().keys().hasAll([
+                         'senderId', 'senderName', 'receiverId', 'receiverName',
+                         'subject', 'body', 'isRead', 'createdAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'senderId', 'senderName', 'receiverId', 'receiverName',
+                         'subject', 'body', 'isRead', 'createdAt'
+                       ]) &&
+                       isValidDirectMessage(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(messageId) &&
+                       isValidDirectMessage(incoming()) &&
+                       incoming().senderId == existing().senderId &&
+                       incoming().receiverId == existing().receiverId &&
+                       incoming().createdAt == existing().createdAt &&
+                       request.auth.uid == existing().receiverId &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
+
+      allow delete: if isSignedIn() && isValidId(messageId) && (
+        existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid
+      );
+    }
+
+    // App Notifications (নোটিফিকেশন)
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && existing().recipientId == request.auth.uid;
+      allow list: if isSignedIn() && existing().recipientId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(notificationId) &&
+                       incoming().senderId == request.auth.uid &&
+                       incoming().isRead == false &&
+                       incoming().keys().hasAll([
+                         'recipientId', 'senderId', 'senderName', 'title',
+                         'message', 'type', 'referenceId', 'isRead', 'createdAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'recipientId', 'senderId', 'senderName', 'title',
+                         'message', 'type', 'referenceId', 'isRead', 'createdAt'
+                       ]) &&
+                       isValidAppNotification(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(notificationId) &&
+                       isValidAppNotification(incoming()) &&
+                       incoming().recipientId == existing().recipientId &&
+                       incoming().senderId == existing().senderId &&
+                       incoming().createdAt == existing().createdAt &&
+                       request.auth.uid == existing().recipientId &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
+
+      allow delete: if isSignedIn() && isValidId(notificationId) && existing().recipientId == request.auth.uid;
+    }
+  }
+}

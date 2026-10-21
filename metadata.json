@@ -1,0 +1,6 @@
+{
+  "name": "কওমি কর্মসংস্থান",
+  "description": "বাংলাদেশের কওমি মাদরাসা খেদমতের বিশ্বস্ত মাধ্যম — খেদমতের বিজ্ঞপ্তি, আবেদন, মাদরাসা ডিরেক্টরি ও যোগাযোগ ব্যবস্থা",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
