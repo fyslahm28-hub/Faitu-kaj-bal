@@ -21,13 +21,9 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Android SDK (including API 36.1)
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK Platform 36.1 & Build Tools
+      - name: Accept Android SDK Licenses
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36.1" "build-tools;36.0.0" || sdkmanager "platforms;android-36" "build-tools;35.0.0" || true
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
