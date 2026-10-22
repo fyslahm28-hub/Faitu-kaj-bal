@@ -1431,10 +1431,7 @@ class QawmiRepository(
                 } else {
                     existingMap[uid] = nextCode
                 }
-                val updates = mutableMapOf<String, Any>("userReactions" to existingMap)
-                if (uid == message.senderId) {
-                    updates["senderReaction"] = nextCode
-                }
+                val updates = mapOf<String, Any>("userReactions" to existingMap)
                 docRef.update(updates).await()
             } else {
                 val fieldToUpdate = when (uid) {

@@ -451,6 +451,81 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
     }
 
     @Test
+    fun groupChat_create_addRemoveMembers_sendImages_andReact_compliesWithSecurityRules() = runBlocking {
+        val creatorEmail = "creator_${UUID.randomUUID()}@test.com"
+        val memberEmail = "member_${UUID.randomUUID()}@test.com"
+
+        val memberUid = signInTestUser(memberEmail)
+        val creatorUid = signInTestUser(creatorEmail)
+        val repo = QawmiRepository(firestore, auth)
+
+        // 1. Create group with creator and member
+        val createGrpRes = withTimeout(5000L) {
+            repo.createChatGroup(
+                name = "আসাতীজা ফোরাম",
+                photoUrl = "preset:madrasa_dome",
+                creatorName = "মাওলানা আব্দুল্লাহ",
+                memberIds = listOf(memberUid),
+                memberNames = mapOf(memberUid to "মুফতি মাহমুদ")
+            )
+        }
+        assertTrue("createChatGroup failed: ${createGrpRes.exceptionOrNull()}", createGrpRes.isSuccess)
+        val groupId = createGrpRes.getOrThrow()
+
+        val observedGroups = withTimeout(5000L) {
+            repo.observeUserGroups(creatorUid).first { list -> list.any { it.id == groupId } }
+        }
+        val group = observedGroups.first { it.id == groupId }
+        assertEquals("আসাতীজা ফোরাম", group.name)
+        assertTrue(group.memberIds.containsAll(listOf(creatorUid, memberUid)))
+
+        // 2. Send a group message with 2 images (1-5 limit)
+        val sendGroupMsgRes = withTimeout(5000L) {
+            repo.sendDirectMessage(
+                senderName = "মাওলানা আব্দুল্লাহ",
+                receiverId = "GROUP:$groupId",
+                receiverName = "আসাতীজা ফোরাম",
+                subject = "গ্রুপ আলোচনা",
+                body = "আসসালামু আলাইকুম, রুটিন সংযুক্ত করা হলো।",
+                imageUrls = listOf(
+                    "https://example.com/photo1.jpg",
+                    "https://example.com/photo2.jpg"
+                ),
+                groupId = groupId,
+                groupName = "আসাতীজা ফোরাম",
+                groupMemberIds = group.memberIds
+            )
+        }
+        assertTrue("sendDirectMessage (group with images) failed: ${sendGroupMsgRes.exceptionOrNull()}", sendGroupMsgRes.isSuccess)
+        val groupMsgId = sendGroupMsgRes.getOrThrow()
+
+        val creatorMsgs = withTimeout(5000L) {
+            repo.observeUserMessages(creatorUid).first { list -> list.any { it.id == groupMsgId } }
+        }
+        val sentGroupMsg = creatorMsgs.first { it.id == groupMsgId }
+        assertEquals(2, sentGroupMsg.imageUrls.size)
+
+        // 3. Creator reacts to own group message (verifies fix for senderReaction + userReactions rule check)
+        val creatorReactRes = withTimeout(5000L) {
+            repo.reactToMessage(sentGroupMsg, "DUA")
+        }
+        assertTrue("Creator reactToMessage on group message failed: ${creatorReactRes.exceptionOrNull()}", creatorReactRes.isSuccess)
+
+        // 4. Member observes group message and reacts
+        signInTestUser(memberEmail)
+        val memberMsgs = withTimeout(5000L) {
+            repo.observeUserMessages(memberUid).first { list -> list.any { it.id == groupMsgId } }
+        }
+        val msgForMember = memberMsgs.first { it.id == groupMsgId }
+        assertEquals("DUA", msgForMember.userReactions[creatorUid])
+
+        val memberReactRes = withTimeout(5000L) {
+            repo.reactToMessage(msgForMember, "MUHABBAT")
+        }
+        assertTrue("Member reactToMessage on group message failed: ${memberReactRes.exceptionOrNull()}", memberReactRes.isSuccess)
+    }
+
+    @Test
     fun observePublicFeedPosts_unauthenticatedUser_failsWithPermissionDenied() = runBlocking {
         auth.signOut()
         val repository = QawmiRepository(firestore, auth)
