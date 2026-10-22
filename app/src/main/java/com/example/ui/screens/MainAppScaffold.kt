@@ -22,20 +22,26 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Assignment
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DomainAdd
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Work
 import androidx.compose.material3.AlertDialog
@@ -255,96 +261,109 @@ fun MainAppScaffold(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Spacer(modifier = Modifier.height(6.dp))
 
-                DrawerMenuItem(
-                    label = "হোম পেজ",
-                    icon = Icons.Default.Home,
-                    selected = currentDestination == MainDestination.HOME
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateBottomTab(MainDestination.HOME)
-                }
-                DrawerMenuItem(
-                    label = "ফিড (সকল পোস্ট)",
-                    icon = Icons.Default.Article,
-                    selected = currentDestination == MainDestination.FEED
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.openFeedWithFilter(FeedFilterTab.ALL)
-                }
-                DrawerMenuItem(
-                    label = "আবেদন প্রকাশ করুন",
-                    icon = Icons.Default.EditNote,
-                    selected = currentDestination == MainDestination.PUBLISH_APPLICATION
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.PUBLISH_APPLICATION)
-                }
-                DrawerMenuItem(
-                    label = "নিয়োগ বিজ্ঞপ্তি দিন",
-                    icon = Icons.Default.Campaign,
-                    selected = currentDestination == MainDestination.PUBLISH_CIRCULAR
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.PUBLISH_CIRCULAR)
-                }
-                DrawerMenuItem(
-                    label = "পছন্দের খেদমত (সংরক্ষিত)",
-                    icon = Icons.Default.Bookmark,
-                    selected = currentDestination == MainDestination.BOOKMARKS
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.BOOKMARKS)
-                }
-                DrawerMenuItem(
-                    label = "যাচাইকৃত মাদরাসা",
-                    icon = Icons.Default.VerifiedUser,
-                    selected = currentDestination == MainDestination.VERIFIED_MADRASAS
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.VERIFIED_MADRASAS)
-                }
-                DrawerMenuItem(
-                    label = if (unreadDirectMessagesCount > 0) {
-                        "পয়গাম / মেসেজিং (${IslamicDateAndPrayerHelper.toBanglaDigits(unreadDirectMessagesCount.toString())})"
-                    } else {
-                        "পয়গাম / মেসেজিং"
-                    },
-                    icon = Icons.Default.MailOutline,
-                    selected = currentDestination == MainDestination.MESSAGES
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.MESSAGES)
-                }
-                DrawerMenuItem(
-                    label = if (unreadNotificationsCount > 0) {
-                        "নোটিফিকেশন (${IslamicDateAndPrayerHelper.toBanglaDigits(unreadNotificationsCount.toString())})"
-                    } else {
-                        "নোটিফিকেশন"
-                    },
-                    icon = Icons.Default.Notifications,
-                    selected = currentDestination == MainDestination.NOTIFICATIONS
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.NOTIFICATIONS)
-                }
-                DrawerMenuItem(
-                    label = "আমার প্রোফাইল",
-                    icon = Icons.Default.Person,
-                    selected = currentDestination == MainDestination.PROFILE
-                ) {
-                    scope.launch { drawerState.close() }
-                    viewModel.navigateTo(MainDestination.PROFILE)
-                }
-                if (isAdminState) {
                     DrawerMenuItem(
-                        label = "অ্যাডমিন প্যানেল",
-                        icon = Icons.Default.AdminPanelSettings,
-                        selected = currentDestination == MainDestination.ADMIN_PANEL
+                        label = "খেদমত (নিয়োগ বিজ্ঞপ্তি)",
+                        icon = Icons.Default.Work,
+                        selected = currentDestination == MainDestination.KHEDMOT,
+                        testTag = "drawer_item_khedmot"
                     ) {
                         scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.ADMIN_PANEL)
+                        viewModel.setFeedFilter(FeedFilterTab.JOB_CIRCULAR)
+                        viewModel.navigateTo(MainDestination.KHEDMOT)
+                    }
+                    DrawerMenuItem(
+                        label = "মাদরাসা ডিরেক্টরি",
+                        icon = Icons.Default.AccountBalance,
+                        selected = currentDestination == MainDestination.MADRASA,
+                        testTag = "drawer_item_madrasa"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.MADRASA)
+                    }
+                    DrawerMenuItem(
+                        label = "যাচাইকৃত মাদরাসা",
+                        icon = Icons.Default.VerifiedUser,
+                        selected = currentDestination == MainDestination.VERIFIED_MADRASAS,
+                        testTag = "drawer_item_verified_madrasas"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.VERIFIED_MADRASAS)
+                    }
+                    DrawerMenuItem(
+                        label = "নিয়োগ বিজ্ঞপ্তি দিন",
+                        icon = Icons.Default.Campaign,
+                        selected = currentDestination == MainDestination.PUBLISH_CIRCULAR,
+                        testTag = "drawer_item_publish_circular"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.PUBLISH_CIRCULAR)
+                    }
+                    DrawerMenuItem(
+                        label = "আবেদন প্রকাশ করুন",
+                        icon = Icons.Default.EditNote,
+                        selected = currentDestination == MainDestination.PUBLISH_APPLICATION,
+                        testTag = "drawer_item_publish_application"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.PUBLISH_APPLICATION)
+                    }
+                    DrawerMenuItem(
+                        label = "মাদরাসা নিবন্ধন করুন",
+                        icon = Icons.Default.DomainAdd,
+                        selected = currentDestination == MainDestination.REGISTER_MADRASA,
+                        testTag = "drawer_item_register_madrasa"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.REGISTER_MADRASA)
+                    }
+                    DrawerMenuItem(
+                        label = "পছন্দের খেদমত (সংরক্ষিত)",
+                        icon = Icons.Default.Bookmark,
+                        selected = currentDestination == MainDestination.BOOKMARKS,
+                        testTag = "drawer_item_bookmarks"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.BOOKMARKS)
+                    }
+                    DrawerMenuItem(
+                        label = "নামাজের সময়সূচী",
+                        icon = Icons.Default.Schedule,
+                        selected = currentDestination == MainDestination.PRAYER_SCHEDULE,
+                        testTag = "drawer_item_prayer_schedule"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.PRAYER_SCHEDULE)
+                    }
+                    DrawerMenuItem(
+                        label = if (unreadNotificationsCount > 0) {
+                            "নোটিফিকেশন (${IslamicDateAndPrayerHelper.toBanglaDigits(unreadNotificationsCount.toString())})"
+                        } else {
+                            "নোটিফিকেশন"
+                        },
+                        icon = Icons.Default.Notifications,
+                        selected = currentDestination == MainDestination.NOTIFICATIONS,
+                        testTag = "drawer_item_notifications"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.NOTIFICATIONS)
+                    }
+                    if (isAdminState) {
+                        DrawerMenuItem(
+                            label = "অ্যাডমিন প্যানেল",
+                            icon = Icons.Default.AdminPanelSettings,
+                            selected = currentDestination == MainDestination.ADMIN_PANEL,
+                            testTag = "drawer_item_admin_panel"
+                        ) {
+                            scope.launch { drawerState.close() }
+                            viewModel.navigateTo(MainDestination.ADMIN_PANEL)
+                        }
                     }
                 }
 
@@ -385,7 +404,7 @@ fun MainAppScaffold(
             MainDestination.PUBLISH_CIRCULAR -> "বিজ্ঞপ্তি দিন"
             MainDestination.PUBLISH_APPLICATION -> "আবেদন প্রকাশ করুন"
             MainDestination.REGISTER_MADRASA -> "মাদরাসা নিবন্ধন"
-            MainDestination.MESSAGES -> "পয়গাম ও যোগাযোগ"
+            MainDestination.MESSAGES -> "ইনবক্স / পয়গাম"
             MainDestination.NOTIFICATIONS -> "নোটিফিকেশন"
             MainDestination.ADMIN_PANEL -> "অ্যাডমিন প্যানেল"
             MainDestination.PRAYER_SCHEDULE -> "নামাজের সময়সূচী"
@@ -394,9 +413,9 @@ fun MainAppScaffold(
         val isRootTab = currentDestination in setOf(
             MainDestination.HOME,
             MainDestination.FEED,
-            MainDestination.KHEDMOT,
             MainDestination.ABEDON,
-            MainDestination.MADRASA
+            MainDestination.MESSAGES,
+            MainDestination.PROFILE
         )
 
         Scaffold(
@@ -416,11 +435,10 @@ fun MainAppScaffold(
             bottomBar = {
                 QawmiBottomNavBar(
                     currentDestination = currentDestination,
+                    unreadMessagesCount = unreadDirectMessagesCount,
                     onTabSelected = { tab ->
                         if (tab == MainDestination.FEED) {
                             viewModel.setFeedFilter(FeedFilterTab.ALL)
-                        } else if (tab == MainDestination.KHEDMOT) {
-                            viewModel.setFeedFilter(FeedFilterTab.JOB_CIRCULAR)
                         }
                         viewModel.navigateBottomTab(tab)
                     }
@@ -765,26 +783,32 @@ fun MainAppScaffold(
     if (selectedPostForDetail != null) {
         val post = selectedPostForDetail!!
         val isOwnPost = post.authorId == viewModel.currentUserId
+        val ownProfile = (userProfileState as? UiState.Success)?.data
+        val liveAuthorProfile = if (isOwnPost) ownProfile else chatPartnerProfiles[post.authorId]
+        val resolvedPost = post.copy(
+            authorName = liveAuthorProfile?.fullName?.takeIf { it.isNotBlank() } ?: post.authorName,
+            authorPhotoUrl = liveAuthorProfile?.photoUrl?.takeIf { it.isNotBlank() } ?: post.authorPhotoUrl
+        )
         PostDetailDialog(
-            post = post,
+            post = resolvedPost,
             isOwnPost = isOwnPost,
             onDismiss = { viewModel.openPostDetailDialog(null) },
             onApplyClick = {
                 viewModel.openPostDetailDialog(null)
-                viewModel.openApplyDialog(post)
+                viewModel.openApplyDialog(resolvedPost)
             },
             onInspectAuthorProfileClick = {
                 viewModel.openPostDetailDialog(null)
                 viewModel.openUserProfileInspection(
-                    userId = post.authorId,
-                    fallbackName = post.authorName.ifBlank { post.title }
+                    userId = resolvedPost.authorId,
+                    fallbackName = resolvedPost.authorName.ifBlank { resolvedPost.title }
                 )
             },
             onSendMessageClick = {
                 viewModel.openPostDetailDialog(null)
                 viewModel.openDirectMessageTo(
-                    userId = post.authorId,
-                    userName = post.authorName.ifBlank { post.title }
+                    userId = resolvedPost.authorId,
+                    userName = resolvedPost.authorName.ifBlank { resolvedPost.title }
                 )
             }
         )
@@ -817,10 +841,11 @@ fun MainAppScaffold(
 }
 
 @Composable
-private fun DrawerMenuItem(
+fun DrawerMenuItem(
     label: String,
     icon: ImageVector,
     selected: Boolean,
+    testTag: String = "",
     onClick: () -> Unit
 ) {
     NavigationDrawerItem(
@@ -828,19 +853,23 @@ private fun DrawerMenuItem(
         selected = selected,
         icon = { Icon(icon, contentDescription = label) },
         onClick = onClick,
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+        modifier = Modifier
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .let { if (testTag.isNotBlank()) it.testTag(testTag) else it }
     )
 }
 
 @Composable
 fun QawmiBottomNavBar(
     currentDestination: MainDestination,
+    unreadMessagesCount: Int = 0,
     onTabSelected: (MainDestination) -> Unit
 ) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = QawmiMintBorder),
+            .border(width = 1.dp, color = QawmiMintBorder)
+            .testTag("qawmi_bottom_nav_bar"),
         color = Color.White,
         shadowElevation = 8.dp
     ) {
@@ -848,7 +877,7 @@ fun QawmiBottomNavBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 6.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -867,13 +896,6 @@ fun QawmiBottomNavBar(
                 onClick = { onTabSelected(MainDestination.FEED) }
             )
             BottomNavItem(
-                label = "খেদমত",
-                icon = Icons.Default.Work,
-                selected = currentDestination == MainDestination.KHEDMOT,
-                testTag = "bottom_nav_khedmot",
-                onClick = { onTabSelected(MainDestination.KHEDMOT) }
-            )
-            BottomNavItem(
                 label = "আবেদন",
                 icon = Icons.AutoMirrored.Filled.Assignment,
                 selected = currentDestination == MainDestination.ABEDON,
@@ -881,11 +903,19 @@ fun QawmiBottomNavBar(
                 onClick = { onTabSelected(MainDestination.ABEDON) }
             )
             BottomNavItem(
-                label = "মাদরাসা",
+                label = "ইনবক্স/পয়গাম",
+                icon = Icons.Default.MailOutline,
+                selected = currentDestination == MainDestination.MESSAGES,
+                badgeCount = unreadMessagesCount,
+                testTag = "bottom_nav_messages",
+                onClick = { onTabSelected(MainDestination.MESSAGES) }
+            )
+            BottomNavItem(
+                label = "প্রোফাইল",
                 icon = Icons.Default.Person,
-                selected = currentDestination == MainDestination.MADRASA,
-                testTag = "bottom_nav_madrasa",
-                onClick = { onTabSelected(MainDestination.MADRASA) }
+                selected = currentDestination == MainDestination.PROFILE,
+                testTag = "bottom_nav_profile",
+                onClick = { onTabSelected(MainDestination.PROFILE) }
             )
         }
     }
@@ -896,6 +926,7 @@ private fun BottomNavItem(
     label: String,
     icon: ImageVector,
     selected: Boolean,
+    badgeCount: Int = 0,
     testTag: String,
     onClick: () -> Unit
 ) {
@@ -908,22 +939,43 @@ private fun BottomNavItem(
         color = if (selected) QawmiMintSurface else Color.Transparent
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = QawmiDeepGreen,
-                modifier = Modifier.size(24.dp)
-            )
+            Box(contentAlignment = Alignment.TopEnd) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = QawmiDeepGreen,
+                    modifier = Modifier.size(23.dp)
+                )
+                if (badgeCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background( Color(0xFFC62828) )
+                            .testTag("${testTag}_badge"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = IslamicDateAndPrayerHelper.toBanglaDigits(
+                                if (badgeCount > 9) "9+" else badgeCount.toString()
+                            ),
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = QawmiTextDark,
                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                fontSize = 11.5.sp
+                fontSize = 11.sp
             )
         }
     }

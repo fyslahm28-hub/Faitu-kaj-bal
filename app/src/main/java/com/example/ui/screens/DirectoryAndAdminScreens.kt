@@ -15,11 +15,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AccountBalance
@@ -760,411 +763,530 @@ fun MessagesScreen(
         }
     }
 
+    val chatListState = rememberLazyListState()
+
+    // Automatically scroll to the latest message when opening a conversation or receiving/sending a new message
+    LaunchedEffect(receiverId, activeConversationMessages.size) {
+        if (receiverId.isNotBlank() && activeConversationMessages.isNotEmpty()) {
+            chatListState.scrollToItem(activeConversationMessages.lastIndex)
+        }
+    }
+
+    // Back button inside an active conversation returns to the Inbox thread list
+    BackHandler(enabled = receiverId.isNotBlank()) {
+        receiverId = ""
+        receiverName = ""
+        onClearRecipient()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(14.dp)
+            .background(QawmiSoftBg)
             .testTag("messages_screen")
     ) {
-        // 1. INBOX HEADER WITH UNREAD MESSAGE COUNT
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
-            shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(containerColor = QawmiMintSurface)
-        ) {
-            Row(
+        if (receiverId.isNotBlank()) {
+            // =========================================================================
+            // ACTIVE CONVERSATION VIEW:
+            // 1. Fixed/Sticky Top Partner Profile Header
+            // 2. Scrollable Middle Message List (Modifier.weight(1f))
+            // 3. Fixed/Sticky Bottom Text Message Composer Bar
+            // =========================================================================
+
+            // 1. STICKY TOP PARTNER HEADER
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .border(width = 1.dp, color = QawmiMintBorder)
+                    .testTag("active_chat_partner_header"),
+                color = Color.White,
+                shadowElevation = 4.dp
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "পয়গাম ইনবক্স ও রিয়েল-টাইম কথোপকথন",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = QawmiDeepGreen,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "মোট কথোপকথন: ${IslamicDateAndPrayerHelper.toBanglaDigits(conversationThreads.size.toString())} টি • অপঠিত পয়গাম: ${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} টি",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = QawmiTextSecondary
-                    )
-                }
-                if (totalUnreadMessagesCount > 0) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = QawmiAlertRed,
-                        modifier = Modifier.testTag("unread_messages_count_badge")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onInspectUserProfile(receiverId, resolvedPartnerName) }
                     ) {
-                        Text(
-                            text = "${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} অপঠিত",
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
+                        IconButton(
+                            onClick = {
+                                receiverId = ""
+                                receiverName = ""
+                                onClearRecipient()
+                            },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("back_to_inbox_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "ইনবক্সে ফিরুন",
+                                tint = QawmiDeepGreen
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        UserAvatarImage(
+                            photoUrl = resolvedPartnerPhoto,
+                            displayName = resolvedPartnerName,
+                            size = 44.dp,
+                            borderColor = if (isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
+                            borderWidth = 1.5.dp,
+                            showOnlineIndicator = true,
+                            isOnline = isPartnerOnline
                         )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = resolvedPartnerName,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
+                            )
+                            Text(
+                                text = partnerStatusText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                modifier = Modifier.testTag("active_partner_presence_text")
+                            )
+                        }
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { onInspectUserProfile(receiverId, resolvedPartnerName) },
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .height(30.dp)
+                                .testTag("inspect_partner_profile_button")
+                        ) {
+                            Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                receiverId = ""
+                                receiverName = ""
+                                onClearRecipient()
+                            },
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .height(30.dp)
+                                .testTag("return_inbox_button")
+                        ) {
+                            Text("ইনবক্স", style = MaterialTheme.typography.labelSmall, color = QawmiTextSecondary)
+                        }
                     }
                 }
             }
-        }
 
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // 2. ACTIVE CONVERSATION HEADER + COMPOSER (When a recipient is selected)
-        if (receiverId.isNotBlank()) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(16.dp)),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White)
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
+            // 2. SCROLLABLE MIDDLE MESSAGE HISTORY LIST (ONLY THIS SECTION SCROLLS)
+            if (activeConversationMessages.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(20.dp)
+                        .testTag("conversation_messages_list"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        UserAvatarImage(
+                            photoUrl = resolvedPartnerPhoto,
+                            displayName = resolvedPartnerName,
+                            size = 64.dp,
+                            borderColor = QawmiGold,
+                            borderWidth = 2.dp,
+                            showOnlineIndicator = true,
+                            isOnline = isPartnerOnline
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "$resolvedPartnerName-এর সাথে কথোপকথন শুরু করুন",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = QawmiDeepGreen,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "নিচের বক্সে আপনার পয়গাম লিখে পাঠান। পাঠানো মেসেজ সাথে সাথে রিয়েল-টাইমে প্রাপকের ইনবক্সে পৌঁছে যাবে।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiTextSecondary,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    state = chatListState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(Color(0xFFF4FAF7))
+                        .padding(horizontal = 12.dp)
+                        .testTag("conversation_messages_list"),
+                    contentPadding = PaddingValues(vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Partner Header with Avatar, Online/Offline & Last Seen, Profile Link, and Close
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(QawmiSoftBg)
-                            .clickable { onInspectUserProfile(receiverId, resolvedPartnerName) }
-                            .padding(10.dp)
-                            .testTag("active_chat_partner_header"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
+                    items(
+                        items = activeConversationMessages,
+                        key = { msg -> msg.id.ifBlank { "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.body.hashCode()}" } }
+                    ) { chatMsg ->
+                        val sentByMe = chatMsg.senderId == currentUserId
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            UserAvatarImage(
-                                photoUrl = resolvedPartnerPhoto,
-                                displayName = resolvedPartnerName,
-                                size = 44.dp,
-                                borderColor = if (isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
-                                borderWidth = 1.5.dp,
-                                showOnlineIndicator = true,
-                                isOnline = isPartnerOnline
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = "প্রাপক: $resolvedPartnerName",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = QawmiDeepGreen,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = partnerStatusText,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.testTag("active_partner_presence_text")
-                                )
-                            }
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            OutlinedButton(
-                                onClick = { onInspectUserProfile(receiverId, resolvedPartnerName) },
-                                shape = RoundedCornerShape(50),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                modifier = Modifier
-                                    .height(28.dp)
-                                    .testTag("inspect_partner_profile_button")
-                            ) {
-                                Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    receiverId = ""
-                                    receiverName = ""
-                                    onClearRecipient()
-                                },
-                                shape = RoundedCornerShape(50),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Text("ইনবক্স", style = MaterialTheme.typography.labelSmall, color = QawmiTextSecondary)
-                            }
-                        }
-                    }
-
-                    // Two-way Conversation History inside the active chat
-                    if (activeConversationMessages.isNotEmpty()) {
-                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFFF6FBF8))
-                                .padding(10.dp)
-                                .testTag("conversation_messages_list"),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                .testTag("chat_message_item_${chatMsg.id}"),
+                            horizontalArrangement = if (sentByMe) Arrangement.End else Arrangement.Start,
+                            verticalAlignment = Alignment.Bottom
                         ) {
-                            Text(
-                                text = "কথোপকথনের ইতিহাস (${IslamicDateAndPrayerHelper.toBanglaDigits(activeConversationMessages.size.toString())} টি বার্তা)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = QawmiTextSecondary,
-                                fontWeight = FontWeight.Bold
-                            )
-                            activeConversationMessages.takeLast(6).forEach { chatMsg ->
-                                val sentByMe = chatMsg.senderId == currentUserId
-                                Box(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    contentAlignment = if (sentByMe) Alignment.CenterEnd else Alignment.CenterStart
-                                ) {
-                                    Surface(
+                            if (!sentByMe) {
+                                UserAvatarImage(
+                                    photoUrl = resolvedPartnerPhoto,
+                                    displayName = resolvedPartnerName,
+                                    size = 28.dp,
+                                    borderColor = QawmiMintBorder,
+                                    borderWidth = 1.dp,
+                                    modifier = Modifier.clickable {
+                                        onInspectUserProfile(receiverId, resolvedPartnerName)
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(
+                                    topStart = 14.dp,
+                                    topEnd = 14.dp,
+                                    bottomStart = if (sentByMe) 14.dp else 3.dp,
+                                    bottomEnd = if (sentByMe) 3.dp else 14.dp
+                                ),
+                                color = if (sentByMe) QawmiDeepGreen else Color.White,
+                                shadowElevation = 1.dp,
+                                modifier = Modifier
+                                    .fillMaxWidth(0.82f)
+                                    .border(
+                                        width = 1.dp,
+                                        color = if (sentByMe) QawmiDeepGreen else QawmiMintBorder,
                                         shape = RoundedCornerShape(
-                                            topStart = 12.dp,
-                                            topEnd = 12.dp,
-                                            bottomStart = if (sentByMe) 12.dp else 2.dp,
-                                            bottomEnd = if (sentByMe) 2.dp else 12.dp
-                                        ),
-                                        color = if (sentByMe) QawmiDeepGreen else Color.White,
-                                        modifier = Modifier
-                                            .fillMaxWidth(0.86f)
-                                            .border(
-                                                width = 1.dp,
-                                                color = if (sentByMe) QawmiDeepGreen else QawmiMintBorder,
-                                                shape = RoundedCornerShape(12.dp)
-                                            )
+                                            topStart = 14.dp,
+                                            topEnd = 14.dp,
+                                            bottomStart = if (sentByMe) 14.dp else 3.dp,
+                                            bottomEnd = if (sentByMe) 3.dp else 14.dp
+                                        )
+                                    )
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                    if (chatMsg.subject.isNotBlank() && chatMsg.subject != "খেদমত সংক্রান্ত যোগাযোগ") {
+                                        Text(
+                                            text = "বিষয়: ${chatMsg.subject}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (sentByMe) QawmiGold else QawmiDeepGreen,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                    }
+                                    Text(
+                                        text = chatMsg.body,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = if (sentByMe) Color.White else QawmiTextDark
+                                    )
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
-                                            if (chatMsg.subject.isNotBlank() && chatMsg.subject != "খেদমত সংক্রান্ত যোগাযোগ") {
-                                                Text(
-                                                    text = "বিষয়: ${chatMsg.subject}",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = if (sentByMe) QawmiGold else QawmiDeepGreen,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                            }
-                                            Text(
-                                                text = chatMsg.body,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = if (sentByMe) Color.White else QawmiTextDark
-                                            )
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.End,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    text = buildString {
-                                                        append(IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt))
-                                                        if (sentByMe) {
-                                                            append(if (chatMsg.isRead) " • ✓✓ পঠিত" else " • ✓ প্রেরিত")
-                                                        }
-                                                    },
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontSize = 10.sp,
-                                                    color = if (sentByMe) Color(0xFFDDF3EC) else QawmiTextMuted
-                                                )
-                                            }
-                                        }
+                                        Text(
+                                            text = buildString {
+                                                append(IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt))
+                                                if (sentByMe) {
+                                                    append(if (chatMsg.isRead) " • ✓✓ পঠিত" else " • ✓ প্রেরিত")
+                                                }
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 10.sp,
+                                            color = if (sentByMe) Color(0xFFDDF3EC) else QawmiTextMuted
+                                        )
                                     }
                                 }
                             }
                         }
                     }
+                }
+            }
 
-                    // Compose Message Inputs
-                    OutlinedTextField(
-                        value = subject,
-                        onValueChange = { subject = it },
-                        label = { Text("বিষয় (ঐচ্ছিক)") },
-                        placeholder = { Text("যেমন: খেদমতের নিয়োগ বিজ্ঞপ্তি প্রসঙ্গে") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
+            // 3. STICKY BOTTOM TEXT MESSAGE COMPOSER BAR
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(width = 1.dp, color = QawmiMintBorder)
+                    .testTag("sticky_chat_composer_bar"),
+                color = Color.White,
+                shadowElevation = 6.dp
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     OutlinedTextField(
                         value = body,
                         onValueChange = { body = it },
-                        label = { Text("আপনার পয়গাম / বার্তা লিখুন *") },
-                        placeholder = { Text("আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ...") },
+                        placeholder = { Text("আপনার পয়গাম / মেসেজ লিখুন...") },
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(78.dp)
-                            .testTag("message_body_input")
+                            .weight(1f)
+                            .testTag("message_body_input"),
+                        maxLines = 4,
+                        shape = RoundedCornerShape(22.dp)
                     )
                     Button(
                         onClick = {
-                            onSendMessage(receiverId, resolvedPartnerName, subject, body)
-                            body = ""
+                            if (body.isNotBlank()) {
+                                onSendMessage(receiverId, resolvedPartnerName, subject, body)
+                                body = ""
+                            }
                         },
-                        enabled = !isSubmitting,
+                        enabled = !isSubmitting && body.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
                         shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .align(Alignment.End)
-                            .testTag("send_message_button")
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.testTag("send_message_button")
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("পয়গাম পাঠান")
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-        }
-
-        // 3. INBOX CONVERSATION THREADS & MESSAGE HISTORY
-        Text(
-            text = "আদান-প্রদানকৃত পয়গামসমূহ (মেসেজ ইনবক্স ও ইতিহাস)",
-            style = MaterialTheme.typography.titleSmall,
-            color = QawmiTextDark,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-
-        when (messagesState) {
-            is UiState.Loading -> {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = QawmiDeepGreen)
-                }
-            }
-            is UiState.Error -> {
-                Text(messagesState.message, color = MaterialTheme.colorScheme.error)
-            }
-            is UiState.Success -> {
-                if (conversationThreads.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "এখনো কোনো পয়গাম আদান-প্রদান হয়নি।\nফিড, আবেদন বা মাদরাসা তালিকা থেকে যেকোনো প্রাপকের প্রোফাইলে গিয়ে মেসেজ পাঠাতে পারবেন।",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = QawmiTextSecondary,
-                            textAlign = TextAlign.Center
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "পয়গাম পাঠান",
+                            modifier = Modifier.size(18.dp)
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("পাঠান", fontWeight = FontWeight.Bold)
                     }
-                } else {
-                    LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                }
+            }
+        } else {
+            // =========================================================================
+            // INBOX CONVERSATION LIST VIEW (When no specific conversation is open)
+            // =========================================================================
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp)
+            ) {
+                // 1. INBOX SUMMARY BANNER WITH UNREAD MESSAGE COUNT
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = QawmiMintSurface)
+                ) {
+                    Row(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("inbox_threads_list")
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        items(conversationThreads, key = { it.partnerId }) { thread ->
-                            val isSelectedThread = receiverId == thread.partnerId
-                            val latestMsg = thread.latestMessage
-                            val isLatestSentByMe = latestMsg.senderId == currentUserId
-                            val presenceBadge = if (thread.isPartnerOnline) {
-                                "অনলাইন"
-                            } else if (thread.partnerLastSeenAt != null) {
-                                "সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(thread.partnerLastSeenAt)}"
-                            } else {
-                                "অফলাইন"
-                            }
-
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = if (thread.unreadCount > 0 || isSelectedThread) 1.5.dp else 1.dp,
-                                        color = if (thread.unreadCount > 0) QawmiDeepGreen else if (isSelectedThread) QawmiGold else QawmiMintBorder,
-                                        shape = RoundedCornerShape(14.dp)
-                                    )
-                                    .clickable {
-                                        if (!isLatestSentByMe && !latestMsg.isRead) {
-                                            onMarkRead(latestMsg.id)
-                                        }
-                                        onMarkConversationRead(thread.partnerId)
-                                        receiverId = thread.partnerId
-                                        receiverName = thread.partnerName
-                                        onSelectRecipient(thread.partnerId, thread.partnerName)
-                                    }
-                                    .testTag("inbox_thread_${thread.partnerId}"),
-                                shape = RoundedCornerShape(14.dp),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (thread.unreadCount > 0) QawmiMintSurface else Color.White
-                                )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "পয়গাম ইনবক্স ও রিয়েল-টাইম কথোপকথন",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "মোট কথোপকথন: ${IslamicDateAndPrayerHelper.toBanglaDigits(conversationThreads.size.toString())} টি • অপঠিত পয়গাম: ${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} টি",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiTextSecondary
+                            )
+                        }
+                        if (totalUnreadMessagesCount > 0) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = QawmiAlertRed,
+                                modifier = Modifier.testTag("unread_messages_count_badge")
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.Top
-                                ) {
-                                    UserAvatarImage(
-                                        photoUrl = thread.partnerPhotoUrl,
-                                        displayName = thread.partnerName,
-                                        size = 48.dp,
-                                        borderColor = if (thread.isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
-                                        borderWidth = 1.5.dp,
-                                        showOnlineIndicator = true,
-                                        isOnline = thread.isPartnerOnline,
-                                        modifier = Modifier.clickable {
-                                            onInspectUserProfile(thread.partnerId, thread.partnerName)
-                                        }
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = thread.partnerName,
-                                                style = MaterialTheme.typography.titleSmall,
-                                                color = QawmiDeepGreen,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(
-                                                text = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(latestMsg.createdAt),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = QawmiTextMuted
-                                            )
-                                        }
+                                Text(
+                                    text = "${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} অপঠিত",
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
 
-                                        Text(
-                                            text = presenceBadge,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (thread.isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
-                                            fontSize = 10.5.sp,
-                                            fontWeight = if (thread.isPartnerOnline) FontWeight.Bold else FontWeight.Normal
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "কথোপকথনের তালিকা (ইনবক্স)",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = QawmiTextDark,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                when (messagesState) {
+                    is UiState.Loading -> {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = QawmiDeepGreen)
+                        }
+                    }
+                    is UiState.Error -> {
+                        Text(messagesState.message, color = MaterialTheme.colorScheme.error)
+                    }
+                    is UiState.Success -> {
+                        if (conversationThreads.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "এখনো কোনো পয়গাম আদান-প্রদান হয়নি।\nফিড, আবেদন বা মাদরাসা তালিকা থেকে যেকোনো প্রাপকের প্রোফাইলে গিয়ে মেসেজ পাঠাতে পারবেন।",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = QawmiTextSecondary,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        } else {
+                            LazyColumn(
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .testTag("inbox_threads_list")
+                            ) {
+                                items(conversationThreads, key = { it.partnerId }) { thread ->
+                                    val latestMsg = thread.latestMessage
+                                    val isLatestSentByMe = latestMsg.senderId == currentUserId
+                                    val presenceBadge = if (thread.isPartnerOnline) {
+                                        "অনলাইন"
+                                    } else if (thread.partnerLastSeenAt != null) {
+                                        "সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(thread.partnerLastSeenAt)}"
+                                    } else {
+                                        "অফলাইন"
+                                    }
+
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .border(
+                                                width = if (thread.unreadCount > 0) 1.5.dp else 1.dp,
+                                                color = if (thread.unreadCount > 0) QawmiDeepGreen else QawmiMintBorder,
+                                                shape = RoundedCornerShape(14.dp)
+                                            )
+                                            .clickable {
+                                                if (!isLatestSentByMe && !latestMsg.isRead) {
+                                                    onMarkRead(latestMsg.id)
+                                                }
+                                                onMarkConversationRead(thread.partnerId)
+                                                receiverId = thread.partnerId
+                                                receiverName = thread.partnerName
+                                                onSelectRecipient(thread.partnerId, thread.partnerName)
+                                            }
+                                            .testTag("inbox_thread_${thread.partnerId}"),
+                                        shape = RoundedCornerShape(14.dp),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = if (thread.unreadCount > 0) QawmiMintSurface else Color.White
                                         )
-
-                                        Spacer(modifier = Modifier.height(3.dp))
-
-                                        Text(
-                                            text = if (isLatestSentByMe) "আপনি: ${latestMsg.body}" else latestMsg.body,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = QawmiTextDark,
-                                            fontWeight = if (thread.unreadCount > 0) FontWeight.Bold else FontWeight.Normal,
-                                            maxLines = 2
-                                        )
-
-                                        Spacer(modifier = Modifier.height(4.dp))
-
+                                    ) {
                                         Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(12.dp),
+                                            verticalAlignment = Alignment.Top
                                         ) {
-                                            Text(
-                                                text = "কথোপকথন খুলতে ট্যাপ করুন",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = QawmiSeekerBlue
+                                            UserAvatarImage(
+                                                photoUrl = thread.partnerPhotoUrl,
+                                                displayName = thread.partnerName,
+                                                size = 48.dp,
+                                                borderColor = if (thread.isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
+                                                borderWidth = 1.5.dp,
+                                                showOnlineIndicator = true,
+                                                isOnline = thread.isPartnerOnline,
+                                                modifier = Modifier.clickable {
+                                                    onInspectUserProfile(thread.partnerId, thread.partnerName)
+                                                }
                                             )
-                                            if (thread.unreadCount > 0) {
-                                                Surface(
-                                                    shape = RoundedCornerShape(50),
-                                                    color = QawmiDeepGreen,
-                                                    modifier = Modifier.testTag("thread_unread_badge_${thread.partnerId}")
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
                                                 ) {
                                                     Text(
-                                                        text = "${IslamicDateAndPrayerHelper.toBanglaDigits(thread.unreadCount.toString())} টি নতুন",
-                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = Color.White,
-                                                        fontSize = 10.sp,
+                                                        text = thread.partnerName,
+                                                        style = MaterialTheme.typography.titleSmall,
+                                                        color = QawmiDeepGreen,
                                                         fontWeight = FontWeight.Bold
                                                     )
+                                                    Text(
+                                                        text = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(latestMsg.createdAt),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = QawmiTextMuted
+                                                    )
+                                                }
+
+                                                Text(
+                                                    text = presenceBadge,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (thread.isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
+                                                    fontSize = 10.5.sp,
+                                                    fontWeight = if (thread.isPartnerOnline) FontWeight.Bold else FontWeight.Normal
+                                                )
+
+                                                Spacer(modifier = Modifier.height(3.dp))
+
+                                                Text(
+                                                    text = if (isLatestSentByMe) "আপনি: ${latestMsg.body}" else latestMsg.body,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = QawmiTextDark,
+                                                    fontWeight = if (thread.unreadCount > 0) FontWeight.Bold else FontWeight.Normal,
+                                                    maxLines = 2
+                                                )
+
+                                                Spacer(modifier = Modifier.height(4.dp))
+
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(
+                                                        text = "কথোপকথন খুলতে ট্যাপ করুন",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = QawmiSeekerBlue
+                                                    )
+                                                    if (thread.unreadCount > 0) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(50),
+                                                            color = QawmiDeepGreen,
+                                                            modifier = Modifier.testTag("thread_unread_badge_${thread.partnerId}")
+                                                        ) {
+                                                            Text(
+                                                                text = "${IslamicDateAndPrayerHelper.toBanglaDigits(thread.unreadCount.toString())} টি নতুন",
+                                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = Color.White,
+                                                                fontSize = 10.sp,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
