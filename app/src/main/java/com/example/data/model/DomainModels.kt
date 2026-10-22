@@ -203,6 +203,106 @@ data class DirectMessage(
     @set:PropertyName("isDeletedForEveryone")
     var isDeletedForEveryone: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null
+) {
+    fun isVisibleForUser(userId: String): Boolean {
+        if (userId.isBlank()) return true
+        if (userId == senderId && deletedForSender) return false
+        if (userId == receiverId && deletedForReceiver) return false
+        if (deletedForUserIds.contains(userId)) return false
+        return true
+    }
+
+    fun isUnreadForUser(userId: String): Boolean {
+        if (userId.isBlank() || senderId == userId || !isVisibleForUser(userId)) return false
+        val isGroupMsg = groupId.isNotBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
+        return if (isGroupMsg) {
+            !readByUserIds.contains(userId)
+        } else {
+            receiverId == userId && !isRead && !readByUserIds.contains(userId)
+        }
+    }
+
+    fun resolvedConversationKey(currentUserId: String): String {
+        return if (groupId.isNotBlank()) {
+            "GROUP:$groupId"
+        } else if (receiverId.startsWith("GROUP:", ignoreCase = true)) {
+            receiverId
+        } else if (senderId == currentUserId) {
+            receiverId
+        } else {
+            senderId
+        }
+    }
+
+    fun mergedUserReactions(): Map<String, String> {
+        val merged = mutableMapOf<String, String>()
+        if (senderId.isNotBlank() && senderReaction.isNotBlank()) {
+            merged[senderId] = senderReaction
+        }
+        if (receiverId.isNotBlank() && !receiverId.startsWith("GROUP:") && receiverReaction.isNotBlank()) {
+            merged[receiverId] = receiverReaction
+        }
+        userReactions.forEach { (uid, code) ->
+            if (uid.isNotBlank()) {
+                if (code.isBlank()) {
+                    merged.remove(uid)
+                } else {
+                    merged[uid] = code
+                }
+            }
+        }
+        return merged
+    }
+
+    fun parsedReplyQuote(): ReplyQuoteInfo? {
+        return ReplyQuoteInfo.fromSubject(subject)
+    }
+
+    fun displaySubject(): String {
+        return ReplyQuoteInfo.stripReplyPrefix(subject)
+    }
+}
+
+data class ReplyQuoteInfo(
+    val replyToMessageId: String,
+    val replyToSenderName: String,
+    val replyToSnippet: String
+) {
+    companion object {
+        private const val PREFIX = "REPLY|"
+
+        fun encodeSubject(
+            replyToMessageId: String,
+            replyToSenderName: String,
+            replyToSnippet: String
+        ): String {
+            val safeId = replyToMessageId.replace("|", "").trim().take(36)
+            val safeName = replyToSenderName.replace("|", " ").replace("\n", " ").trim().ifBlank { "ব্যবহারকারী" }.take(40)
+            val safeSnippet = replyToSnippet.replace("|", " ").replace("\n", " ").trim().ifBlank { "পয়গাম" }.take(95)
+            return "$PREFIX$safeId|$safeName|$safeSnippet".take(195)
+        }
+
+        fun fromSubject(subject: String): ReplyQuoteInfo? {
+            if (!subject.startsWith(PREFIX)) return null
+            val parts = subject.removePrefix(PREFIX).split("|", limit = 3)
+            if (parts.size < 3) return null
+            return ReplyQuoteInfo(
+                replyToMessageId = parts[0].trim(),
+                replyToSenderName = parts[1].trim().ifBlank { "ব্যবহারকারী" },
+                replyToSnippet = parts[2].trim().ifBlank { "পয়গাম" }
+            )
+        }
+
+        fun stripReplyPrefix(subject: String): String {
+            return if (subject.startsWith(PREFIX)) "খেদমত সংক্রান্ত যোগাযোগ" else subject
+        }
+    }
+}
+
+data class PaygamReactionOption(
+    val code: String,
+    val emoji: String,
+    val banglaTitle: String
 )
 
 enum class IslamicReaction(
@@ -210,19 +310,67 @@ enum class IslamicReaction(
     val emoji: String,
     val banglaTitle: String
 ) {
-    DUA("DUA", "🤲", "দোয়া"),
+    SAMMATI("SAMMATI", "👍", "সম্মতি / লাইক"),
     MUHABBAT("MUHABBAT", "❤️", "ভালোবাসা"),
+    HAHA("HAHA", "😂", "আনন্দ"),
+    WOW("WOW", "😮", "বিস্ময়"),
+    SAD("SAD", "😢", "সমবেদনা"),
+    PRAY("PRAY", "🙏", "কৃতজ্ঞতা / দোয়া"),
+    DUA("DUA", "🤲", "দোয়া"),
     HILAL("HILAL", "🌙", "চাঁদ"),
-    SUNDOR("SUNDOR", "✨", "সুন্দর"),
-    DEENI_PRERONA("DEENI_PRERONA", "🕌", "দ্বীনি অনুপ্রেরণা"),
-    SAMMATI("SAMMATI", "👍", "সম্মতি");
+    SUNDOR("SUNDOR", "✨", "মাশাআল্লাহ"),
+    DEENI_PRERONA("DEENI_PRERONA", "🕌", "দ্বীনি অনুপ্রেরণা");
 
     val titleBangla: String
         get() = banglaTitle
 
     companion object {
+        val primaryBarOptions: List<IslamicReaction> = listOf(
+            SAMMATI,
+            MUHABBAT,
+            HAHA,
+            WOW,
+            SAD,
+            PRAY
+        )
+
+        val extendedOptions: List<IslamicReaction> = listOf(
+            SAMMATI,
+            MUHABBAT,
+            HAHA,
+            WOW,
+            SAD,
+            PRAY,
+            DUA,
+            SUNDOR,
+            HILAL,
+            DEENI_PRERONA
+        )
+
         fun fromCode(code: String): IslamicReaction? {
-            return entries.firstOrNull { it.code == code }
+            val trimmed = code.trim()
+            if (trimmed.isBlank()) return null
+            entries.firstOrNull { it.code.equals(trimmed, ignoreCase = true) || it.emoji == trimmed }?.let { return it }
+            return when (trimmed.uppercase()) {
+                "LIKE", "TAYYIB" -> SAMMATI
+                "LOVE" -> MUHABBAT
+                "MUBARAK" -> HILAL
+                "MASHALLAH" -> SUNDOR
+                "SHUKRAN" -> PRAY
+                else -> null
+            }
+        }
+
+        fun resolveEmoji(codeOrEmoji: String): String {
+            val trimmed = codeOrEmoji.trim()
+            if (trimmed.isBlank()) return ""
+            return fromCode(trimmed)?.emoji ?: trimmed
+        }
+
+        fun resolveBanglaTitle(codeOrEmoji: String): String {
+            val trimmed = codeOrEmoji.trim()
+            if (trimmed.isBlank()) return ""
+            return fromCode(trimmed)?.banglaTitle ?: "অভিবাদন"
         }
     }
 }

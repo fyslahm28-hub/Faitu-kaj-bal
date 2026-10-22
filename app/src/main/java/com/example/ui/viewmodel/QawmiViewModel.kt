@@ -406,9 +406,7 @@ class QawmiViewModel(
         _inspectedUserTarget.value = null
         _messageTargetUser.value = userId to userName
         navigateTo(MainDestination.MESSAGES)
-        if (!userId.startsWith("GROUP:")) {
-            markConversationRead(userId)
-        }
+        markConversationRead(userId)
     }
 
     fun clearMessageTarget() {

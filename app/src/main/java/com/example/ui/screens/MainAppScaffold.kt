@@ -183,19 +183,25 @@ fun MainAppScaffold(
     val activeChatPartnerProfile by viewModel.activeChatPartnerProfileState.collectAsStateWithLifecycle()
     val chatPartnerProfiles by viewModel.chatPartnerProfilesState.collectAsStateWithLifecycle()
 
-    val unreadNotificationsCount = remember(notificationsState) {
-        (notificationsState as? UiState.Success)?.data?.count { !it.isRead } ?: 0
+    val unreadNotificationsCount = remember(notificationsState, viewModel.currentUserId) {
+        (notificationsState as? UiState.Success)?.data?.count {
+            !it.isRead && it.senderId != viewModel.currentUserId && !it.type.equals("MESSAGE", ignoreCase = true)
+        } ?: 0
     }
 
+    // Requirement 8খ: Count DISTINCT unread conversations (1 per person/group regardless of how many unread messages they sent)
     val unreadDirectMessagesCount = remember(messagesState, viewModel.currentUserId) {
         val list = (messagesState as? UiState.Success)?.data ?: emptyList()
         list.distinctBy { msg ->
             msg.id.ifBlank {
                 "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.createdAt?.nanoseconds ?: 0}_${msg.body}"
             }
-        }.count {
-            it.receiverId == viewModel.currentUserId && !it.isRead
         }
+            .filter { it.isUnreadForUser(viewModel.currentUserId) && !it.isDeletedForEveryone }
+            .map { it.resolvedConversationKey(viewModel.currentUserId) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .size
     }
 
     LaunchedEffect(notificationsState, viewModel.currentUserId) {
@@ -204,6 +210,30 @@ fun MainAppScaffold(
             context = context,
             currentUserId = viewModel.currentUserId,
             notifications = currentList
+        )
+    }
+
+    LaunchedEffect(messagesState, userGroupsState, currentDestination, messageTargetUser, viewModel.currentUserId) {
+        val currentMessages = (messagesState as? UiState.Success)?.data ?: return@LaunchedEffect
+        val currentGroups = (userGroupsState as? UiState.Success)?.data ?: emptyList()
+        val activeConvKey = if (currentDestination == MainDestination.MESSAGES) {
+            messageTargetUser?.first
+        } else {
+            null
+        }
+        if (!activeConvKey.isNullOrBlank()) {
+            QawmiNotificationHelper.cancelConversationNotification(
+                context = context,
+                conversationKey = activeConvKey,
+                currentUserId = viewModel.currentUserId
+            )
+        }
+        QawmiNotificationHelper.deliverNewUnreadMessageNotifications(
+            context = context,
+            currentUserId = viewModel.currentUserId,
+            messages = currentMessages,
+            chatGroups = currentGroups,
+            activeConversationKey = activeConvKey
         )
     }
 

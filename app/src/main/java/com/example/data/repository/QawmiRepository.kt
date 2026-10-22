@@ -1310,16 +1310,17 @@ class QawmiRepository(
                 "senderPhotoUrl" to senderPhotoUrl.trim(),
                 "receiverId" to if (isGroupMessage) "GROUP:$resolvedGroupId" else receiverId,
                 "receiverName" to safeReceiverName,
-                "subject" to subject.trim().ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                "body" to resolvedBody,
+                "subject" to subject.trim().ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }.take(195),
+                "body" to resolvedBody.take(1450),
                 "isRead" to false,
+                "readByUserIds" to listOf(uid),
                 "createdAt" to FieldValue.serverTimestamp()
             )
             if (uploadedImages.isNotEmpty()) {
                 payload["imageUrls"] = uploadedImages
             }
             if (isGroupMessage) {
-                val finalGroupMembers = (groupMemberIds + uid).map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                val finalGroupMembers = (groupMemberIds + uid).map { it.trim() }.filter { it.isNotBlank() }.distinct().take(50)
                 payload["groupId"] = resolvedGroupId
                 payload["groupName"] = groupName.trim().ifBlank { safeReceiverName }
                 payload["groupMemberIds"] = finalGroupMembers
@@ -1333,16 +1334,8 @@ class QawmiRepository(
             } catch (_: Exception) {
             }
 
-            if (!isGroupMessage && receiverId.isNotBlank() && receiverId != uid) {
-                createNotification(
-                    recipientId = receiverId,
-                    senderName = safeSenderName,
-                    title = "নতুন পয়গাম: $safeSenderName",
-                    message = resolvedBody.take(120),
-                    type = "MESSAGE",
-                    referenceId = docRef.id
-                )
-            }
+            // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.
+            // Bell icon notifications are strictly reserved for general notifications (NEW_CIRCULAR, APPLICATION, ANNOUNCEMENT, etc.).
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
@@ -1370,12 +1363,37 @@ class QawmiRepository(
     suspend fun markConversationMessagesAsRead(otherUserId: String, messages: List<DirectMessage>): Result<Unit> {
         val uid = requireUserId()
         if (otherUserId.isBlank() || otherUserId == uid) return Result.success(Unit)
-        if (otherUserId.startsWith("GROUP:")) return Result.success(Unit)
 
-        val unreadIds = messages
-            .filter { it.senderId == otherUserId && it.receiverId == uid && !it.isRead && it.id.isNotBlank() }
-            .map { it.id }
-            .toMutableSet()
+        if (otherUserId.startsWith("GROUP:", ignoreCase = true)) {
+            val groupId = otherUserId.substringAfter(":")
+            val unreadGroupMsgs = messages.filter { msg ->
+                val matchesGroup = msg.groupId == groupId || msg.receiverId.equals(otherUserId, ignoreCase = true)
+                matchesGroup && msg.senderId != uid && !msg.readByUserIds.contains(uid) && msg.id.isNotBlank()
+            }
+            if (unreadGroupMsgs.isEmpty()) return Result.success(Unit)
+            return try {
+                val batch = db.batch()
+                for (msg in unreadGroupMsgs) {
+                    val updatedReadBy = (msg.readByUserIds + uid).distinct().take(50)
+                    batch.update(
+                        db.collection("messages").document(msg.id),
+                        mapOf("readByUserIds" to updatedReadBy)
+                    )
+                }
+                batch.commit().await()
+                Result.success(Unit)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.UPDATE, "messages")
+                Result.failure(e)
+            }
+        }
+
+        val unreadMap = mutableMapOf<String, List<String>>()
+        messages
+            .filter { it.senderId == otherUserId && it.receiverId == uid && (!it.isRead || !it.readByUserIds.contains(uid)) && it.id.isNotBlank() }
+            .forEach { unreadMap[it.id] = it.readByUserIds }
 
         return try {
             // Also verify against Firestore directly in case messagesState had not finished emitting when called
@@ -1386,15 +1404,23 @@ class QawmiRepository(
             for (doc in receivedSnap.documents) {
                 val docSender = doc.getString("senderId").orEmpty()
                 val docRead = doc.getBoolean("isRead") ?: doc.getBoolean("read") ?: false
-                if (docSender == otherUserId && !docRead && doc.id.isNotBlank()) {
-                    unreadIds.add(doc.id)
+                val docReadBy = (doc.get("readByUserIds") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+                if (docSender == otherUserId && (!docRead || !docReadBy.contains(uid)) && doc.id.isNotBlank()) {
+                    unreadMap[doc.id] = docReadBy
                 }
             }
 
-            if (unreadIds.isNotEmpty()) {
+            if (unreadMap.isNotEmpty()) {
                 val batch = db.batch()
-                for (msgId in unreadIds) {
-                    batch.update(db.collection("messages").document(msgId), "isRead", true)
+                for ((msgId, existingReadBy) in unreadMap) {
+                    val updatedReadBy = (existingReadBy + uid).distinct().take(50)
+                    batch.update(
+                        db.collection("messages").document(msgId),
+                        mapOf(
+                            "isRead" to true,
+                            "readByUserIds" to updatedReadBy
+                        )
+                    )
                 }
                 batch.commit().await()
             }
@@ -1408,8 +1434,8 @@ class QawmiRepository(
     }
 
     /**
-     * Adds, updates, or toggles off an Islamic reaction (🤲, ❤️, 🌙, ✨, 🕌, 👍)
-     * on a Paygam message. Real-time visible across 1-on-1 and group chats.
+     * Adds, updates, or toggles off a reaction (👍, ❤️, 😂, 😮, 😢, 🙏, 🤲, 🌙, ✨, 🕌)
+     * on a Paygam message. Real-time visible across 1-on-1 and group chats via `userReactions`.
      */
     suspend fun reactToMessage(
         message: DirectMessage,
@@ -1422,27 +1448,26 @@ class QawmiRepository(
         }
         val docRef = db.collection("messages").document(message.id)
         return try {
-            if (message.groupId.isNotBlank() || (uid != message.senderId && uid != message.receiverId)) {
-                val existingMap = message.userReactions.toMutableMap()
-                val currentCode = existingMap[uid] ?: if (uid == message.senderId) message.senderReaction else ""
-                val nextCode = if (currentCode == reactionCode) "" else reactionCode
-                if (nextCode.isBlank()) {
-                    existingMap.remove(uid)
-                } else {
-                    existingMap[uid] = nextCode
-                }
-                val updates = mapOf<String, Any>("userReactions" to existingMap)
-                docRef.update(updates).await()
+            val mergedMap = message.mergedUserReactions().toMutableMap()
+            val currentReaction = mergedMap[uid].orEmpty()
+            val isSameReaction = currentReaction.isNotBlank() && (
+                currentReaction.equals(reactionCode, ignoreCase = true) ||
+                    com.example.data.model.IslamicReaction.resolveEmoji(currentReaction) ==
+                    com.example.data.model.IslamicReaction.resolveEmoji(reactionCode)
+                )
+            val nextReaction = if (isSameReaction) "" else reactionCode.trim()
+            if (nextReaction.isBlank()) {
+                mergedMap.remove(uid)
             } else {
-                val fieldToUpdate = when (uid) {
-                    message.senderId -> "senderReaction"
-                    message.receiverId -> "receiverReaction"
-                    else -> return Result.failure(IllegalStateException("শুধুমাত্র কথোপকথনের পক্ষদ্বয় অভিবাদন যুক্ত করতে পারবেন।"))
-                }
-                val currentReaction = if (uid == message.senderId) message.senderReaction else message.receiverReaction
-                val nextReaction = if (currentReaction == reactionCode) "" else reactionCode
-                docRef.update(fieldToUpdate, nextReaction).await()
+                mergedMap[uid] = nextReaction
             }
+            val updates = mutableMapOf<String, Any>("userReactions" to mergedMap.entries.take(50).associate { it.key to it.value })
+            if (uid == message.senderId && message.senderReaction.isNotBlank()) {
+                updates["senderReaction"] = ""
+            } else if (uid != message.senderId && uid == message.receiverId && message.receiverReaction.isNotBlank()) {
+                updates["receiverReaction"] = ""
+            }
+            docRef.update(updates).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1498,13 +1523,23 @@ class QawmiRepository(
         val uid = requireUserId()
         if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
         val docRef = db.collection("messages").document(message.id)
+        val updatedDeletedList = (message.deletedForUserIds + uid).distinct().take(50)
         return try {
             when {
-                uid == message.senderId -> docRef.update("deletedForSender", true).await()
-                uid == message.receiverId -> docRef.update("deletedForReceiver", true).await()
-                message.groupMemberIds.contains(uid) -> {
-                    val updatedDeleted = (message.deletedForUserIds + uid).distinct()
-                    docRef.update("deletedForUserIds", updatedDeleted).await()
+                uid == message.senderId -> docRef.update(
+                    mapOf(
+                        "deletedForSender" to true,
+                        "deletedForUserIds" to updatedDeletedList
+                    )
+                ).await()
+                uid == message.receiverId -> docRef.update(
+                    mapOf(
+                        "deletedForReceiver" to true,
+                        "deletedForUserIds" to updatedDeletedList
+                    )
+                ).await()
+                message.groupMemberIds.contains(uid) || message.groupId.isNotBlank() -> {
+                    docRef.update("deletedForUserIds", updatedDeletedList).await()
                 }
                 else -> return Result.failure(IllegalStateException("অনুমোদনহীন অনুরোধ।"))
             }
@@ -1518,22 +1553,24 @@ class QawmiRepository(
     }
 
     /**
-     * Recalls/deletes a Paygam message for everyone in the conversation (সবার জন্য প্রত্যাহার করুন).
+     * Recalls/deletes a Paygam message for everyone in the conversation (সবার জন্য মুছুন).
      * Strictly permitted only for the original sender (`uid == message.senderId`).
      */
     suspend fun deleteMessageForEveryone(message: DirectMessage): Result<Unit> {
         val uid = requireUserId()
         if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
         if (uid != message.senderId) {
-            return Result.failure(IllegalStateException("শুধুমাত্র পয়গাম প্রেরক সবার জন্য পয়গাম প্রত্যাহার করতে পারবেন।"))
+            return Result.failure(IllegalStateException("শুধুমাত্র পয়গাম প্রেরক সবার জন্য পয়গাম মুছতে পারবেন।"))
         }
         val docRef = db.collection("messages").document(message.id)
         return try {
             docRef.update(
                 mapOf(
                     "body" to "এই পয়গামটি প্রত্যাহার করা হয়েছে",
+                    "imageUrls" to emptyList<String>(),
                     "isDeletedForEveryone" to true,
-                    "senderReaction" to ""
+                    "senderReaction" to "",
+                    "userReactions" to emptyMap<String, String>()
                 )
             ).await()
             Result.success(Unit)
@@ -1724,8 +1761,8 @@ class QawmiRepository(
         return combine(directFlow, broadcastFlow, readReceiptsFlow) { directList, broadcastList, readIds ->
             (directList + broadcastList)
                 .distinctBy { it.id }
-                // Never show self-generated notifications to the user who created the post/action
-                .filter { it.senderId != userId }
+                // Never show self-generated notifications or Paygam chat messages in the Bell notification list
+                .filter { it.senderId != userId && !it.type.equals("MESSAGE", ignoreCase = true) }
                 .map { notif ->
                     val resolvedRead = notif.isRead || readIds.contains(notif.id)
                     notif.copy(isRead = resolvedRead)
