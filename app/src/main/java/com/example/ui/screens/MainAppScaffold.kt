@@ -170,6 +170,7 @@ fun MainAppScaffold(
     val mySentSubmissionsState by viewModel.mySentSubmissionsState.collectAsStateWithLifecycle()
     val receivedSubmissionsState by viewModel.receivedSubmissionsState.collectAsStateWithLifecycle()
     val messagesState by viewModel.messagesState.collectAsStateWithLifecycle()
+    val userGroupsState by viewModel.userGroupsState.collectAsStateWithLifecycle()
     val notificationsState by viewModel.notificationsState.collectAsStateWithLifecycle()
     val isAdminState by viewModel.isAdminState.collectAsStateWithLifecycle()
     val telegramNotificationsState by viewModel.telegramNotificationsState.collectAsStateWithLifecycle()
@@ -412,7 +413,7 @@ fun MainAppScaffold(
             MainDestination.PUBLISH_CIRCULAR -> "বিজ্ঞপ্তি দিন"
             MainDestination.PUBLISH_APPLICATION -> "আবেদন প্রকাশ করুন"
             MainDestination.REGISTER_MADRASA -> "মাদরাসা নিবন্ধন"
-            MainDestination.MESSAGES -> "ইনবক্স / পয়গাম"
+            MainDestination.MESSAGES -> "পয়গাম"
             MainDestination.NOTIFICATIONS -> "নোটিফিকেশন"
             MainDestination.ADMIN_PANEL -> "অ্যাডমিন প্যানেল"
             MainDestination.PRAYER_SCHEDULE -> "নামাজের সময়সূচী"
@@ -718,6 +719,7 @@ fun MainAppScaffold(
                         }
 
                         MainDestination.MESSAGES -> {
+                            val activeGroups = (userGroupsState as? UiState.Success)?.data ?: emptyList()
                             MessagesScreen(
                                 messagesState = messagesState,
                                 currentUserId = viewModel.currentUserId,
@@ -725,9 +727,22 @@ fun MainAppScaffold(
                                 targetUser = messageTargetUser,
                                 partnerProfiles = chatPartnerProfiles,
                                 activePartnerProfile = activeChatPartnerProfile,
+                                userGroups = activeGroups,
                                 isSubmitting = isSubmitting,
                                 onSendMessage = { recId, recName, subj, body ->
                                     viewModel.sendMessage(recId, recName, subj, body)
+                                },
+                                onSendMessageWithImages = { recId, recName, subj, body, imageUrls, groupId, groupName, groupMemberIds ->
+                                    viewModel.sendMessage(
+                                        receiverId = recId,
+                                        receiverName = recName,
+                                        subject = subj,
+                                        body = body,
+                                        imageUrls = imageUrls,
+                                        groupId = groupId,
+                                        groupName = groupName,
+                                        groupMemberIds = groupMemberIds
+                                    )
                                 },
                                 onSelectRecipient = { uid, name -> viewModel.openDirectMessageTo(uid, name) },
                                 onClearRecipient = { viewModel.clearMessageTarget() },
@@ -742,7 +757,27 @@ fun MainAppScaffold(
                                 onDeleteMessageForMe = { msg -> viewModel.deleteMessageForMe(msg) },
                                 onDeleteMessageForEveryone = { msg -> viewModel.deleteMessageForEveryone(msg) },
                                 onToggleBlockUser = { targetUid, block -> viewModel.toggleBlockUser(targetUid, block) },
-                                onSaveConversationTheme = { partnerUid, themeSpec -> viewModel.saveConversationTheme(partnerUid, themeSpec) }
+                                onSaveConversationTheme = { partnerUid, themeSpec -> viewModel.saveConversationTheme(partnerUid, themeSpec) },
+                                onCreateGroup = { name, photoUrl, memberIds, memberNames ->
+                                    viewModel.createChatGroup(
+                                        name = name,
+                                        photoUrl = photoUrl,
+                                        initialMemberIds = memberIds,
+                                        initialMemberNames = memberNames,
+                                        onCreated = { createdGroup ->
+                                            viewModel.openDirectMessageTo("GROUP:${createdGroup.id}", createdGroup.name)
+                                        }
+                                    )
+                                },
+                                onUpdateGroupDetails = { groupId, newName, newPhoto ->
+                                    viewModel.updateChatGroupDetails(groupId, newName, newPhoto)
+                                },
+                                onAddGroupMember = { groupId, memberId, memberName ->
+                                    viewModel.addMemberToChatGroup(groupId, memberId, memberName)
+                                },
+                                onRemoveGroupMember = { groupId, memberId ->
+                                    viewModel.removeMemberFromChatGroup(groupId, memberId)
+                                }
                             )
                         }
 

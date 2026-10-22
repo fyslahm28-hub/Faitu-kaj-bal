@@ -114,23 +114,46 @@
         "createdAt": { "type": "timestamp", "required": true }
       }
     },
+    "ChatGroup": {
+      "description": "Group conversation room supporting group name, group photo, member addition/removal, and custom theme.",
+      "properties": {
+        "groupId": { "type": "string", "required": true },
+        "name": { "type": "string", "required": true },
+        "photoUrl": { "type": "string", "required": false },
+        "creatorId": { "type": "string", "required": true },
+        "creatorName": { "type": "string", "required": true },
+        "memberIds": { "type": "array", "required": true },
+        "memberNames": { "type": "object", "required": false },
+        "memberPhotos": { "type": "object", "required": false },
+        "themeSpec": { "type": "string", "required": false },
+        "createdAt": { "type": "timestamp", "required": true },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
+    },
     "DirectMessage": {
-      "description": "Direct message (Paygam) sent between Madrasa authorities and teachers/applicants, supporting Islamic reactions, message editing, and scoped deletion.",
+      "description": "Direct or Group message (Paygam) supporting 1-5 image attachments, Islamic reactions, message editing, and scoped deletion.",
       "properties": {
         "senderId": { "type": "string", "required": true },
         "senderName": { "type": "string", "required": true },
         "senderPhotoUrl": { "type": "string", "required": false },
         "receiverId": { "type": "string", "required": true },
         "receiverName": { "type": "string", "required": true },
+        "groupId": { "type": "string", "required": false },
+        "groupName": { "type": "string", "required": false },
+        "groupMemberIds": { "type": "array", "required": false },
         "subject": { "type": "string", "required": true },
         "body": { "type": "string", "required": true },
+        "imageUrls": { "type": "array", "required": false },
         "isRead": { "type": "boolean", "required": true },
+        "readByUserIds": { "type": "array", "required": false },
         "senderReaction": { "type": "string", "required": false },
         "receiverReaction": { "type": "string", "required": false },
+        "userReactions": { "type": "object", "required": false },
         "isEdited": { "type": "boolean", "required": false },
         "editedAt": { "type": "timestamp", "required": false },
         "deletedForSender": { "type": "boolean", "required": false },
         "deletedForReceiver": { "type": "boolean", "required": false },
+        "deletedForUserIds": { "type": "array", "required": false },
         "isDeletedForEveryone": { "type": "boolean", "required": false },
         "createdAt": { "type": "timestamp", "required": true }
       }
@@ -210,9 +233,14 @@
       "access": "Authenticated applicants can create submissions; only the applicant, recipient madrasa author, or admin can read; recipient or admin can update status."
     },
     {
+      "path": "/chat_groups/{groupId}",
+      "entity": "ChatGroup",
+      "access": "Authenticated members can read and update group metadata/members; creator can create and delete the group."
+    },
+    {
       "path": "/messages/{messageId}",
       "entity": "DirectMessage",
-      "access": "Authenticated users can create messages where senderId == auth.uid and neither party has blocked the other; sender can edit body, react, delete-for-sender, or delete-for-everyone; receiver can mark isRead, react, or delete-for-receiver."
+      "access": "Authenticated users can create personal or group messages with up to 5 images; sender can edit body, react, delete-for-me, or delete-for-everyone; recipients/members can mark read, react, or delete-for-me."
     },
     {
       "path": "/notifications/{notificationId}",

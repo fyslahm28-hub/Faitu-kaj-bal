@@ -111,15 +111,31 @@ import com.example.ui.util.IslamicDateAndPrayerHelper
 import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.UiState
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.LockReset
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.PersonRemove
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import com.example.data.model.ChatGroup
 import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
+import com.example.ui.components.ChatAttachmentImage
 import com.example.ui.components.UserAvatarImage
 import com.example.ui.theme.QawmiAlertRed
 import com.example.ui.theme.QawmiSoftBg
 import com.example.ui.util.AdminSecurityHelper
+import com.example.ui.util.ProfilePhotoHelper
 import com.example.ui.util.TelegramNotificationHelper
 import com.google.firebase.Timestamp
 
@@ -683,7 +699,9 @@ private data class ConversationSummary(
     val isPartnerTyping: Boolean,
     val partnerLastSeenAt: Timestamp?,
     val latestMessage: DirectMessage,
-    val unreadCount: Int
+    val unreadCount: Int,
+    val isGroup: Boolean = false,
+    val groupMemberCount: Int = 0
 )
 
 private fun isPartnerCurrentlyTypingToMe(
@@ -792,8 +810,22 @@ fun MessagesScreen(
     targetUser: Pair<String, String>?,
     partnerProfiles: Map<String, UserProfile> = emptyMap(),
     activePartnerProfile: UserProfile? = null,
+    userGroups: List<ChatGroup> = emptyList(),
+    initialSelectedImages: List<String> = emptyList(),
     isSubmitting: Boolean,
     onSendMessage: (receiverId: String, receiverName: String, subject: String, body: String) -> Unit,
+    onSendMessageWithImages: (
+        receiverId: String,
+        receiverName: String,
+        subject: String,
+        body: String,
+        imageUrls: List<String>,
+        groupId: String,
+        groupName: String,
+        groupMemberIds: List<String>
+    ) -> Unit = { recId, recName, subj, textBody, _, _, _, _ ->
+        onSendMessage(recId, recName, subj, textBody)
+    },
     onSelectRecipient: (String, String) -> Unit,
     onClearRecipient: () -> Unit = {},
     onMarkRead: (String) -> Unit,
@@ -805,19 +837,39 @@ fun MessagesScreen(
     onDeleteMessageForMe: (DirectMessage) -> Unit = {},
     onDeleteMessageForEveryone: (DirectMessage) -> Unit = {},
     onToggleBlockUser: (targetUserId: String, block: Boolean) -> Unit = { _, _ -> },
-    onSaveConversationTheme: (partnerUserId: String, themeSpec: String) -> Unit = { _, _ -> }
+    onSaveConversationTheme: (partnerUserId: String, themeSpec: String) -> Unit = { _, _ -> },
+    onCreateGroup: (
+        name: String,
+        photoUrl: String,
+        initialMemberIds: List<String>,
+        initialMemberNames: Map<String, String>
+    ) -> Unit = { _, _, _, _ -> },
+    onUpdateGroupDetails: (groupId: String, newName: String, newPhotoUrl: String) -> Unit = { _, _, _ -> },
+    onAddGroupMember: (groupId: String, memberId: String, memberName: String) -> Unit = { _, _, _ -> },
+    onRemoveGroupMember: (groupId: String, memberId: String) -> Unit = { _, _ -> }
 ) {
+    val context = LocalContext.current
     var receiverId by remember(targetUser) { mutableStateOf(targetUser?.first.orEmpty()) }
     var receiverName by remember(targetUser) { mutableStateOf(targetUser?.second.orEmpty()) }
     var subject by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
 
-    // State for Long-Press Message Action Sheet, Edit Dialog, 3-Dot Menu, and Theme Picker
+    // 1-5 selected images before sending (supports preview and removing individual images)
+    var selectedImages by remember(initialSelectedImages) {
+        mutableStateOf(initialSelectedImages.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE))
+    }
+    var photoLimitWarning by remember { mutableStateOf<String?>(null) }
+
+    // State for Long-Press Message Action Sheet, Edit Dialog, 3-Dot Menu, Theme Picker, Group Dialogs, and Image Viewer
     var selectedMessageForAction by remember { mutableStateOf<DirectMessage?>(null) }
     var messageBeingEdited by remember { mutableStateOf<DirectMessage?>(null) }
     var editedBodyText by remember { mutableStateOf("") }
     var showThreeDotMenu by remember { mutableStateOf(false) }
     var showThemePickerDialog by remember { mutableStateOf(false) }
+    var showCreateGroupDialog by remember { mutableStateOf(false) }
+    var showGroupManagementDialog by remember { mutableStateOf(false) }
+    var fullScreenViewerImages by remember { mutableStateOf<Pair<List<String>, Int>?>(null) }
+    var imageSaveFeedback by remember { mutableStateOf<String?>(null) }
 
     // Optimistic local state for immediate UI responsiveness during tests and real-time updates
     var localThemeOverrides by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -826,6 +878,37 @@ fun MessagesScreen(
     var localReactionOverrides by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var localEditedBodies by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var locallyDeletedForEveryoneIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var localGroupsMap by remember { mutableStateOf<Map<String, ChatGroup>>(emptyMap()) }
+
+    // Merge server groups with optimistic local groups
+    val effectiveGroups = remember(userGroups, localGroupsMap) {
+        val merged = userGroups.associateBy { it.id }.toMutableMap()
+        localGroupsMap.forEach { (id, grp) -> merged[id] = grp }
+        merged.values.toList()
+    }
+
+    // Multi-photo picker (1-5 images max) for chat composer
+    val chatMultiplePhotoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            val remainingSlots = (ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE - selectedImages.size).coerceAtLeast(0)
+            if (remainingSlots <= 0) {
+                photoLimitWarning = "একবারে সর্বোচ্চ ৫টি ছবি নির্বাচন করা যাবে।"
+            } else {
+                val encodedList = ProfilePhotoHelper.processSelectedChatImages(
+                    context = context,
+                    uris = uris.take(remainingSlots)
+                )
+                if (uris.size > remainingSlots) {
+                    photoLimitWarning = "সর্বোচ্চ ৫টি ছবি নির্বাচন করা হয়েছে (৫টির বেশি নির্বাচন করা যাবে না)।"
+                } else {
+                    photoLimitWarning = null
+                }
+                selectedImages = (selectedImages + encodedList).take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
+            }
+        }
+    }
 
     // Strictly deduplicate messages by id and filter out messages deleted for the current user
     val allMessages = remember(
@@ -841,7 +924,8 @@ fun MessagesScreen(
             .filterNot { msg ->
                 locallyDeletedForMeIds.contains(msg.id) ||
                     (msg.senderId == currentUserId && msg.deletedForSender) ||
-                    (msg.receiverId == currentUserId && msg.deletedForReceiver)
+                    (msg.receiverId == currentUserId && msg.deletedForReceiver) ||
+                    msg.deletedForUserIds.contains(currentUserId)
             }
             .distinctBy { msg ->
                 msg.id.ifBlank {
@@ -851,10 +935,16 @@ fun MessagesScreen(
             .map { msg ->
                 var updated = msg
                 localReactionOverrides[msg.id]?.let { reaction ->
-                    updated = if (msg.senderId == currentUserId) {
-                        updated.copy(senderReaction = reaction)
+                    val updatedUserReactions = updated.userReactions.toMutableMap()
+                    if (reaction.isBlank()) {
+                        updatedUserReactions.remove(currentUserId)
                     } else {
-                        updated.copy(receiverReaction = reaction)
+                        updatedUserReactions[currentUserId] = reaction
+                    }
+                    updated = if (msg.senderId == currentUserId) {
+                        updated.copy(senderReaction = reaction, userReactions = updatedUserReactions)
+                    } else {
+                        updated.copy(receiverReaction = reaction, userReactions = updatedUserReactions)
                     }
                 }
                 localEditedBodies[msg.id]?.let { newBody ->
@@ -865,7 +955,8 @@ fun MessagesScreen(
                         body = "এই পয়গামটি প্রত্যাহার করা হয়েছে",
                         isDeletedForEveryone = true,
                         senderReaction = "",
-                        receiverReaction = ""
+                        receiverReaction = "",
+                        userReactions = emptyMap()
                     )
                 }
                 updated
@@ -876,9 +967,10 @@ fun MessagesScreen(
         allMessages.count { it.receiverId == currentUserId && !it.isRead }
     }
 
-    // Group messages into Conversation Threads by partnerId
-    val conversationThreads = remember(allMessages, currentUserId, partnerProfiles) {
-        allMessages
+    // Group messages into Conversation Threads (both 1-on-1 and Group conversations)
+    val conversationThreads = remember(allMessages, currentUserId, partnerProfiles, effectiveGroups) {
+        val directThreads = allMessages
+            .filter { it.groupId.isBlank() && !it.receiverId.startsWith("GROUP:") }
             .groupBy { msg ->
                 if (msg.senderId == currentUserId) msg.receiverId else msg.senderId
             }
@@ -912,36 +1004,108 @@ fun MessagesScreen(
                     isPartnerTyping = isPartnerCurrentlyTypingToMe(liveProfile, currentUserId),
                     partnerLastSeenAt = liveProfile?.lastSeenAt,
                     latestMessage = latest,
-                    unreadCount = unreadFromPartner
+                    unreadCount = unreadFromPartner,
+                    isGroup = false,
+                    groupMemberCount = 2
                 )
             }
-            .sortedByDescending { it.latestMessage.createdAt ?: Timestamp(0, 0) }
+
+        val groupMessagesByGroupId = allMessages
+            .filter { it.groupId.isNotBlank() || it.receiverId.startsWith("GROUP:") }
+            .groupBy { msg ->
+                msg.groupId.ifBlank { msg.receiverId.removePrefix("GROUP:") }
+            }
+
+        val allGroupIds = (effectiveGroups.map { it.id } + groupMessagesByGroupId.keys)
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val groupThreads = allGroupIds.mapNotNull { gId ->
+            val groupObj = effectiveGroups.find { it.id == gId }
+            val msgs = groupMessagesByGroupId[gId].orEmpty()
+            if (groupObj == null && msgs.isEmpty()) return@mapNotNull null
+            val latest = msgs.maxByOrNull { it.createdAt ?: Timestamp(0, 0) }
+                ?: DirectMessage(
+                    id = "group_init_$gId",
+                    senderId = groupObj?.creatorId.orEmpty(),
+                    senderName = groupObj?.creatorName.orEmpty(),
+                    receiverId = "GROUP:$gId",
+                    receiverName = groupObj?.name.orEmpty(),
+                    groupId = gId,
+                    groupName = groupObj?.name.orEmpty(),
+                    body = "গ্রুপ কথোপকথন শুরু করুন",
+                    isRead = true,
+                    createdAt = groupObj?.updatedAt ?: groupObj?.createdAt
+                )
+            val groupDisplayName = groupObj?.name?.takeIf { it.isNotBlank() }
+                ?: msgs.firstNotNullOfOrNull { it.groupName.takeIf { n -> n.isNotBlank() } }
+                ?: "দ্বীনি মুযাকারা গ্রুপ"
+            val groupPhoto = groupObj?.photoUrl.orEmpty()
+            val memberCount = groupObj?.memberIds?.size
+                ?: msgs.firstOrNull()?.groupMemberIds?.size
+                ?: 1
+
+            ConversationSummary(
+                partnerId = "GROUP:$gId",
+                partnerName = groupDisplayName,
+                partnerPhotoUrl = groupPhoto,
+                isPartnerOnline = true,
+                isPartnerTyping = false,
+                partnerLastSeenAt = latest.createdAt,
+                latestMessage = latest,
+                unreadCount = 0,
+                isGroup = true,
+                groupMemberCount = memberCount
+            )
+        }
+
+        (groupThreads + directThreads).sortedByDescending { it.latestMessage.createdAt ?: Timestamp(0, 0) }
     }
 
-    // Active conversation messages sorted chronologically (oldest -> newest) for two-way chat view
-    val activeConversationMessages = remember(allMessages, currentUserId, receiverId) {
+    val isGroupConversation = receiverId.startsWith("GROUP:", ignoreCase = true)
+    val activeGroupId = if (isGroupConversation) receiverId.substringAfter(":", receiverId) else ""
+    val activeGroup: ChatGroup? = remember(isGroupConversation, activeGroupId, effectiveGroups, receiverName, currentUserId) {
+        if (!isGroupConversation) null
+        else effectiveGroups.find { it.id == activeGroupId } ?: ChatGroup(
+            id = activeGroupId,
+            name = receiverName.ifBlank { "দ্বীনি মুযাকারা গ্রুপ" },
+            creatorId = currentUserId,
+            memberIds = listOf(currentUserId)
+        )
+    }
+
+    // Active conversation messages sorted chronologically (oldest -> newest) for two-way or group chat view
+    val activeConversationMessages = remember(allMessages, currentUserId, receiverId, isGroupConversation, activeGroupId) {
         if (receiverId.isBlank()) {
             emptyList()
+        } else if (isGroupConversation) {
+            allMessages
+                .filter { msg ->
+                    msg.groupId == activeGroupId || msg.receiverId.equals("GROUP:$activeGroupId", ignoreCase = true)
+                }
+                .sortedBy { it.createdAt ?: Timestamp(0, 0) }
         } else {
             allMessages
                 .filter {
-                    (it.senderId == currentUserId && it.receiverId == receiverId) ||
-                        (it.senderId == receiverId && it.receiverId == currentUserId)
+                    it.groupId.isBlank() && (
+                        (it.senderId == currentUserId && it.receiverId == receiverId) ||
+                            (it.senderId == receiverId && it.receiverId == currentUserId)
+                        )
                 }
                 .sortedBy { it.createdAt ?: Timestamp(0, 0) }
         }
     }
 
     // Automatically mark unread incoming messages in the open conversation as read
-    val unreadInActiveChatCount = remember(activeConversationMessages, receiverId, currentUserId) {
-        if (receiverId.isBlank()) 0
+    val unreadInActiveChatCount = remember(activeConversationMessages, receiverId, currentUserId, isGroupConversation) {
+        if (receiverId.isBlank() || isGroupConversation) 0
         else activeConversationMessages.count {
             it.senderId == receiverId && it.receiverId == currentUserId && !it.isRead
         }
     }
 
     LaunchedEffect(receiverId, unreadInActiveChatCount) {
-        if (receiverId.isNotBlank() && unreadInActiveChatCount > 0) {
+        if (receiverId.isNotBlank() && !isGroupConversation && unreadInActiveChatCount > 0) {
             activeConversationMessages
                 .filter { it.senderId == receiverId && it.receiverId == currentUserId && !it.isRead && it.id.isNotBlank() }
                 .forEach { unreadMsg -> onMarkRead(unreadMsg.id) }
@@ -949,9 +1113,9 @@ fun MessagesScreen(
         }
     }
 
-    // Real-time typing status broadcast to Firestore with auto-timeout
-    LaunchedEffect(receiverId, body) {
-        if (receiverId.isNotBlank()) {
+    // Real-time typing status broadcast to Firestore with auto-timeout (for 1-on-1 chats)
+    LaunchedEffect(receiverId, body, isGroupConversation) {
+        if (receiverId.isNotBlank() && !isGroupConversation) {
             if (body.isNotBlank()) {
                 onTypingStatusChanged(receiverId, true)
                 delay(2500L)
@@ -965,20 +1129,31 @@ fun MessagesScreen(
     DisposableEffect(receiverId) {
         val activeReceiver = receiverId
         onDispose {
-            if (activeReceiver.isNotBlank()) {
+            if (activeReceiver.isNotBlank() && !activeReceiver.startsWith("GROUP:")) {
                 onTypingStatusChanged(activeReceiver, false)
             }
         }
     }
 
-    val resolvedPartnerProfile = activePartnerProfile ?: partnerProfiles[receiverId]
-    val resolvedPartnerName = resolvedPartnerProfile?.fullName?.takeIf { it.isNotBlank() }
-        ?: receiverName.ifBlank { "সম্মানিত প্রাপক" }
-    val resolvedPartnerPhoto = resolvedPartnerProfile?.photoUrl.orEmpty()
-    val isPartnerOnline = resolvedPartnerProfile?.isOnline == true
-    val isPartnerTyping = isPartnerCurrentlyTypingToMe(resolvedPartnerProfile, currentUserId)
-    val partnerStatusText = remember(isPartnerTyping, isPartnerOnline, resolvedPartnerProfile?.lastSeenAt) {
-        if (isPartnerTyping) {
+    val resolvedPartnerProfile = if (isGroupConversation) null else (activePartnerProfile ?: partnerProfiles[receiverId])
+    val resolvedPartnerName = if (isGroupConversation) {
+        activeGroup?.name?.takeIf { it.isNotBlank() } ?: receiverName.ifBlank { "দ্বীনি মুযাকারা গ্রুপ" }
+    } else {
+        resolvedPartnerProfile?.fullName?.takeIf { it.isNotBlank() }
+            ?: receiverName.ifBlank { "সম্মানিত প্রাপক" }
+    }
+    val resolvedPartnerPhoto = if (isGroupConversation) {
+        activeGroup?.photoUrl.orEmpty()
+    } else {
+        resolvedPartnerProfile?.photoUrl.orEmpty()
+    }
+    val isPartnerOnline = if (isGroupConversation) true else (resolvedPartnerProfile?.isOnline == true)
+    val isPartnerTyping = if (isGroupConversation) false else isPartnerCurrentlyTypingToMe(resolvedPartnerProfile, currentUserId)
+    val partnerStatusText = remember(isGroupConversation, activeGroup, isPartnerTyping, isPartnerOnline, resolvedPartnerProfile?.lastSeenAt) {
+        if (isGroupConversation) {
+            val count = activeGroup?.memberIds?.size ?: 1
+            "গ্রুপ কথোপকথন • সদস্য: ${IslamicDateAndPrayerHelper.toBanglaDigits(count.toString())} জন"
+        } else if (isPartnerTyping) {
             "টাইপ করছেন… • • •"
         } else if (isPartnerOnline) {
             "অনলাইন (এখন সক্রিয়)"
@@ -998,10 +1173,12 @@ fun MessagesScreen(
         resolveChatThemePalette(activeThemeSpec)
     }
 
-    // Resolve block status (either blocked by current user or blocked by partner)
-    val isBlockedByMe = localBlockOverrides[receiverId]
-        ?: (receiverId.isNotBlank() && currentUserProfile?.blockedUserIds?.contains(receiverId) == true)
-    val isBlockedByPartner = receiverId.isNotBlank() &&
+    // Resolve block status (either blocked by current user or blocked by partner; applies to 1-on-1)
+    val isBlockedByMe = !isGroupConversation && (
+        localBlockOverrides[receiverId]
+            ?: (receiverId.isNotBlank() && currentUserProfile?.blockedUserIds?.contains(receiverId) == true)
+        )
+    val isBlockedByPartner = !isGroupConversation && receiverId.isNotBlank() &&
         resolvedPartnerProfile?.blockedUserIds?.contains(currentUserId) == true
 
     val chatListState = rememberLazyListState()
@@ -1013,206 +1190,185 @@ fun MessagesScreen(
         }
     }
 
-    // Back button inside an active conversation returns to the Inbox thread list
+    // Back button inside an active conversation returns to the Paygam thread list
     BackHandler(enabled = receiverId.isNotBlank()) {
-        if (receiverId.isNotBlank()) {
+        if (receiverId.isNotBlank() && !isGroupConversation) {
             onTypingStatusChanged(receiverId, false)
         }
         receiverId = ""
         receiverName = ""
+        selectedImages = emptyList()
         onClearRecipient()
     }
 
-    // Long-press Message Action & Islamic Reaction Dialog
+    // =========================================================================
+    // 1. SLEEK LONG-PRESS REACTION BAR (SYMBOLS ONLY SIDE-BY-SIDE) + OPTIONS
+    // =========================================================================
     selectedMessageForAction?.let { targetMsg ->
         val isMyMessage = targetMsg.senderId == currentUserId
-        val myCurrentReaction = if (isMyMessage) targetMsg.senderReaction else targetMsg.receiverReaction
-        AlertDialog(
-            onDismissRequest = { selectedMessageForAction = null },
-            modifier = Modifier.testTag("message_action_sheet"),
-            containerColor = Color.White,
-            shape = RoundedCornerShape(20.dp),
-            title = {
-                Column {
-                    Text(
-                        text = "পয়গাম পরিচালনা ও ইসলামিক অভিবাদন",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = QawmiDeepGreen,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "সুন্দর দ্বীনি অভিবাদন জানান অথবা পয়গাম পরিচালনা করুন",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = QawmiTextSecondary
-                    )
+        val myCurrentReaction = targetMsg.userReactions[currentUserId]
+            ?: if (isMyMessage) targetMsg.senderReaction else targetMsg.receiverReaction
+
+        Dialog(
+            onDismissRequest = { selectedMessageForAction = null }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("message_action_sheet"),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Sleek side-by-side Islamic Reaction Symbols ONLY (no text labels, no extra nested cards)
+                if (!targetMsg.isDeletedForEveryone) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color.White,
+                        shadowElevation = 8.dp,
+                        modifier = Modifier
+                            .border(1.5.dp, QawmiGold, RoundedCornerShape(50))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IslamicReaction.entries.forEach { reaction ->
+                                val isSelected = myCurrentReaction == reaction.code
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (isSelected) QawmiMintSurface else Color.Transparent
+                                        )
+                                        .clickable {
+                                            val newCode = if (isSelected) "" else reaction.code
+                                            if (targetMsg.id.isNotBlank()) {
+                                                localReactionOverrides = localReactionOverrides + (targetMsg.id to newCode)
+                                            }
+                                            onReactToMessage(targetMsg, newCode)
+                                            selectedMessageForAction = null
+                                        }
+                                        .testTag("reaction_chip_${reaction.code}")
+                                ) {
+                                    Text(
+                                        text = reaction.emoji,
+                                        fontSize = 24.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
-            },
-            text = {
-                Column(
+
+                // Edit & Delete options pill sheet below the reaction bar
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color.White,
+                    shadowElevation = 6.dp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(18.dp))
                 ) {
-                    if (!targetMsg.isDeletedForEveryone) {
-                        Text(
-                            text = "ইসলামিক অভিবাদন ও দোয়া প্রতিক্রিয়া:",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = QawmiTextDark,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        // 2 rows of 3 Islamic reactions so all 6 are immediately visible without horizontal scrolling
-                        val reactions = IslamicReaction.entries
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            reactions.chunked(3).forEach { rowItems ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    rowItems.forEach { reaction ->
-                                        val isSelected = myCurrentReaction == reaction.code
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = if (isSelected) QawmiMintSurface else Color(0xFFF7F9F8),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .border(
-                                                    width = if (isSelected) 1.5.dp else 1.dp,
-                                                    color = if (isSelected) QawmiDeepGreen else QawmiMintBorder,
-                                                    shape = RoundedCornerShape(12.dp)
-                                                )
-                                                .clickable {
-                                                    val newCode = if (isSelected) "" else reaction.code
-                                                    if (targetMsg.id.isNotBlank()) {
-                                                        localReactionOverrides = localReactionOverrides + (targetMsg.id to newCode)
-                                                    }
-                                                    onReactToMessage(targetMsg, newCode)
-                                                    selectedMessageForAction = null
-                                                }
-                                                .testTag("reaction_chip_${reaction.code}")
-                                        ) {
-                                            Column(
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
-                                                horizontalAlignment = Alignment.CenterHorizontally
-                                            ) {
-                                                Text(text = reaction.emoji, fontSize = 18.sp)
-                                                Spacer(modifier = Modifier.height(2.dp))
-                                                Text(
-                                                    text = reaction.titleBangla,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = QawmiDeepGreen,
-                                                    fontWeight = FontWeight.Bold,
-                                                    textAlign = TextAlign.Center,
-                                                    maxLines = 1,
-                                                    fontSize = 10.sp
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (isMyMessage && !targetMsg.isDeletedForEveryone) {
+                            OutlinedButton(
+                                onClick = {
+                                    selectedMessageForAction = null
+                                    messageBeingEdited = targetMsg
+                                    editedBodyText = targetMsg.body
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("action_edit_message")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = null,
+                                    tint = QawmiDeepGreen,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "পয়গাম সম্পাদনা করুন",
+                                    color = QawmiDeepGreen,
+                                    fontWeight = FontWeight.SemiBold
+                                )
                             }
                         }
-                        HorizontalDivider(color = QawmiMintBorder)
-                    }
 
-                    // Edit option (strictly for sender when message is not retracted)
-                    if (isMyMessage && !targetMsg.isDeletedForEveryone) {
                         OutlinedButton(
                             onClick = {
-                                selectedMessageForAction = null
-                                messageBeingEdited = targetMsg
-                                editedBodyText = targetMsg.body
-                            },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("action_edit_message")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Edit,
-                                contentDescription = null,
-                                tint = QawmiDeepGreen,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "পয়গাম সম্পাদনা করুন",
-                                color = QawmiDeepGreen,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-
-                    // Delete for Me (available for both sender and receiver)
-                    OutlinedButton(
-                        onClick = {
-                            if (targetMsg.id.isNotBlank()) {
-                                locallyDeletedForMeIds = locallyDeletedForMeIds + targetMsg.id
-                            }
-                            onDeleteMessageForMe(targetMsg)
-                            selectedMessageForAction = null
-                        },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("action_delete_for_me")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = null,
-                            tint = QawmiTextSecondary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "নিজের জন্য মুছুন (আমার ইনবক্স থেকে)",
-                            color = QawmiTextDark,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-
-                    // Delete for Everyone (strictly for sender when not already retracted)
-                    if (isMyMessage && !targetMsg.isDeletedForEveryone) {
-                        Button(
-                            onClick = {
                                 if (targetMsg.id.isNotBlank()) {
-                                    locallyDeletedForEveryoneIds = locallyDeletedForEveryoneIds + targetMsg.id
+                                    locallyDeletedForMeIds = locallyDeletedForMeIds + targetMsg.id
                                 }
-                                onDeleteMessageForEveryone(targetMsg)
+                                onDeleteMessageForMe(targetMsg)
                                 selectedMessageForAction = null
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = QawmiAlertRed),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .testTag("action_delete_for_everyone")
+                                .testTag("action_delete_for_me")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.DeleteOutline,
                                 contentDescription = null,
-                                tint = Color.White,
+                                tint = QawmiTextSecondary,
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "সবার জন্য পয়গাম প্রত্যাহার করুন",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold
+                                text = "নিজের জন্য মুছুন",
+                                color = QawmiTextDark,
+                                fontWeight = FontWeight.SemiBold
                             )
+                        }
+
+                        if (isMyMessage && !targetMsg.isDeletedForEveryone) {
+                            Button(
+                                onClick = {
+                                    if (targetMsg.id.isNotBlank()) {
+                                        locallyDeletedForEveryoneIds = locallyDeletedForEveryoneIds + targetMsg.id
+                                    }
+                                    onDeleteMessageForEveryone(targetMsg)
+                                    selectedMessageForAction = null
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = QawmiAlertRed),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("action_delete_for_everyone")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "সবার জন্য পয়গাম প্রত্যাহার করুন",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { selectedMessageForAction = null }) {
-                    Text("বন্ধ করুন", color = QawmiDeepGreen, fontWeight = FontWeight.Bold)
-                }
             }
-        )
+        }
     }
 
-    // Message Edit Dialog
+    // =========================================================================
+    // 2. MESSAGE EDIT DIALOG
+    // =========================================================================
     messageBeingEdited?.let { editingMsg ->
         AlertDialog(
             onDismissRequest = { messageBeingEdited = null },
@@ -1230,7 +1386,7 @@ fun MessagesScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "সম্পাদিত পয়গামটি প্রেরক ও প্রাপক উভয়ের কথোপকথনে সাথে সাথে আপডেট হবে।",
+                        text = "সম্পাদিত পয়গামটি কথোপকথনে সাথে সাথে আপডেট হবে।",
                         style = MaterialTheme.typography.bodySmall,
                         color = QawmiTextSecondary
                     )
@@ -1272,7 +1428,9 @@ fun MessagesScreen(
         )
     }
 
-    // Conversation Theme & Custom Theme Picker Dialog
+    // =========================================================================
+    // 3. CONVERSATION THEME & CUSTOM THEME PICKER DIALOG
+    // =========================================================================
     if (showThemePickerDialog && receiverId.isNotBlank()) {
         var customBgHex by remember { mutableStateOf("#EEF7F2") }
         var customBubbleHex by remember { mutableStateOf("#115E46") }
@@ -1437,6 +1595,593 @@ fun MessagesScreen(
         )
     }
 
+    // =========================================================================
+    // 4. CREATE GROUP DIALOG (গ্রুপ তৈরি, নাম ও ছবি নির্ধারণ, সদস্য নির্বাচন)
+    // =========================================================================
+    if (showCreateGroupDialog) {
+        var newGroupName by remember { mutableStateOf("") }
+        var newGroupPhotoUrl by remember { mutableStateOf(ProfilePhotoHelper.PRESET_MADRASA_DOME) }
+        var selectedMembers by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+        var customMemberName by remember { mutableStateOf("") }
+
+        val groupPhotoPickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.PickVisualMedia()
+        ) { uri ->
+            if (uri != null) {
+                val encoded = ProfilePhotoHelper.encodeUriToDataUrl(context, uri)
+                if (!encoded.isNullOrBlank()) {
+                    newGroupPhotoUrl = encoded
+                }
+            }
+        }
+
+        val knownContacts = remember(partnerProfiles, allMessages, currentUserId) {
+            val map = mutableMapOf<String, String>()
+            partnerProfiles.forEach { (uid, prof) ->
+                if (uid != currentUserId && !uid.startsWith("GROUP:") && prof.fullName.isNotBlank()) {
+                    map[uid] = prof.fullName
+                }
+            }
+            allMessages.forEach { msg ->
+                if (msg.senderId != currentUserId && msg.senderId.isNotBlank() && msg.senderName.isNotBlank()) {
+                    map.putIfAbsent(msg.senderId, msg.senderName)
+                }
+                if (msg.receiverId != currentUserId && msg.receiverId.isNotBlank() && !msg.receiverId.startsWith("GROUP:") && msg.receiverName.isNotBlank()) {
+                    map.putIfAbsent(msg.receiverId, msg.receiverName)
+                }
+            }
+            map
+        }
+
+        AlertDialog(
+            onDismissRequest = { showCreateGroupDialog = false },
+            modifier = Modifier.testTag("create_group_dialog"),
+            containerColor = Color.White,
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Text(
+                    text = "নতুন গ্রুপ কথোপকথন খুলুন",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = QawmiDeepGreen,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Group Avatar & Photo Picker
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        UserAvatarImage(
+                            photoUrl = newGroupPhotoUrl,
+                            displayName = newGroupName.ifBlank { "গ্রুপ" },
+                            size = 56.dp,
+                            borderColor = QawmiGold,
+                            borderWidth = 2.dp
+                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    groupPhotoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("pick_group_photo_button")
+                            ) {
+                                Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(15.dp), tint = QawmiDeepGreen)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("গ্রুপের ছবি নির্বাচন করুন", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                ProfilePhotoHelper.presetAvatars.forEach { (presetKey, presetLabel) ->
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = if (newGroupPhotoUrl == presetKey) QawmiMintSurface else Color(0xFFF5F5F5),
+                                        modifier = Modifier
+                                            .border(
+                                                1.dp,
+                                                if (newGroupPhotoUrl == presetKey) QawmiDeepGreen else QawmiMintBorder,
+                                                RoundedCornerShape(50)
+                                            )
+                                            .clickable { newGroupPhotoUrl = presetKey }
+                                    ) {
+                                        Text(
+                                            text = presetLabel,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                            fontSize = 10.sp,
+                                            color = QawmiDeepGreen
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = newGroupName,
+                        onValueChange = { newGroupName = it },
+                        label = { Text("গ্রুপের নাম *") },
+                        placeholder = { Text("যেমন: দাওরায়ে হাদিস মুযাকারা") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("group_name_input")
+                    )
+
+                    Text(
+                        text = "গ্রুপে সদস্য যুক্ত করুন:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    if (knownContacts.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            knownContacts.entries.forEach { (uid, uName) ->
+                                val isAdded = selectedMembers.containsKey(uid)
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isAdded) QawmiMintSurface else Color(0xFFF9FBF9),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .border(1.dp, if (isAdded) QawmiDeepGreen else QawmiMintBorder, RoundedCornerShape(10.dp))
+                                        .clickable {
+                                            selectedMembers = if (isAdded) {
+                                                selectedMembers - uid
+                                            } else {
+                                                selectedMembers + (uid to uName)
+                                            }
+                                        }
+                                        .testTag("select_group_member_$uid")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(uName, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = QawmiTextDark)
+                                        Text(
+                                            text = if (isAdded) "✓ যুক্ত" else "+ যুক্ত করুন",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isAdded) QawmiDeepGreen else QawmiSeekerBlue,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = customMemberName,
+                            onValueChange = { customMemberName = it },
+                            label = { Text("সদস্যের নাম লিখে যুক্ত করুন") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("new_group_member_name_input")
+                        )
+                        Button(
+                            onClick = {
+                                val trimmedName = customMemberName.trim()
+                                if (trimmedName.isNotBlank()) {
+                                    val generatedId = "member_${trimmedName.hashCode().toUInt()}"
+                                    selectedMembers = selectedMembers + (generatedId to trimmedName)
+                                    customMemberName = ""
+                                }
+                            },
+                            enabled = customMemberName.trim().isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("add_candidate_member_button")
+                        ) {
+                            Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
+                    }
+
+                    if (selectedMembers.isNotEmpty()) {
+                        Text(
+                            text = "নির্বাচিত সদস্য (${IslamicDateAndPrayerHelper.toBanglaDigits(selectedMembers.size.toString())} জন): ${selectedMembers.values.joinToString(", ")}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiDeepGreen,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmedGroupName = newGroupName.trim()
+                        if (trimmedGroupName.isNotBlank()) {
+                            val myName = currentUserProfile?.fullName?.takeIf { it.isNotBlank() } ?: "গ্রুপ অ্যাডমিন"
+                            val allMemberIds = (listOf(currentUserId) + selectedMembers.keys).distinct()
+                            val allMemberNames = selectedMembers + (currentUserId to myName)
+                            val tempGroupId = "grp_${System.currentTimeMillis()}"
+                            val optimisticGroup = ChatGroup(
+                                id = tempGroupId,
+                                name = trimmedGroupName,
+                                photoUrl = newGroupPhotoUrl,
+                                creatorId = currentUserId,
+                                creatorName = myName,
+                                memberIds = allMemberIds,
+                                memberNames = allMemberNames,
+                                createdAt = Timestamp.now(),
+                                updatedAt = Timestamp.now()
+                            )
+                            localGroupsMap = localGroupsMap + (tempGroupId to optimisticGroup)
+                            receiverId = "GROUP:$tempGroupId"
+                            receiverName = trimmedGroupName
+                            onCreateGroup(trimmedGroupName, newGroupPhotoUrl, allMemberIds, allMemberNames)
+                            showCreateGroupDialog = false
+                        }
+                    },
+                    enabled = newGroupName.trim().isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                    modifier = Modifier.testTag("confirm_create_group_button")
+                ) {
+                    Text("গ্রুপ তৈরি করুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateGroupDialog = false }) {
+                    Text("বাতিল", color = QawmiTextSecondary)
+                }
+            }
+        )
+    }
+
+    // =========================================================================
+    // 5. GROUP MANAGEMENT DIALOG (নাম ও ছবি পরিবর্তন, সদস্য যুক্ত ও বাদ দেওয়া)
+    // =========================================================================
+    if (showGroupManagementDialog && isGroupConversation && activeGroup != null) {
+        var editedGroupName by remember(activeGroup) { mutableStateOf(activeGroup.name) }
+        var editedGroupPhoto by remember(activeGroup) { mutableStateOf(activeGroup.photoUrl) }
+        var newMemberNameInput by remember { mutableStateOf("") }
+
+        val editGroupPhotoLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.PickVisualMedia()
+        ) { uri ->
+            if (uri != null) {
+                val encoded = ProfilePhotoHelper.encodeUriToDataUrl(context, uri)
+                if (!encoded.isNullOrBlank()) {
+                    editedGroupPhoto = encoded
+                }
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { showGroupManagementDialog = false },
+            modifier = Modifier.testTag("group_management_dialog"),
+            containerColor = Color.White,
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Text(
+                    text = "গ্রুপ পরিচালনা ও সদস্য তালিকা",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = QawmiDeepGreen,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        UserAvatarImage(
+                            photoUrl = editedGroupPhoto,
+                            displayName = editedGroupName,
+                            size = 54.dp,
+                            borderColor = QawmiGold,
+                            borderWidth = 2.dp
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                editGroupPhotoLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier.testTag("change_group_photo_button")
+                        ) {
+                            Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(15.dp), tint = QawmiDeepGreen)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("গ্রুপ ছবি পরিবর্তন", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = editedGroupName,
+                        onValueChange = { editedGroupName = it },
+                        label = { Text("গ্রুপের নাম") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("edit_group_name_input")
+                    )
+
+                    Button(
+                        onClick = {
+                            val trimmed = editedGroupName.trim()
+                            if (trimmed.isNotBlank()) {
+                                val updatedGrp = activeGroup.copy(name = trimmed, photoUrl = editedGroupPhoto)
+                                localGroupsMap = localGroupsMap + (activeGroup.id to updatedGrp)
+                                receiverName = trimmed
+                                onUpdateGroupDetails(activeGroup.id, trimmed, editedGroupPhoto)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("save_group_details_button")
+                    ) {
+                        Text("নাম ও ছবি সংরক্ষণ করুন")
+                    }
+
+                    HorizontalDivider(color = QawmiMintBorder)
+
+                    Text(
+                        text = "বর্তমান সদস্যবৃন্দ (${IslamicDateAndPrayerHelper.toBanglaDigits(activeGroup.memberIds.size.toString())} জন):",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    activeGroup.memberIds.forEach { memberId ->
+                        val memberName = activeGroup.memberNames[memberId]
+                            ?: partnerProfiles[memberId]?.fullName
+                            ?: if (memberId == currentUserId) (currentUserProfile?.fullName ?: "আমি") else memberId
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFFF7FAF8),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (memberId == currentUserId) "$memberName (আপনি)" else memberName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = QawmiTextDark,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (memberId != currentUserId && activeGroup.memberIds.size > 1) {
+                                    IconButton(
+                                        onClick = {
+                                            val updatedIds = activeGroup.memberIds.filterNot { it == memberId }
+                                            val updatedNames = activeGroup.memberNames.toMutableMap().apply { remove(memberId) }
+                                            localGroupsMap = localGroupsMap + (
+                                                activeGroup.id to activeGroup.copy(
+                                                    memberIds = updatedIds,
+                                                    memberNames = updatedNames
+                                                )
+                                                )
+                                            onRemoveGroupMember(activeGroup.id, memberId)
+                                        },
+                                        modifier = Modifier
+                                            .size(30.dp)
+                                            .testTag("remove_group_member_$memberId")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.PersonRemove,
+                                            contentDescription = "সদস্য বাদ দিন",
+                                            tint = QawmiAlertRed,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = newMemberNameInput,
+                            onValueChange = { newMemberNameInput = it },
+                            label = { Text("নতুন সদস্যের নাম") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("add_member_name_input")
+                        )
+                        Button(
+                            onClick = {
+                                val mName = newMemberNameInput.trim()
+                                if (mName.isNotBlank()) {
+                                    val mId = partnerProfiles.entries.find { it.value.fullName == mName }?.key
+                                        ?: "member_${mName.hashCode().toUInt()}"
+                                    val updatedIds = (activeGroup.memberIds + mId).distinct()
+                                    val updatedNames = activeGroup.memberNames + (mId to mName)
+                                    localGroupsMap = localGroupsMap + (
+                                        activeGroup.id to activeGroup.copy(
+                                            memberIds = updatedIds,
+                                            memberNames = updatedNames
+                                        )
+                                        )
+                                    onAddGroupMember(activeGroup.id, mId, mName)
+                                    newMemberNameInput = ""
+                                }
+                            },
+                            enabled = newMemberNameInput.trim().isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.testTag("confirm_add_group_member_button")
+                        ) {
+                            Icon(Icons.Default.PersonAdd, contentDescription = "সদস্য যুক্ত করুন", modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("যুক্ত করুন", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showGroupManagementDialog = false },
+                    modifier = Modifier.testTag("close_group_management_button")
+                ) {
+                    Text("বন্ধ করুন", color = QawmiDeepGreen, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
+
+    // =========================================================================
+    // 6. FULL-SCREEN IMAGE VIEWER & SAVE TO GALLERY DIALOG
+    // =========================================================================
+    fullScreenViewerImages?.let { (images, initialIndex) ->
+        var currentIndex by remember(images, initialIndex) { mutableStateOf(initialIndex.coerceIn(0, (images.size - 1).coerceAtLeast(0))) }
+        val currentImageUrl = images.getOrElse(currentIndex) { "" }
+
+        Dialog(
+            onDismissRequest = {
+                fullScreenViewerImages = null
+                imageSaveFeedback = null
+            }
+        ) {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("fullscreen_image_viewer_dialog")
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "ছবি ${IslamicDateAndPrayerHelper.toBanglaDigits((currentIndex + 1).toString())}/${IslamicDateAndPrayerHelper.toBanglaDigits(images.size.toString())}",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = QawmiDeepGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                        IconButton(
+                            onClick = {
+                                fullScreenViewerImages = null
+                                imageSaveFeedback = null
+                            }
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "বন্ধ করুন", tint = QawmiTextDark)
+                        }
+                    }
+
+                    ChatAttachmentImage(
+                        imageUrl = currentImageUrl,
+                        contentDescription = "পূর্ণ ছবি",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(280.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFFF2F6F4))
+                    )
+
+                    if (images.size > 1) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            images.forEachIndexed { idx, thumb ->
+                                ChatAttachmentImage(
+                                    imageUrl = thumb,
+                                    contentDescription = "থাম্বনেইল ${idx + 1}",
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .border(
+                                            width = if (idx == currentIndex) 2.dp else 1.dp,
+                                            color = if (idx == currentIndex) QawmiDeepGreen else QawmiMintBorder,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { currentIndex = idx }
+                                )
+                            }
+                        }
+                    }
+
+                    imageSaveFeedback?.let { msg ->
+                        Text(
+                            text = msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiDeepGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val res = ProfilePhotoHelper.saveImageToDevice(context, currentImageUrl, currentIndex + 1)
+                                imageSaveFeedback = res.getOrElse { "ছবি সংরক্ষণে ত্রুটি হয়েছে" }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("save_single_image_button")
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("গ্যালারিতে সংরক্ষণ", style = MaterialTheme.typography.labelMedium)
+                        }
+                        if (images.size > 1) {
+                            OutlinedButton(
+                                onClick = {
+                                    val saved = ProfilePhotoHelper.saveMultipleImagesToDevice(context, images)
+                                    imageSaveFeedback = "আলহামদুলিল্লাহ, ${IslamicDateAndPrayerHelper.toBanglaDigits(saved.toString())}টি ছবি গ্যালারিতে সংরক্ষিত হয়েছে"
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("save_all_images_button")
+                            ) {
+                                Text("সবগুলো সংরক্ষণ", style = MaterialTheme.typography.labelMedium, color = QawmiDeepGreen)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1447,12 +2192,12 @@ fun MessagesScreen(
         if (receiverId.isNotBlank()) {
             // =========================================================================
             // ACTIVE CONVERSATION VIEW:
-            // 1. Fixed/Sticky Top Partner Profile Header + Three-Dot Menu
+            // 1. Clean Top Header (NO "ইনবক্স" text; tapping photo & name opens Profile or Group Info)
             // 2. Scrollable Middle Message List (Modifier.weight(1f))
-            // 3. Fixed/Sticky Bottom Text Message Composer Bar or Blocked Banner
+            // 3. Sticky Bottom Composer with Photo Picker (1-5 photos preview & remove)
             // =========================================================================
 
-            // 1. STICKY TOP PARTNER HEADER
+            // 1. STICKY TOP PARTNER / GROUP HEADER
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1470,53 +2215,73 @@ fun MessagesScreen(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { onInspectUserProfile(receiverId, resolvedPartnerName) }
+                        modifier = Modifier.weight(1f)
                     ) {
                         IconButton(
                             onClick = {
+                                if (!isGroupConversation) {
+                                    onTypingStatusChanged(receiverId, false)
+                                }
                                 receiverId = ""
                                 receiverName = ""
+                                selectedImages = emptyList()
                                 onClearRecipient()
                             },
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(38.dp)
                                 .testTag("back_to_inbox_button")
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "ইনবক্সে ফিরুন",
+                                contentDescription = "ফিরে যান",
                                 tint = activeThemePalette.headerAccentColor
                             )
                         }
                         Spacer(modifier = Modifier.width(4.dp))
-                        UserAvatarImage(
-                            photoUrl = resolvedPartnerPhoto,
-                            displayName = resolvedPartnerName,
-                            size = 44.dp,
-                            borderColor = if (isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
-                            borderWidth = 1.5.dp,
-                            showOnlineIndicator = true,
-                            isOnline = isPartnerOnline
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = resolvedPartnerName,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = activeThemePalette.headerAccentColor,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1
+
+                        // Tapping the person's photo and name header opens their profile (or Group Management for groups)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable {
+                                    if (isGroupConversation) {
+                                        showGroupManagementDialog = true
+                                    } else {
+                                        onInspectUserProfile(receiverId, resolvedPartnerName)
+                                    }
+                                }
+                                .padding(vertical = 2.dp, horizontal = 4.dp)
+                                .testTag("partner_header_profile_click_area")
+                        ) {
+                            UserAvatarImage(
+                                photoUrl = resolvedPartnerPhoto,
+                                displayName = resolvedPartnerName,
+                                size = 44.dp,
+                                borderColor = if (isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
+                                borderWidth = 1.5.dp,
+                                showOnlineIndicator = !isGroupConversation,
+                                isOnline = isPartnerOnline
                             )
-                            Text(
-                                text = partnerStatusText,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isPartnerTyping || isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                modifier = Modifier.testTag("active_partner_presence_text")
-                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = resolvedPartnerName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = activeThemePalette.headerAccentColor,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = partnerStatusText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isPartnerTyping || isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    modifier = Modifier.testTag("active_partner_presence_text")
+                                )
+                            }
                         }
                     }
 
@@ -1524,29 +2289,19 @@ fun MessagesScreen(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        OutlinedButton(
-                            onClick = { onInspectUserProfile(receiverId, resolvedPartnerName) },
-                            shape = RoundedCornerShape(50),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                            modifier = Modifier
-                                .height(30.dp)
-                                .testTag("inspect_partner_profile_button")
-                        ) {
-                            Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = activeThemePalette.headerAccentColor)
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                receiverId = ""
-                                receiverName = ""
-                                onClearRecipient()
-                            },
-                            shape = RoundedCornerShape(50),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                            modifier = Modifier
-                                .height(30.dp)
-                                .testTag("return_inbox_button")
-                        ) {
-                            Text("ইনবক্স", style = MaterialTheme.typography.labelSmall, color = QawmiTextSecondary)
+                        if (isGroupConversation) {
+                            IconButton(
+                                onClick = { showGroupManagementDialog = true },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("group_info_header_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Group,
+                                    contentDescription = "গ্রুপ সদস্য ও সেটিংস",
+                                    tint = activeThemePalette.headerAccentColor
+                                )
+                            }
                         }
 
                         // Three-dot menu button for Conversation Theme & Block/Unblock
@@ -1599,35 +2354,61 @@ fun MessagesScreen(
                                     },
                                     modifier = Modifier.testTag("menu_change_chat_theme")
                                 )
-                                HorizontalDivider(color = QawmiMintBorder)
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = if (isBlockedByMe) {
-                                                "যোগাযোগ পুনরায় চালু করুন (আনব্লক করুন)"
-                                            } else {
-                                                "যোগাযোগ বিরত রাখুন (ব্লক করুন)"
-                                            },
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = if (isBlockedByMe) QawmiDeepGreen else QawmiAlertRed,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Default.Block,
-                                            contentDescription = null,
-                                            tint = if (isBlockedByMe) QawmiDeepGreen else QawmiAlertRed
-                                        )
-                                    },
-                                    onClick = {
-                                        val newBlockState = !isBlockedByMe
-                                        localBlockOverrides = localBlockOverrides + (receiverId to newBlockState)
-                                        onToggleBlockUser(receiverId, newBlockState)
-                                        showThreeDotMenu = false
-                                    },
-                                    modifier = Modifier.testTag("menu_toggle_block_user")
-                                )
+                                if (isGroupConversation) {
+                                    HorizontalDivider(color = QawmiMintBorder)
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = "গ্রুপ তথ্য ও সদস্য ব্যবস্থাপনা",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = QawmiDeepGreen,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Group,
+                                                contentDescription = null,
+                                                tint = QawmiDeepGreen
+                                            )
+                                        },
+                                        onClick = {
+                                            showThreeDotMenu = false
+                                            showGroupManagementDialog = true
+                                        },
+                                        modifier = Modifier.testTag("menu_manage_group")
+                                    )
+                                } else {
+                                    HorizontalDivider(color = QawmiMintBorder)
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = if (isBlockedByMe) {
+                                                    "যোগাযোগ পুনরায় চালু করুন (আনব্লক করুন)"
+                                                } else {
+                                                    "যোগাযোগ বিরত রাখুন (ব্লক করুন)"
+                                                },
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = if (isBlockedByMe) QawmiDeepGreen else QawmiAlertRed,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Block,
+                                                contentDescription = null,
+                                                tint = if (isBlockedByMe) QawmiDeepGreen else QawmiAlertRed
+                                            )
+                                        },
+                                        onClick = {
+                                            val newBlockState = !isBlockedByMe
+                                            localBlockOverrides = localBlockOverrides + (receiverId to newBlockState)
+                                            onToggleBlockUser(receiverId, newBlockState)
+                                            showThreeDotMenu = false
+                                        },
+                                        modifier = Modifier.testTag("menu_toggle_block_user")
+                                    )
+                                }
                             }
                         }
                     }
@@ -1652,12 +2433,12 @@ fun MessagesScreen(
                             size = 64.dp,
                             borderColor = QawmiGold,
                             borderWidth = 2.dp,
-                            showOnlineIndicator = true,
+                            showOnlineIndicator = !isGroupConversation,
                             isOnline = isPartnerOnline
                         )
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "$resolvedPartnerName-এর সাথে কথোপকথন শুরু করুন",
+                            text = "$resolvedPartnerName-এ পয়গাম ও কথোপকথন শুরু করুন",
                             style = MaterialTheme.typography.titleSmall,
                             color = activeThemePalette.headerAccentColor,
                             fontWeight = FontWeight.Bold,
@@ -1665,7 +2446,7 @@ fun MessagesScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "নিচের বক্সে আপনার পয়গাম লিখে পাঠান। পাঠানো পয়গাম সাথে সাথে রিয়েল-টাইমে প্রাপকের ইনবক্সে পৌঁছে যাবে।",
+                            text = "নিচের বক্সে পয়গাম লিখে অথবা ১-৫টি ছবি যুক্ত করে পাঠান।",
                             style = MaterialTheme.typography.bodySmall,
                             color = QawmiTextSecondary,
                             textAlign = TextAlign.Center
@@ -1689,12 +2470,12 @@ fun MessagesScreen(
                         key = { msg -> msg.id.ifBlank { "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.body.hashCode()}" } }
                     ) { chatMsg ->
                         val sentByMe = chatMsg.senderId == currentUserId
-                        val senderReactionObj = IslamicReaction.fromCode(chatMsg.senderReaction)
-                        val receiverReactionObj = IslamicReaction.fromCode(chatMsg.receiverReaction)
-                        val activeReactions = listOfNotNull(
-                            senderReactionObj?.let { "প্রেরক" to it },
-                            receiverReactionObj?.let { "প্রাপক" to it }
-                        )
+                        val combinedReactionCodes = buildList {
+                            chatMsg.senderReaction.takeIf { it.isNotBlank() }?.let { add(it) }
+                            chatMsg.receiverReaction.takeIf { it.isNotBlank() }?.let { add(it) }
+                            chatMsg.userReactions.values.filter { it.isNotBlank() }.forEach { add(it) }
+                        }.distinct()
+                        val activeReactions = combinedReactionCodes.mapNotNull { IslamicReaction.fromCode(it) }
 
                         Column(
                             modifier = Modifier
@@ -1707,14 +2488,27 @@ fun MessagesScreen(
                                 horizontalArrangement = if (sentByMe) Arrangement.End else Arrangement.Start
                             ) {
                                 if (!sentByMe) {
+                                    val senderAvatar = if (isGroupConversation) {
+                                        partnerProfiles[chatMsg.senderId]?.photoUrl?.takeIf { it.isNotBlank() }
+                                            ?: chatMsg.senderPhotoUrl
+                                    } else {
+                                        resolvedPartnerPhoto
+                                    }
+                                    val senderDisplay = if (isGroupConversation) {
+                                        chatMsg.senderName.ifBlank { "সদস্য" }
+                                    } else {
+                                        resolvedPartnerName
+                                    }
                                     UserAvatarImage(
-                                        photoUrl = resolvedPartnerPhoto,
-                                        displayName = resolvedPartnerName,
+                                        photoUrl = senderAvatar,
+                                        displayName = senderDisplay,
                                         size = 28.dp,
                                         borderColor = QawmiMintBorder,
                                         borderWidth = 1.dp,
                                         modifier = Modifier.clickable {
-                                            onInspectUserProfile(receiverId, resolvedPartnerName)
+                                            if (chatMsg.senderId.isNotBlank()) {
+                                                onInspectUserProfile(chatMsg.senderId, senderDisplay)
+                                            }
                                         }
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -1760,6 +2554,51 @@ fun MessagesScreen(
                                         .testTag("chat_message_bubble_${chatMsg.id}")
                                 ) {
                                     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                        if (isGroupConversation && !sentByMe && chatMsg.senderName.isNotBlank()) {
+                                            Text(
+                                                text = chatMsg.senderName,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = activeThemePalette.headerAccentColor,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                        }
+
+                                        // Attached Images (1-5 photos) inside the message bubble
+                                        if (chatMsg.imageUrls.isNotEmpty() && !chatMsg.isDeletedForEveryone) {
+                                            Column(
+                                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(bottom = if (chatMsg.body.isNotBlank()) 6.dp else 2.dp)
+                                                    .testTag("message_images_grid_${chatMsg.id}")
+                                            ) {
+                                                chatMsg.imageUrls.chunked(2).forEachIndexed { rowIdx, rowImgs ->
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    ) {
+                                                        rowImgs.forEachIndexed { colIdx, imgUrl ->
+                                                            val globalIdx = rowIdx * 2 + colIdx
+                                                            ChatAttachmentImage(
+                                                                imageUrl = imgUrl,
+                                                                contentDescription = "পয়গামের ছবি ${globalIdx + 1}",
+                                                                modifier = Modifier
+                                                                    .weight(1f)
+                                                                    .height(if (chatMsg.imageUrls.size == 1) 170.dp else 110.dp)
+                                                                    .clip(RoundedCornerShape(10.dp))
+                                                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
+                                                                    .clickable {
+                                                                        fullScreenViewerImages = chatMsg.imageUrls to globalIdx
+                                                                    }
+                                                                    .testTag("message_image_${chatMsg.id}_$globalIdx")
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1775,21 +2614,23 @@ fun MessagesScreen(
                                                     )
                                                     Spacer(modifier = Modifier.height(2.dp))
                                                 }
-                                                Text(
-                                                    text = if (chatMsg.isDeletedForEveryone) {
-                                                        "এই পয়গামটি প্রত্যাহার করা হয়েছে"
-                                                    } else {
-                                                        chatMsg.body
-                                                    },
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    color = if (chatMsg.isDeletedForEveryone) {
-                                                        QawmiTextMuted
-                                                    } else if (sentByMe) {
-                                                        activeThemePalette.sentBubbleTextColor
-                                                    } else {
-                                                        QawmiTextDark
-                                                    }
-                                                )
+                                                if (chatMsg.isDeletedForEveryone || chatMsg.body.isNotBlank()) {
+                                                    Text(
+                                                        text = if (chatMsg.isDeletedForEveryone) {
+                                                            "এই পয়গামটি প্রত্যাহার করা হয়েছে"
+                                                        } else {
+                                                            chatMsg.body
+                                                        },
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        color = if (chatMsg.isDeletedForEveryone) {
+                                                            QawmiTextMuted
+                                                        } else if (sentByMe) {
+                                                            activeThemePalette.sentBubbleTextColor
+                                                        } else {
+                                                            QawmiTextDark
+                                                        }
+                                                    )
+                                                }
                                             }
                                             IconButton(
                                                 onClick = { selectedMessageForAction = chatMsg },
@@ -1831,7 +2672,7 @@ fun MessagesScreen(
                                             Text(
                                                 text = buildString {
                                                     append(IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt))
-                                                    if (sentByMe) {
+                                                    if (sentByMe && !isGroupConversation) {
                                                         append(if (chatMsg.isRead) " • ✓✓ পঠিত" else " • ✓ প্রেরিত")
                                                     }
                                                 },
@@ -1850,39 +2691,26 @@ fun MessagesScreen(
                                 }
                             }
 
-                            // Islamic Reaction Badges below the bubble (distinctive pill layout, not Messenger clone)
+                            // Islamic Reaction Symbols below the bubble (symbol-only compact pill)
                             if (activeReactions.isNotEmpty() && !chatMsg.isDeletedForEveryone) {
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = Color.White,
+                                    shadowElevation = 2.dp,
                                     modifier = Modifier
                                         .padding(horizontal = if (sentByMe) 4.dp else 34.dp)
+                                        .border(1.dp, QawmiGold, RoundedCornerShape(50))
+                                        .clickable { selectedMessageForAction = chatMsg }
                                         .testTag("message_reactions_row_${chatMsg.id}")
                                 ) {
-                                    activeReactions.forEach { (_, reaction) ->
-                                        Surface(
-                                            shape = RoundedCornerShape(50),
-                                            color = Color.White,
-                                            shadowElevation = 1.dp,
-                                            modifier = Modifier
-                                                .border(1.dp, QawmiGold, RoundedCornerShape(50))
-                                                .clickable { selectedMessageForAction = chatMsg }
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(text = reaction.emoji, fontSize = 12.sp)
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text(
-                                                    text = reaction.titleBangla,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = activeThemePalette.headerAccentColor,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 10.sp
-                                                )
-                                            }
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        activeReactions.forEach { reaction ->
+                                            Text(text = reaction.emoji, fontSize = 14.sp)
                                         }
                                     }
                                 }
@@ -1900,7 +2728,7 @@ fun MessagesScreen(
                 )
             }
 
-            // 3. STICKY BOTTOM TEXT MESSAGE COMPOSER BAR OR BLOCKED STATUS BANNER
+            // 3. STICKY BOTTOM TEXT & PHOTO COMPOSER BAR OR BLOCKED STATUS BANNER
             if (isBlockedByMe || isBlockedByPartner) {
                 Surface(
                     modifier = Modifier
@@ -1963,61 +2791,182 @@ fun MessagesScreen(
                     color = Color.White,
                     shadowElevation = 6.dp
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = body,
-                            onValueChange = { newText ->
-                                body = newText
-                            },
-                            placeholder = { Text("আপনার পয়গাম / মেসেজ লিখুন...") },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("message_body_input"),
-                            maxLines = 4,
-                            shape = RoundedCornerShape(22.dp)
-                        )
-                        Button(
-                            onClick = {
-                                if (body.isNotBlank()) {
-                                    val messageToSend = body
-                                    body = ""
-                                    onTypingStatusChanged(receiverId, false)
-                                    onSendMessage(receiverId, resolvedPartnerName, subject, messageToSend)
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        // Selected Images Preview Strip (1-5 photos) with individual Remove button before sending
+                        if (selectedImages.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(QawmiMintSurface)
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                                    .testTag("selected_images_preview_row")
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "নির্বাচিত ছবি (${IslamicDateAndPrayerHelper.toBanglaDigits(selectedImages.size.toString())}/৫)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = QawmiDeepGreen,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (photoLimitWarning != null) {
+                                        Text(
+                                            text = photoLimitWarning.orEmpty(),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = QawmiAlertRed,
+                                            fontSize = 10.sp
+                                        )
+                                    }
                                 }
-                            },
-                            enabled = !isSubmitting && body.isNotBlank(),
-                            colors = ButtonDefaults.buttonColors(containerColor = activeThemePalette.sentBubbleColor),
-                            shape = RoundedCornerShape(50),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                            modifier = Modifier.testTag("send_message_button")
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    selectedImages.forEachIndexed { idx, imgData ->
+                                        Box(
+                                            modifier = Modifier
+                                                .size(64.dp)
+                                                .testTag("selected_image_preview_$idx")
+                                        ) {
+                                            ChatAttachmentImage(
+                                                imageUrl = imgData,
+                                                contentDescription = "নির্বাচিত ছবি ${idx + 1}",
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .border(1.dp, QawmiDeepGreen, RoundedCornerShape(10.dp))
+                                            )
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = QawmiAlertRed,
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(2.dp)
+                                                    .size(20.dp)
+                                                    .clickable {
+                                                        selectedImages = selectedImages.filterIndexed { i, _ -> i != idx }
+                                                        photoLimitWarning = null
+                                                    }
+                                                    .testTag("remove_selected_image_$idx")
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Close,
+                                                        contentDescription = "ছবি বাদ দিন",
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "পয়গাম পাঠান",
-                                modifier = Modifier.size(18.dp)
+                            // Photo Picker Icon Button (opens phone gallery directly, up to 5 photos)
+                            IconButton(
+                                onClick = {
+                                    if (selectedImages.size >= ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
+                                        photoLimitWarning = "একবারে সর্বোচ্চ ৫টি ছবি নির্বাচন করা যাবে।"
+                                    } else {
+                                        chatMultiplePhotoPickerLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                        )
+                                    }
+                                },
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(QawmiMintSurface)
+                                    .testTag("attach_photos_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoLibrary,
+                                    contentDescription = "গ্যালারি থেকে ছবি যুক্ত করুন",
+                                    tint = activeThemePalette.sentBubbleColor,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+
+                            OutlinedTextField(
+                                value = body,
+                                onValueChange = { newText ->
+                                    body = newText
+                                },
+                                placeholder = { Text("আপনার পয়গাম লিখুন...") },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("message_body_input"),
+                                maxLines = 4,
+                                shape = RoundedCornerShape(22.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("পাঠান", fontWeight = FontWeight.Bold)
+
+                            val canSend = !isSubmitting && (body.isNotBlank() || selectedImages.isNotEmpty())
+                            Button(
+                                onClick = {
+                                    if (body.isNotBlank() || selectedImages.isNotEmpty()) {
+                                        val messageToSend = body
+                                        val imagesToSend = selectedImages.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
+                                        body = ""
+                                        selectedImages = emptyList()
+                                        photoLimitWarning = null
+                                        if (!isGroupConversation) {
+                                            onTypingStatusChanged(receiverId, false)
+                                        }
+                                        onSendMessageWithImages(
+                                            receiverId,
+                                            resolvedPartnerName,
+                                            subject,
+                                            messageToSend,
+                                            imagesToSend,
+                                            activeGroupId,
+                                            if (isGroupConversation) resolvedPartnerName else "",
+                                            activeGroup?.memberIds ?: emptyList()
+                                        )
+                                    }
+                                },
+                                enabled = canSend,
+                                colors = ButtonDefaults.buttonColors(containerColor = activeThemePalette.sentBubbleColor),
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                                modifier = Modifier.testTag("send_message_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "পয়গাম পাঠান",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("পাঠান", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
             }
         } else {
             // =========================================================================
-            // INBOX CONVERSATION LIST VIEW (When no specific conversation is open)
+            // PAYGAM CONVERSATION LIST VIEW (Personal & Group Conversations)
             // =========================================================================
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(14.dp)
             ) {
-                // 1. INBOX SUMMARY BANNER WITH UNREAD MESSAGE COUNT
+                // 1. SUMMARY BANNER WITH UNREAD COUNT & CREATE GROUP BUTTON
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2034,7 +2983,7 @@ fun MessagesScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "পয়গাম ইনবক্স ও রিয়েল-টাইম কথোপকথন",
+                                text = "পয়গাম ও গ্রুপ কথোপকথন",
                                 style = MaterialTheme.typography.titleSmall,
                                 color = QawmiDeepGreen,
                                 fontWeight = FontWeight.Bold
@@ -2045,19 +2994,37 @@ fun MessagesScreen(
                                 color = QawmiTextSecondary
                             )
                         }
-                        if (totalUnreadMessagesCount > 0) {
-                            Surface(
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (totalUnreadMessagesCount > 0) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = QawmiAlertRed,
+                                    modifier = Modifier.testTag("unread_messages_count_badge")
+                                ) {
+                                    Text(
+                                        text = "${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} অপঠিত",
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Button(
+                                onClick = { showCreateGroupDialog = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
                                 shape = RoundedCornerShape(50),
-                                color = QawmiAlertRed,
-                                modifier = Modifier.testTag("unread_messages_count_badge")
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .height(36.dp)
+                                    .testTag("create_group_button")
                             ) {
-                                Text(
-                                    text = "${IslamicDateAndPrayerHelper.toBanglaDigits(totalUnreadMessagesCount.toString())} অপঠিত",
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Icon(Icons.Default.GroupAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("নতুন গ্রুপ", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -2066,7 +3033,7 @@ fun MessagesScreen(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
-                    text = "কথোপকথনের তালিকা (ইনবক্স)",
+                    text = "কথোপকথনের তালিকা",
                     style = MaterialTheme.typography.titleSmall,
                     color = QawmiTextDark,
                     fontWeight = FontWeight.Bold
@@ -2086,7 +3053,7 @@ fun MessagesScreen(
                         if (conversationThreads.isEmpty()) {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text(
-                                    text = "এখনো কোনো পয়গাম আদান-প্রদান হয়নি।\nফিড, আবেদন বা মাদরাসা তালিকা থেকে যেকোনো প্রাপকের প্রোফাইলে গিয়ে মেসেজ পাঠাতে পারবেন।",
+                                    text = "এখনো কোনো পয়গাম আদান-প্রদান হয়নি।\nউপরের 'নতুন গ্রুপ' বাটনে চাপ দিয়ে গ্রুপ খুলুন অথবা যেকোনো প্রাপকের প্রোফাইলে গিয়ে পয়গাম পাঠান।",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = QawmiTextSecondary,
                                     textAlign = TextAlign.Center
@@ -2112,10 +3079,12 @@ fun MessagesScreen(
                                                 shape = RoundedCornerShape(14.dp)
                                             )
                                             .clickable {
-                                                if (!isLatestSentByMe && !latestMsg.isRead) {
-                                                    onMarkRead(latestMsg.id)
+                                                if (!thread.isGroup) {
+                                                    if (!isLatestSentByMe && !latestMsg.isRead) {
+                                                        onMarkRead(latestMsg.id)
+                                                    }
+                                                    onMarkConversationRead(thread.partnerId)
                                                 }
-                                                onMarkConversationRead(thread.partnerId)
                                                 receiverId = thread.partnerId
                                                 receiverName = thread.partnerName
                                                 onSelectRecipient(thread.partnerId, thread.partnerName)
@@ -2136,12 +3105,14 @@ fun MessagesScreen(
                                                 photoUrl = thread.partnerPhotoUrl,
                                                 displayName = thread.partnerName,
                                                 size = 48.dp,
-                                                borderColor = if (thread.isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
+                                                borderColor = if (thread.isGroup) QawmiGold else if (thread.isPartnerOnline) Color(0xFF00C853) else QawmiMintBorder,
                                                 borderWidth = 1.5.dp,
-                                                showOnlineIndicator = true,
+                                                showOnlineIndicator = !thread.isGroup,
                                                 isOnline = thread.isPartnerOnline,
                                                 modifier = Modifier.clickable {
-                                                    onInspectUserProfile(thread.partnerId, thread.partnerName)
+                                                    if (!thread.isGroup) {
+                                                        onInspectUserProfile(thread.partnerId, thread.partnerName)
+                                                    }
                                                 }
                                             )
                                             Spacer(modifier = Modifier.width(10.dp))
@@ -2164,7 +3135,9 @@ fun MessagesScreen(
                                                     )
                                                 }
 
-                                                val presenceBadge = if (thread.isPartnerTyping) {
+                                                val presenceBadge = if (thread.isGroup) {
+                                                    "গ্রুপ কথোপকথন • সদস্য: ${IslamicDateAndPrayerHelper.toBanglaDigits(thread.groupMemberCount.toString())} জন"
+                                                } else if (thread.isPartnerTyping) {
                                                     "টাইপ করছেন… • • •"
                                                 } else if (thread.isPartnerOnline) {
                                                     "অনলাইন"
@@ -2185,13 +3158,19 @@ fun MessagesScreen(
 
                                                 Spacer(modifier = Modifier.height(3.dp))
 
+                                                val previewBody = if (latestMsg.imageUrls.isNotEmpty() && latestMsg.body.isBlank()) {
+                                                    "📷 ${IslamicDateAndPrayerHelper.toBanglaDigits(latestMsg.imageUrls.size.toString())}টি ছবি"
+                                                } else {
+                                                    latestMsg.body
+                                                }
+
                                                 Text(
                                                     text = if (thread.isPartnerTyping) {
                                                         "টাইপ করছেন… • • •"
                                                     } else if (isLatestSentByMe) {
-                                                        "আপনি: ${latestMsg.body}"
+                                                        "আপনি: $previewBody"
                                                     } else {
-                                                        latestMsg.body
+                                                        previewBody
                                                     },
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     color = if (thread.isPartnerTyping) QawmiDeepGreen else QawmiTextDark,

@@ -193,21 +193,43 @@ service cloud.firestore {
       );
     }
 
+    function isValidChatGroup(data) {
+      return data.groupId is string && data.groupId.size() >= 1 && data.groupId.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 150 &&
+             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 250000)) &&
+             data.creatorId is string && data.creatorId.size() >= 1 && data.creatorId.size() <= 128 &&
+             data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 150 &&
+             data.memberIds is list && data.memberIds.size() >= 1 && data.memberIds.size() <= 50 &&
+             (!('memberNames' in data) || (data.memberNames is map && data.memberNames.size() <= 50)) &&
+             (!('memberPhotos' in data) || (data.memberPhotos is map && data.memberPhotos.size() <= 50)) &&
+             (!('themeSpec' in data) || (data.themeSpec is string && data.themeSpec.size() <= 100)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     function isValidDirectMessage(data) {
+      let hasImages = ('imageUrls' in data) && data.imageUrls is list && data.imageUrls.size() >= 1;
       return data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
              (!('senderPhotoUrl' in data) || (data.senderPhotoUrl is string && data.senderPhotoUrl.size() <= 250000)) &&
              data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 128 &&
              data.receiverName is string && data.receiverName.size() >= 1 && data.receiverName.size() <= 150 &&
+             (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 128)) &&
+             (!('groupName' in data) || (data.groupName is string && data.groupName.size() <= 150)) &&
+             (!('groupMemberIds' in data) || (data.groupMemberIds is list && data.groupMemberIds.size() <= 50)) &&
              data.subject is string && data.subject.size() <= 200 &&
-             data.body is string && data.body.size() >= 1 && data.body.size() <= 1500 &&
+             data.body is string && ((data.body.size() >= 1 && data.body.size() <= 1500) || (hasImages && data.body.size() <= 1500)) &&
+             (!('imageUrls' in data) || (data.imageUrls is list && data.imageUrls.size() <= 5)) &&
              data.isRead is bool &&
+             (!('readByUserIds' in data) || (data.readByUserIds is list && data.readByUserIds.size() <= 50)) &&
              (!('senderReaction' in data) || isValidReactionCode(data.senderReaction)) &&
              (!('receiverReaction' in data) || isValidReactionCode(data.receiverReaction)) &&
+             (!('userReactions' in data) || (data.userReactions is map && data.userReactions.size() <= 50)) &&
              (!('isEdited' in data) || data.isEdited is bool) &&
              (!('editedAt' in data) || data.editedAt == null || isValidTimestamp(data.editedAt)) &&
              (!('deletedForSender' in data) || data.deletedForSender is bool) &&
              (!('deletedForReceiver' in data) || data.deletedForReceiver is bool) &&
+             (!('deletedForUserIds' in data) || (data.deletedForUserIds is list && data.deletedForUserIds.size() <= 50)) &&
              (!('isDeletedForEveryone' in data) || data.isDeletedForEveryone is bool) &&
              isValidTimestamp(data.createdAt);
     }
@@ -529,63 +551,118 @@ service cloud.firestore {
       );
     }
 
-    // Direct Messages (পয়গাম ও কথোপকথন)
-    match /messages/{messageId} {
-      allow get: if isSignedIn() && isValidId(messageId) && (
-        existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid
+    // Group Conversations (গ্রুপ কথোপকথন)
+    match /chat_groups/{groupId} {
+      allow get: if isSignedIn() && isValidId(groupId) && (
+        existing().creatorId == request.auth.uid ||
+        (existing().memberIds is list && request.auth.uid in existing().memberIds)
       );
       allow list: if isSignedIn() && (
-        existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid
+        existing().creatorId == request.auth.uid ||
+        (existing().memberIds is list && request.auth.uid in existing().memberIds)
       );
+
+      allow create: if isSignedIn() &&
+                       isValidId(groupId) &&
+                       incoming().groupId == groupId &&
+                       incoming().creatorId == request.auth.uid &&
+                       incoming().memberIds is list &&
+                       (request.auth.uid in incoming().memberIds) &&
+                       incoming().keys().hasAll([
+                         'groupId', 'name', 'creatorId', 'creatorName',
+                         'memberIds', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'groupId', 'name', 'photoUrl', 'creatorId', 'creatorName',
+                         'memberIds', 'memberNames', 'memberPhotos', 'themeSpec',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidChatGroup(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(groupId) &&
+                       isValidChatGroup(incoming()) &&
+                       incoming().groupId == existing().groupId &&
+                       incoming().creatorId == existing().creatorId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (existing().creatorId == request.auth.uid ||
+                        (existing().memberIds is list && request.auth.uid in existing().memberIds)) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'name', 'photoUrl', 'memberIds', 'memberNames',
+                         'memberPhotos', 'themeSpec', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(groupId) && existing().creatorId == request.auth.uid;
+    }
+
+    // Direct & Group Messages (পয়গাম ও গ্রুপ কথোপকথন)
+    match /messages/{messageId} {
+      function isMessageParticipant(data) {
+        return data.senderId == request.auth.uid ||
+               data.receiverId == request.auth.uid ||
+               ('groupMemberIds' in data && data.groupMemberIds is list && request.auth.uid in data.groupMemberIds);
+      }
+
+      allow get: if isSignedIn() && isValidId(messageId) && isMessageParticipant(existing());
+      allow list: if isSignedIn() && isMessageParticipant(existing());
 
       allow create: if isSignedIn() &&
                        isValidId(messageId) &&
                        incoming().senderId == request.auth.uid &&
-                       incoming().receiverId != request.auth.uid &&
-                       !isBlockedBetween(incoming().senderId, incoming().receiverId) &&
                        incoming().isRead == false &&
+                       (
+                         (('groupId' in incoming() && incoming().groupId is string && incoming().groupId.size() >= 1) &&
+                          ('groupMemberIds' in incoming() && incoming().groupMemberIds is list && request.auth.uid in incoming().groupMemberIds)) ||
+                         ((!('groupId' in incoming()) || incoming().groupId == '') &&
+                          incoming().receiverId != request.auth.uid &&
+                          !isBlockedBetween(incoming().senderId, incoming().receiverId))
+                       ) &&
                        incoming().keys().hasAll([
                          'senderId', 'senderName', 'receiverId', 'receiverName',
                          'subject', 'body', 'isRead', 'createdAt'
                        ]) &&
                        incoming().keys().hasOnly([
                          'senderId', 'senderName', 'senderPhotoUrl', 'receiverId', 'receiverName',
-                         'subject', 'body', 'isRead', 'senderReaction', 'receiverReaction',
-                         'isEdited', 'editedAt', 'deletedForSender', 'deletedForReceiver',
-                         'isDeletedForEveryone', 'createdAt'
+                         'groupId', 'groupName', 'groupMemberIds', 'subject', 'body', 'imageUrls',
+                         'isRead', 'readByUserIds', 'senderReaction', 'receiverReaction',
+                         'userReactions', 'isEdited', 'editedAt', 'deletedForSender',
+                         'deletedForReceiver', 'deletedForUserIds', 'isDeletedForEveryone', 'createdAt'
                        ]) &&
                        isValidDirectMessage(incoming());
 
       allow update: if isSignedIn() &&
                        isValidId(messageId) &&
+                       isMessageParticipant(existing()) &&
                        incoming().senderId == existing().senderId &&
                        incoming().receiverId == existing().receiverId &&
                        incoming().createdAt == existing().createdAt &&
                        (!('senderReaction' in incoming()) || isValidReactionCode(incoming().senderReaction)) &&
                        (!('receiverReaction' in incoming()) || isValidReactionCode(incoming().receiverReaction)) &&
+                       (!('userReactions' in incoming()) || (incoming().userReactions is map && incoming().userReactions.size() <= 50)) &&
                        (!('isEdited' in incoming()) || incoming().isEdited is bool) &&
                        (!('editedAt' in incoming()) || incoming().editedAt == null || isValidTimestamp(incoming().editedAt)) &&
                        (!('deletedForSender' in incoming()) || incoming().deletedForSender is bool) &&
                        (!('deletedForReceiver' in incoming()) || incoming().deletedForReceiver is bool) &&
+                       (!('deletedForUserIds' in incoming()) || (incoming().deletedForUserIds is list && incoming().deletedForUserIds.size() <= 50)) &&
+                       (!('readByUserIds' in incoming()) || (incoming().readByUserIds is list && incoming().readByUserIds.size() <= 50)) &&
                        (!('isDeletedForEveryone' in incoming()) || incoming().isDeletedForEveryone is bool) && (
-                         (request.auth.uid == existing().receiverId &&
+                         (request.auth.uid != existing().senderId &&
                           incoming().isRead is bool &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'isRead', 'receiverReaction', 'deletedForReceiver'
+                            'isRead', 'readByUserIds', 'receiverReaction', 'userReactions',
+                            'deletedForReceiver', 'deletedForUserIds'
                           ])) ||
                          (request.auth.uid == existing().senderId &&
                           incoming().body is string &&
-                          incoming().body.size() >= 1 &&
                           incoming().body.size() <= 1500 &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'body', 'isEdited', 'editedAt', 'senderReaction',
-                            'deletedForSender', 'isDeletedForEveryone'
+                            'body', 'imageUrls', 'isEdited', 'editedAt', 'senderReaction',
+                            'userReactions', 'deletedForSender', 'deletedForUserIds',
+                            'isDeletedForEveryone', 'readByUserIds'
                           ]))
                        );
 
-      allow delete: if isSignedIn() && isValidId(messageId) && (
-        existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid
-      );
+      allow delete: if isSignedIn() && isValidId(messageId) && isMessageParticipant(existing());
     }
 
     // App Notifications (ব্যক্তিগত ও কমিউনিটি ব্রডকাস্ট নোটিফিকেশন)

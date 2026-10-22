@@ -333,3 +333,89 @@ test("Blocking & Chat Themes: blocking prevents sending messages in both directi
   );
 });
 
+test("ChatGroup & Image Attachments: members can create groups, add/remove members, and send 1-5 images (rejects >5)", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const outsiderDb = testEnv.authenticatedContext("outsider_uid_999").firestore();
+
+  const ts = nowDate();
+
+  // Alice creates a chat group with Bob
+  await assertSucceeds(
+    aliceDb.collection("chat_groups").doc("group_1").set({
+      name: "দাওরায়ে হাদীস ফোরাম",
+      photoUrl: "preset:scholar_emerald",
+      creatorId: ALICE_UID,
+      creatorName: "মাওলানা আব্দুল্লাহ",
+      memberIds: [ALICE_UID, BOB_UID],
+      memberNames: {
+        [ALICE_UID]: "মাওলানা আব্দুল্লাহ",
+        [BOB_UID]: "মুফতি মাহমুদ",
+      },
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Outsider cannot read the group
+  await assertFails(outsiderDb.collection("chat_groups").doc("group_1").get());
+
+  // Member (Bob) can read the group and update group name/members
+  await assertSucceeds(bobDb.collection("chat_groups").doc("group_1").get());
+  await assertSucceeds(
+    bobDb.collection("chat_groups").doc("group_1").update({
+      memberIds: [ALICE_UID, BOB_UID, "member_3"],
+      updatedAt: nowDate(),
+    })
+  );
+
+  // Alice can send a group message with 3 attached images (1-5 allowed)
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("group_msg_1").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: "GROUP:group_1",
+      receiverName: "দাওরায়ে হাদীস ফোরাম",
+      groupId: "group_1",
+      groupName: "দাওরায়ে হাদীস ফোরাম",
+      groupMemberIds: [ALICE_UID, BOB_UID, "member_3"],
+      subject: "গ্রুপ কথোপকথন",
+      body: "গ্রুপের সবাইকে সালাম ও ছবি প্রেরণ",
+      imageUrls: [
+        "data:image/jpeg;base64,img1",
+        "data:image/jpeg;base64,img2",
+        "data:image/jpeg;base64,img3",
+      ],
+      isRead: false,
+      createdAt: nowDate(),
+    })
+  );
+
+  // Sending more than 5 images (6 images) is rejected by security rules
+  await assertFails(
+    aliceDb.collection("messages").doc("group_msg_too_many_imgs").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: "GROUP:group_1",
+      receiverName: "দাওরায়ে হাদীস ফোরাম",
+      groupId: "group_1",
+      groupName: "দাওরায়ে হাদীস ফোরাম",
+      groupMemberIds: [ALICE_UID, BOB_UID],
+      subject: "গ্রুপ কথোপকথন",
+      body: "অতিরিক্ত ছবি",
+      imageUrls: ["img1", "img2", "img3", "img4", "img5", "img6"],
+      isRead: false,
+      createdAt: nowDate(),
+    })
+  );
+
+  // Group member (Bob) can add his reaction via userReactions map
+  await assertSucceeds(
+    bobDb.collection("messages").doc("group_msg_1").update({
+      userReactions: { [BOB_UID]: "DUA" },
+      readByUserIds: [BOB_UID],
+    })
+  );
+});
+
+

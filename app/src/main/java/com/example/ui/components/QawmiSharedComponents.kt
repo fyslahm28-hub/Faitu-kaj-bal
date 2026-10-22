@@ -416,6 +416,17 @@ fun UserAvatarImage(
                             .clip(CircleShape)
                     )
                 }
+                photoUrl.startsWith("http://", ignoreCase = true) ||
+                    photoUrl.startsWith("https://", ignoreCase = true) -> {
+                    coil.compose.AsyncImage(
+                        model = photoUrl,
+                        contentDescription = displayName.ifBlank { "প্রোফাইল ছবি" },
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                    )
+                }
                 photoUrl == ProfilePhotoHelper.PRESET_SCHOLAR_EMERALD -> {
                     Box(
                         modifier = Modifier
@@ -551,3 +562,50 @@ fun CandidateAvatarPlaceholder(
         modifier = modifier
     )
 }
+
+@Composable
+fun ChatAttachmentImage(
+    imageUrl: String,
+    contentDescription: String = "সংযুক্ত ছবি",
+    contentScale: ContentScale = ContentScale.Crop,
+    modifier: Modifier = Modifier
+) {
+    val decodedBitmap = remember(imageUrl) {
+        ProfilePhotoHelper.decodeDataUrlToImageBitmap(imageUrl)
+    }
+    when {
+        decodedBitmap != null -> {
+            Image(
+                bitmap = decodedBitmap,
+                contentDescription = contentDescription,
+                contentScale = contentScale,
+                modifier = modifier
+            )
+        }
+        imageUrl.startsWith("http://", ignoreCase = true) ||
+            imageUrl.startsWith("https://", ignoreCase = true) ||
+            imageUrl.startsWith("content://", ignoreCase = true) ||
+            imageUrl.startsWith("file://", ignoreCase = true) -> {
+            coil.compose.AsyncImage(
+                model = imageUrl,
+                contentDescription = contentDescription,
+                contentScale = contentScale,
+                modifier = modifier
+            )
+        }
+        else -> {
+            Box(
+                modifier = modifier.background(QawmiMintSurface),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoStories,
+                    contentDescription = contentDescription,
+                    tint = QawmiDeepGreen,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+    }
+}
+

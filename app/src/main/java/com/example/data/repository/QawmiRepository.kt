@@ -5,6 +5,7 @@ import com.example.R
 import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.AppNotification
 import com.example.data.model.BookmarkItem
+import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
 import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotSubmission
@@ -13,6 +14,7 @@ import com.example.data.model.NotificationReadReceipt
 import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.ui.util.AdminSecurityHelper
+import com.example.ui.util.ProfilePhotoHelper
 import com.example.ui.util.TelegramNotificationHelper
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -984,7 +986,171 @@ class QawmiRepository(
         }
     }
 
-    // --- 6. DIRECT MESSAGING (মেসেজিং ও মুযাকারা) ---
+    // --- 6. DIRECT & GROUP MESSAGING (মেসেজিং, গ্রুপ কথোপকথন ও ছবি প্রেরণ) ---
+
+    private fun DocumentSnapshot.toChatGroupOrNull(): ChatGroup? {
+        val obj = toObject(ChatGroup::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
+        val members = (get("memberIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.memberIds
+        val namesMap = (get("memberNames") as? Map<*, *>)
+            ?.entries
+            ?.mapNotNull { (k, v) ->
+                val key = k as? String
+                val value = v as? String
+                if (key != null && value != null) key to value else null
+            }
+            ?.toMap() ?: obj.memberNames
+        return obj.copy(
+            id = id,
+            memberIds = members,
+            memberNames = namesMap
+        )
+    }
+
+    fun observeUserGroups(userId: String): Flow<List<ChatGroup>> {
+        val path = "chat_groups"
+        return db.collection(path)
+            .whereArrayContains("memberIds", userId)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { it.toChatGroupOrNull() }
+                    .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    suspend fun createChatGroup(
+        name: String,
+        photoUrl: String,
+        creatorName: String,
+        memberIds: List<String>,
+        memberNames: Map<String, String>
+    ): Result<String> {
+        val uid = requireUserId()
+        val trimmedName = name.trim()
+        if (trimmedName.isBlank()) {
+            return Result.failure(IllegalArgumentException("অনুগ্রহ করে গ্রুপের একটি সুন্দর নাম লিখুন।"))
+        }
+        val finalMembers = (memberIds + uid).map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        val safeCreatorName = creatorName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }
+        val finalNames = memberNames.toMutableMap().apply {
+            put(uid, get(uid)?.takeIf { it.isNotBlank() } ?: safeCreatorName)
+        }
+        val docRef = db.collection("chat_groups").document()
+        return try {
+            val payload = mapOf(
+                "groupId" to docRef.id,
+                "name" to trimmedName,
+                "photoUrl" to photoUrl.trim(),
+                "creatorId" to uid,
+                "creatorName" to safeCreatorName,
+                "memberIds" to finalMembers,
+                "memberNames" to finalNames,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).await()
+            Result.success(docRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateChatGroupDetails(
+        groupId: String,
+        name: String,
+        photoUrl: String
+    ): Result<Unit> {
+        requireUserId()
+        if (groupId.isBlank()) return Result.failure(IllegalArgumentException("গ্রুপ খুঁজে পাওয়া যায়নি।"))
+        val trimmedName = name.trim()
+        if (trimmedName.isBlank()) return Result.failure(IllegalArgumentException("গ্রুপের নাম খালি রাখা যাবে না।"))
+        val docRef = db.collection("chat_groups").document(groupId)
+        return try {
+            docRef.update(
+                mapOf(
+                    "name" to trimmedName,
+                    "photoUrl" to photoUrl.trim(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun addMemberToChatGroup(
+        group: ChatGroup,
+        newMemberId: String,
+        newMemberName: String
+    ): Result<Unit> {
+        requireUserId()
+        val targetUid = newMemberId.trim()
+        if (group.id.isBlank() || targetUid.isBlank()) {
+            return Result.failure(IllegalArgumentException("সঠিক সদস্য নির্বাচন করুন।"))
+        }
+        val docRef = db.collection("chat_groups").document(group.id)
+        return try {
+            val updatedMembers = (group.memberIds + targetUid).distinct()
+            val updatedNames = group.memberNames.toMutableMap().apply {
+                put(targetUid, newMemberName.trim().ifBlank { "সম্মানিত সদস্য" })
+            }
+            docRef.update(
+                mapOf(
+                    "memberIds" to updatedMembers,
+                    "memberNames" to updatedNames,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun removeMemberFromChatGroup(
+        group: ChatGroup,
+        targetMemberId: String
+    ): Result<Unit> {
+        requireUserId()
+        val targetUid = targetMemberId.trim()
+        if (group.id.isBlank() || targetUid.isBlank()) {
+            return Result.failure(IllegalArgumentException("সঠিক সদস্য নির্বাচন করুন।"))
+        }
+        if (targetUid == group.creatorId && group.memberIds.size <= 1) {
+            return Result.failure(IllegalStateException("গ্রুপের একমাত্র সদস্যকে বাদ দেওয়া যাবে না।"))
+        }
+        val docRef = db.collection("chat_groups").document(group.id)
+        return try {
+            val updatedMembers = group.memberIds.filter { it != targetUid }.ifEmpty { listOf(group.creatorId) }
+            val updatedNames = group.memberNames.toMutableMap().apply { remove(targetUid) }
+            docRef.update(
+                mapOf(
+                    "memberIds" to updatedMembers,
+                    "memberNames" to updatedNames,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
 
     private fun DocumentSnapshot.toDirectMessageOrNull(): DirectMessage? {
         val obj = toObject(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
@@ -996,15 +1162,36 @@ class QawmiRepository(
         val resolvedDeletedForSender = getBoolean("deletedForSender") ?: obj.deletedForSender
         val resolvedDeletedForReceiver = getBoolean("deletedForReceiver") ?: obj.deletedForReceiver
         val resolvedDeletedForEveryone = getBoolean("isDeletedForEveryone") ?: obj.isDeletedForEveryone
+        val resolvedGroupId = getString("groupId") ?: obj.groupId
+        val resolvedGroupName = getString("groupName") ?: obj.groupName
+        val resolvedGroupMembers = (get("groupMemberIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.groupMemberIds
+        val resolvedImageUrls = (get("imageUrls") as? List<*>)?.mapNotNull { it as? String } ?: obj.imageUrls
+        val resolvedReadBy = (get("readByUserIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.readByUserIds
+        val resolvedDeletedForUsers = (get("deletedForUserIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.deletedForUserIds
+        val resolvedUserReactions = (get("userReactions") as? Map<*, *>)
+            ?.entries
+            ?.mapNotNull { (k, v) ->
+                val key = k as? String
+                val value = v as? String
+                if (key != null && value != null) key to value else null
+            }
+            ?.toMap() ?: obj.userReactions
         return obj.copy(
             id = id,
+            groupId = resolvedGroupId,
+            groupName = resolvedGroupName,
+            groupMemberIds = resolvedGroupMembers,
+            imageUrls = resolvedImageUrls,
             isRead = resolvedIsRead,
+            readByUserIds = resolvedReadBy,
             senderReaction = resolvedSenderReaction,
             receiverReaction = resolvedReceiverReaction,
+            userReactions = resolvedUserReactions,
             isEdited = resolvedIsEdited,
             editedAt = resolvedEditedAt,
             deletedForSender = resolvedDeletedForSender,
             deletedForReceiver = resolvedDeletedForReceiver,
+            deletedForUserIds = resolvedDeletedForUsers,
             isDeletedForEveryone = resolvedDeletedForEveryone
         )
     }
@@ -1033,9 +1220,19 @@ class QawmiRepository(
                 throw error
             }
 
-        return combine(sentFlow, receivedFlow) { sent, received ->
-            // Merge received first so receiver's read state is authoritative, and deduplicate strictly by document id
-            (received + sent)
+        val groupMessagesFlow = db.collection(path)
+            .whereArrayContains("groupMemberIds", userId)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
+            }
+            .catch {
+                emit(emptyList())
+            }
+
+        return combine(sentFlow, receivedFlow, groupMessagesFlow) { sent, received, groupMsgs ->
+            // Merge received and group messages first so read/reaction state is authoritative, and deduplicate strictly by document id
+            (received + groupMsgs + sent)
                 .filter { it.id.isNotBlank() }
                 .distinctBy { it.id }
                 .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
@@ -1048,48 +1245,86 @@ class QawmiRepository(
         receiverName: String,
         subject: String,
         body: String,
-        senderPhotoUrl: String = ""
+        senderPhotoUrl: String = "",
+        imageUrls: List<String> = emptyList(),
+        groupId: String = "",
+        groupName: String = "",
+        groupMemberIds: List<String> = emptyList()
     ): Result<String> {
         val uid = requireUserId()
-        if (receiverId.isBlank() || receiverId == uid) {
+        val isGroupMessage = groupId.isNotBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
+        val resolvedGroupId = if (groupId.isNotBlank()) groupId else receiverId.substringAfter(":", receiverId)
+        if (!isGroupMessage && (receiverId.isBlank() || receiverId == uid)) {
             return Result.failure(IllegalArgumentException("নিজের অ্যাকাউন্টে মেসেজ পাঠানো যাবে না।"))
         }
+        if (imageUrls.size > ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
+            return Result.failure(IllegalArgumentException("একবারে সর্বোচ্চ ৫টি ছবি পাঠানো যাবে।"))
+        }
         val safeSenderName = senderName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }
-        val safeReceiverName = receiverName.trim().ifBlank { "সম্মানিত প্রাপক" }
+        val safeReceiverName = receiverName.trim().ifBlank {
+            if (isGroupMessage) groupName.trim().ifBlank { "গ্রুপ কথোপকথন" } else "সম্মানিত প্রাপক"
+        }
         val docRef = db.collection("messages").document()
         return try {
-            // Check block status between sender and receiver before sending
-            val senderSnap = db.collection("users").document(uid).get().await()
-            val senderBlockedList = (senderSnap.get("blockedUserIds") as? List<*>)
-                ?.mapNotNull { it as? String }
-                .orEmpty()
-            if (receiverId in senderBlockedList) {
-                return Result.failure(
-                    IllegalStateException("আপনি এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান বিরত (ব্লক) রেখেছেন। পুনরায় পয়গাম পাঠাতে আনব্লক করুন।")
-                )
+            if (!isGroupMessage) {
+                // Check block status between sender and receiver before sending 1-on-1 message
+                val senderSnap = db.collection("users").document(uid).get().await()
+                val senderBlockedList = (senderSnap.get("blockedUserIds") as? List<*>)
+                    ?.mapNotNull { it as? String }
+                    .orEmpty()
+                if (receiverId in senderBlockedList) {
+                    return Result.failure(
+                        IllegalStateException("আপনি এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান বিরত (ব্লক) রেখেছেন। পুনরায় পয়গাম পাঠাতে আনব্লক করুন।")
+                    )
+                }
+
+                val receiverSnap = db.collection("users").document(receiverId).get().await()
+                val receiverBlockedList = (receiverSnap.get("blockedUserIds") as? List<*>)
+                    ?.mapNotNull { it as? String }
+                    .orEmpty()
+                if (uid in receiverBlockedList) {
+                    return Result.failure(
+                        IllegalStateException("এই কথোপকথনে পয়গাম প্রেরণ বর্তমানে প্রাপক কর্তৃক সীমাবদ্ধ রয়েছে।")
+                    )
+                }
             }
 
-            val receiverSnap = db.collection("users").document(receiverId).get().await()
-            val receiverBlockedList = (receiverSnap.get("blockedUserIds") as? List<*>)
-                ?.mapNotNull { it as? String }
-                .orEmpty()
-            if (uid in receiverBlockedList) {
-                return Result.failure(
-                    IllegalStateException("এই কথোপকথনে পয়গাম প্রেরণ বর্তমানে প্রাপক কর্তৃক সীমাবদ্ধ রয়েছে।")
-                )
+            val uploadedImages = ProfilePhotoHelper.uploadChatImagesToFirebaseStorage(
+                imageItems = imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE),
+                senderId = uid
+            )
+            val resolvedBody = body.trim().ifBlank {
+                if (uploadedImages.isNotEmpty()) {
+                    "📷 ${uploadedImages.size} টি ছবি প্রেরণ করা হয়েছে"
+                } else {
+                    ""
+                }
+            }
+            if (resolvedBody.isBlank()) {
+                return Result.failure(IllegalArgumentException("অনুগ্রহ করে পয়গাম লিখুন অথবা ছবি নির্বাচন করুন।"))
             }
 
-            val payload = mapOf(
+            val payload = mutableMapOf<String, Any>(
                 "senderId" to uid,
                 "senderName" to safeSenderName,
                 "senderPhotoUrl" to senderPhotoUrl.trim(),
-                "receiverId" to receiverId,
+                "receiverId" to if (isGroupMessage) "GROUP:$resolvedGroupId" else receiverId,
                 "receiverName" to safeReceiverName,
-                "subject" to subject.trim(),
-                "body" to body.trim(),
+                "subject" to subject.trim().ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+                "body" to resolvedBody,
                 "isRead" to false,
                 "createdAt" to FieldValue.serverTimestamp()
             )
+            if (uploadedImages.isNotEmpty()) {
+                payload["imageUrls"] = uploadedImages
+            }
+            if (isGroupMessage) {
+                val finalGroupMembers = (groupMemberIds + uid).map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                payload["groupId"] = resolvedGroupId
+                payload["groupName"] = groupName.trim().ifBlank { safeReceiverName }
+                payload["groupMemberIds"] = finalGroupMembers
+            }
+
             docRef.set(payload).await()
 
             // Clear typing status immediately upon sending a message
@@ -1098,12 +1333,12 @@ class QawmiRepository(
             } catch (_: Exception) {
             }
 
-            if (receiverId.isNotBlank() && receiverId != uid) {
+            if (!isGroupMessage && receiverId.isNotBlank() && receiverId != uid) {
                 createNotification(
                     recipientId = receiverId,
                     senderName = safeSenderName,
                     title = "নতুন পয়গাম: $safeSenderName",
-                    message = body.trim().take(120),
+                    message = resolvedBody.take(120),
                     type = "MESSAGE",
                     referenceId = docRef.id
                 )
@@ -1135,6 +1370,7 @@ class QawmiRepository(
     suspend fun markConversationMessagesAsRead(otherUserId: String, messages: List<DirectMessage>): Result<Unit> {
         val uid = requireUserId()
         if (otherUserId.isBlank() || otherUserId == uid) return Result.success(Unit)
+        if (otherUserId.startsWith("GROUP:")) return Result.success(Unit)
 
         val unreadIds = messages
             .filter { it.senderId == otherUserId && it.receiverId == uid && !it.isRead && it.id.isNotBlank() }
@@ -1172,8 +1408,8 @@ class QawmiRepository(
     }
 
     /**
-     * Adds, updates, or toggles off an Islamic reaction (🤲 দোয়া, ❤️ ভালোবাসা, 🌙 চাঁদ, ✨ সুন্দর, 🕌 দ্বীনি অনুপ্রেরণা, 👍 সম্মতি)
-     * on a Paygam message. Real-time visible to both sender and receiver.
+     * Adds, updates, or toggles off an Islamic reaction (🤲, ❤️, 🌙, ✨, 🕌, 👍)
+     * on a Paygam message. Real-time visible across 1-on-1 and group chats.
      */
     suspend fun reactToMessage(
         message: DirectMessage,
@@ -1186,14 +1422,30 @@ class QawmiRepository(
         }
         val docRef = db.collection("messages").document(message.id)
         return try {
-            val fieldToUpdate = when (uid) {
-                message.senderId -> "senderReaction"
-                message.receiverId -> "receiverReaction"
-                else -> return Result.failure(IllegalStateException("শুধুমাত্র কথোপকথনের পক্ষদ্বয় অভিবাদন যুক্ত করতে পারবেন।"))
+            if (message.groupId.isNotBlank() || (uid != message.senderId && uid != message.receiverId)) {
+                val existingMap = message.userReactions.toMutableMap()
+                val currentCode = existingMap[uid] ?: if (uid == message.senderId) message.senderReaction else ""
+                val nextCode = if (currentCode == reactionCode) "" else reactionCode
+                if (nextCode.isBlank()) {
+                    existingMap.remove(uid)
+                } else {
+                    existingMap[uid] = nextCode
+                }
+                val updates = mutableMapOf<String, Any>("userReactions" to existingMap)
+                if (uid == message.senderId) {
+                    updates["senderReaction"] = nextCode
+                }
+                docRef.update(updates).await()
+            } else {
+                val fieldToUpdate = when (uid) {
+                    message.senderId -> "senderReaction"
+                    message.receiverId -> "receiverReaction"
+                    else -> return Result.failure(IllegalStateException("শুধুমাত্র কথোপকথনের পক্ষদ্বয় অভিবাদন যুক্ত করতে পারবেন।"))
+                }
+                val currentReaction = if (uid == message.senderId) message.senderReaction else message.receiverReaction
+                val nextReaction = if (currentReaction == reactionCode) "" else reactionCode
+                docRef.update(fieldToUpdate, nextReaction).await()
             }
-            val currentReaction = if (uid == message.senderId) message.senderReaction else message.receiverReaction
-            val nextReaction = if (currentReaction == reactionCode) "" else reactionCode
-            docRef.update(fieldToUpdate, nextReaction).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1243,19 +1495,22 @@ class QawmiRepository(
 
     /**
      * Deletes/hides a Paygam message only for the current user (নিজের জন্য মুছুন).
-     * Both sender and receiver can delete a message from their own view.
+     * Both sender, receiver, and group members can delete a message from their own view.
      */
     suspend fun deleteMessageForMe(message: DirectMessage): Result<Unit> {
         val uid = requireUserId()
         if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
         val docRef = db.collection("messages").document(message.id)
         return try {
-            val fieldToUpdate = when (uid) {
-                message.senderId -> "deletedForSender"
-                message.receiverId -> "deletedForReceiver"
+            when {
+                uid == message.senderId -> docRef.update("deletedForSender", true).await()
+                uid == message.receiverId -> docRef.update("deletedForReceiver", true).await()
+                message.groupMemberIds.contains(uid) -> {
+                    val updatedDeleted = (message.deletedForUserIds + uid).distinct()
+                    docRef.update("deletedForUserIds", updatedDeleted).await()
+                }
                 else -> return Result.failure(IllegalStateException("অনুমোদনহীন অনুরোধ।"))
             }
-            docRef.update(fieldToUpdate, true).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

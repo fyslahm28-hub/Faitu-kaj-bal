@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.AppNotification
 import com.example.data.model.BookmarkItem
+import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
 import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotSubmission
@@ -196,6 +197,14 @@ class QawmiViewModel(
     // Optimistic local read message IDs so unread badge decrements/clears immediately while Firestore batch commits
     private val _locallyReadMessageIds = MutableStateFlow<Set<String>>(emptySet())
 
+    val userGroupsState: StateFlow<UiState<List<ChatGroup>>> = repository.observeUserGroups(currentUserId)
+        .map<List<ChatGroup>, UiState<List<ChatGroup>>> { UiState.Success(it) }
+        .catch { e ->
+            Log.w(TAG, "Error observing chat groups", e)
+            emit(UiState.Error(e.localizedMessage ?: "গ্রুপ লোড করা যায়নি"))
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+
     val messagesState: StateFlow<UiState<List<DirectMessage>>> = combine(
         repository.observeUserMessages(currentUserId),
         _locallyReadMessageIds
@@ -204,7 +213,8 @@ class QawmiViewModel(
             .filter { it.id.isNotBlank() }
             .filterNot { msg ->
                 (msg.senderId == currentUserId && msg.deletedForSender) ||
-                    (msg.receiverId == currentUserId && msg.deletedForReceiver)
+                    (msg.receiverId == currentUserId && msg.deletedForReceiver) ||
+                    msg.deletedForUserIds.contains(currentUserId)
             }
             .distinctBy { it.id }
             .map { msg ->
@@ -225,14 +235,19 @@ class QawmiViewModel(
     // Real-time profiles of all conversation partners in the inbox (for Online/Offline, Last Seen & Avatar)
     val chatPartnerProfilesState: StateFlow<Map<String, UserProfile>> = combine(
         messagesState,
+        userGroupsState,
         _messageTargetUser
-    ) { msgState, targetUser ->
+    ) { msgState, groupsState, targetUser ->
         val messages = (msgState as? UiState.Success)?.data ?: emptyList()
-        val partnerIds = messages.map { msg ->
-            if (msg.senderId == currentUserId) msg.receiverId else msg.senderId
+        val groups = (groupsState as? UiState.Success)?.data ?: emptyList()
+        val partnerIds = messages.flatMap { msg ->
+            listOf(msg.senderId, msg.receiverId)
         }.toMutableSet()
-        targetUser?.first?.takeIf { it.isNotBlank() }?.let { partnerIds.add(it) }
-        partnerIds.filter { it.isNotBlank() && it != currentUserId }
+        groups.forEach { group ->
+            partnerIds.addAll(group.memberIds)
+        }
+        targetUser?.first?.takeIf { it.isNotBlank() && !it.startsWith("GROUP:") }?.let { partnerIds.add(it) }
+        partnerIds.filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
     }.flatMapLatest { validIds ->
         if (validIds.isEmpty()) {
             flowOf(emptyMap())
@@ -253,7 +268,7 @@ class QawmiViewModel(
     val activeChatPartnerProfileState: StateFlow<UserProfile?> = _messageTargetUser
         .flatMapLatest { target ->
             val uid = target?.first.orEmpty()
-            if (uid.isBlank() || uid == currentUserId) {
+            if (uid.isBlank() || uid == currentUserId || uid.startsWith("GROUP:")) {
                 flowOf(null)
             } else {
                 repository.observeUserProfile(uid)
@@ -391,13 +406,15 @@ class QawmiViewModel(
         _inspectedUserTarget.value = null
         _messageTargetUser.value = userId to userName
         navigateTo(MainDestination.MESSAGES)
-        markConversationRead(userId)
+        if (!userId.startsWith("GROUP:")) {
+            markConversationRead(userId)
+        }
     }
 
     fun clearMessageTarget() {
         val previousTarget = _messageTargetUser.value?.first.orEmpty()
         _messageTargetUser.value = null
-        if (previousTarget.isNotBlank()) {
+        if (previousTarget.isNotBlank() && !previousTarget.startsWith("GROUP:")) {
             setTypingStatus(previousTarget, false)
         }
     }
@@ -648,14 +665,23 @@ class QawmiViewModel(
         receiverName: String,
         subject: String,
         body: String,
+        imageUrls: List<String> = emptyList(),
+        groupId: String = "",
+        groupName: String = "",
+        groupMemberIds: List<String> = emptyList(),
         onSent: () -> Unit = {}
     ) {
-        if (receiverId.isBlank() || receiverId == currentUserId) {
+        val isGroupMsg = groupId.isNotBlank() || receiverId.startsWith("GROUP:")
+        if (!isGroupMsg && (receiverId.isBlank() || receiverId == currentUserId)) {
             _errorBanner.value = "সঠিক প্রাপক নির্বাচন করুন।"
             return
         }
-        if (body.isBlank()) {
-            _errorBanner.value = "অনুগ্রহ করে মেসেজের মূল বক্তব্য লিখুন।"
+        if (body.isBlank() && imageUrls.isEmpty()) {
+            _errorBanner.value = "অনুগ্রহ করে পয়গামের কথা লিখুন অথবা ছবি যুক্ত করুন।"
+            return
+        }
+        if (imageUrls.size > 5) {
+            _errorBanner.value = "একবারে সর্বোচ্চ ৫টি ছবি পাঠানো যাবে।"
             return
         }
         viewModelScope.launch {
@@ -663,20 +689,140 @@ class QawmiViewModel(
             clearBanners()
             val senderName = resolveActorDisplayName("দ্বীনি ভাই")
             val senderPhoto = resolveActorPhotoUrl()
+            val resolvedGroupId = groupId.ifBlank {
+                if (receiverId.startsWith("GROUP:")) receiverId.removePrefix("GROUP:") else ""
+            }
             val result = repository.sendDirectMessage(
                 senderName = senderName,
                 receiverId = receiverId,
                 receiverName = receiverName,
                 subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
                 body = body,
-                senderPhotoUrl = senderPhoto
+                senderPhotoUrl = senderPhoto,
+                imageUrls = imageUrls.take(5),
+                groupId = resolvedGroupId,
+                groupName = groupName.ifBlank { receiverName },
+                groupMemberIds = groupMemberIds
             )
             _isSubmitting.value = false
             result.onSuccess {
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পয়গাম প্রাপকের কাছে প্রেরিত হয়েছে।"
+                _feedbackBanner.value = if (imageUrls.isNotEmpty()) {
+                    "আলহামদুলিল্লাহ, ছবিসহ আপনার পয়গাম প্রেরিত হয়েছে।"
+                } else {
+                    "আলহামদুলিল্লাহ, আপনার পয়গাম প্রেরিত হয়েছে।"
+                }
                 onSent()
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "মেসেজ পাঠাতে ত্রুটি হয়েছে।"
+                _errorBanner.value = err.localizedMessage ?: "পয়গাম পাঠাতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun createChatGroup(
+        name: String,
+        photoUrl: String,
+        initialMemberIds: List<String>,
+        initialMemberNames: Map<String, String>,
+        onCreated: (ChatGroup) -> Unit = {}
+    ) {
+        val trimmedName = name.trim()
+        if (trimmedName.isBlank()) {
+            _errorBanner.value = "অনুগ্রহ করে গ্রুপের নাম লিখুন।"
+            return
+        }
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val creatorName = resolveActorDisplayName("গ্রুপ অ্যাডমিন")
+            val result = repository.createChatGroup(
+                name = trimmedName,
+                photoUrl = photoUrl,
+                creatorName = creatorName,
+                memberIds = initialMemberIds,
+                memberNames = initialMemberNames
+            )
+            _isSubmitting.value = false
+            result.onSuccess { groupId ->
+                val uid = currentUserId
+                val finalMembers = (initialMemberIds + uid).map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                val createdGroup = ChatGroup(
+                    id = groupId,
+                    name = trimmedName,
+                    photoUrl = photoUrl,
+                    creatorId = uid,
+                    creatorName = creatorName,
+                    memberIds = finalMembers,
+                    memberNames = initialMemberNames + (uid to creatorName)
+                )
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, '${createdGroup.name}' গ্রুপ তৈরি হয়েছে।"
+                onCreated(createdGroup)
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "গ্রুপ তৈরি করতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun updateChatGroupDetails(
+        groupId: String,
+        newName: String,
+        newPhotoUrl: String
+    ) {
+        if (groupId.isBlank() || newName.trim().isBlank()) return
+        viewModelScope.launch {
+            clearBanners()
+            val result = repository.updateChatGroupDetails(
+                groupId = groupId,
+                name = newName.trim(),
+                photoUrl = newPhotoUrl
+            )
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, গ্রুপের নাম ও ছবি হালনাগাদ হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "গ্রুপ হালনাগাদ করতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun addMemberToChatGroup(
+        groupId: String,
+        newMemberId: String,
+        newMemberName: String
+    ) {
+        if (groupId.isBlank() || newMemberId.isBlank()) return
+        val currentGroup = (userGroupsState.value as? UiState.Success)?.data?.firstOrNull { it.id == groupId }
+            ?: return
+        viewModelScope.launch {
+            clearBanners()
+            val result = repository.addMemberToChatGroup(
+                group = currentGroup,
+                newMemberId = newMemberId.trim(),
+                newMemberName = newMemberName.trim().ifBlank { "সম্মানিত সদস্য" }
+            )
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, নতুন সদস্য গ্রুপে যুক্ত করা হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "সদস্য যুক্ত করতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun removeMemberFromChatGroup(
+        groupId: String,
+        memberIdToRemove: String
+    ) {
+        if (groupId.isBlank() || memberIdToRemove.isBlank()) return
+        val currentGroup = (userGroupsState.value as? UiState.Success)?.data?.firstOrNull { it.id == groupId }
+            ?: return
+        viewModelScope.launch {
+            clearBanners()
+            val result = repository.removeMemberFromChatGroup(
+                group = currentGroup,
+                targetMemberId = memberIdToRemove
+            )
+            result.onSuccess {
+                _feedbackBanner.value = "সদস্যকে গ্রুপ থেকে বাদ দেওয়া হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "সদস্য বাদ দিতে ত্রুটি হয়েছে।"
             }
         }
     }

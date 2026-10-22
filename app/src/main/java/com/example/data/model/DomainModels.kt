@@ -150,6 +150,19 @@ data class BookmarkItem(
 )
 
 @IgnoreExtraProperties
+data class ChatGroup(
+    @DocumentId val id: String = "",
+    val name: String = "",
+    val photoUrl: String = "",
+    val creatorId: String = "",
+    val creatorName: String = "",
+    val memberIds: List<String> = emptyList(),
+    val memberNames: Map<String, String> = emptyMap(),
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
 data class DirectMessage(
     @DocumentId val id: String = "",
     val senderId: String = "",
@@ -157,14 +170,20 @@ data class DirectMessage(
     val senderPhotoUrl: String = "",
     val receiverId: String = "",
     val receiverName: String = "",
+    val groupId: String = "",
+    val groupName: String = "",
+    val groupMemberIds: List<String> = emptyList(),
     val subject: String = "",
     val body: String = "",
+    val imageUrls: List<String> = emptyList(),
     @field:PropertyName("isRead")
     @get:PropertyName("isRead")
     @set:PropertyName("isRead")
     var isRead: Boolean = false,
+    val readByUserIds: List<String> = emptyList(),
     val senderReaction: String = "",
     val receiverReaction: String = "",
+    val userReactions: Map<String, String> = emptyMap(),
     @field:PropertyName("isEdited")
     @get:PropertyName("isEdited")
     @set:PropertyName("isEdited")
@@ -178,6 +197,7 @@ data class DirectMessage(
     @get:PropertyName("deletedForReceiver")
     @set:PropertyName("deletedForReceiver")
     var deletedForReceiver: Boolean = false,
+    val deletedForUserIds: List<String> = emptyList(),
     @field:PropertyName("isDeletedForEveryone")
     @get:PropertyName("isDeletedForEveryone")
     @set:PropertyName("isDeletedForEveryone")

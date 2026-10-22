@@ -644,6 +644,169 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("blocked_conversation_banner").assertDoesNotExist()
     }
+
+    @Test
+    @Config(qualifiers = "w420dp-h840dp")
+    fun `MessagesScreen removes Inbox text in header, opens profile on header click, supports group chats, 1-5 photo previews, and symbol-only reactions`() {
+        val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(Color.rgb(11, 93, 67))
+        val output = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 80, output)
+        val sampleDataUri1 = "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+        val sampleDataUri2 = "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+
+        var inspectedProfilePair: Pair<String, String>? = null
+        var createdGroupName = ""
+        var createdGroupMembers = emptyList<String>()
+        var sentImageUrls = emptyList<String>()
+        var sentBody = ""
+
+        val partnerProfile = UserProfile(
+            id = "partner_1",
+            fullName = "মুফতি মাহমুদ",
+            photoUrl = "preset:scholar_emerald",
+            isOnline = true
+        )
+
+        var messagesList by mutableStateOf(
+            listOf(
+                DirectMessage(
+                    id = "msg_1",
+                    senderId = "partner_1",
+                    senderName = "মুফতি মাহমুদ",
+                    receiverId = "user_me",
+                    receiverName = "মাওলানা আব্দুল্লাহ",
+                    subject = "পয়গাম",
+                    body = "আসসালামু আলাইকুম"
+                )
+            )
+        )
+
+        var groupsList by mutableStateOf(
+            listOf(
+                com.example.data.model.ChatGroup(
+                    id = "grp_1",
+                    name = "আসাতীজা ফোরাম",
+                    photoUrl = "preset:madrasa_dome",
+                    creatorId = "user_me",
+                    memberIds = listOf("user_me", "partner_1"),
+                    memberNames = mapOf("user_me" to "মাওলানা আব্দুল্লাহ", "partner_1" to "মুফতি মাহমুদ")
+                )
+            )
+        )
+
+        var activeTarget by mutableStateOf<Pair<String, String>?>("partner_1" to "মুফতি মাহমুদ")
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(800.dp)) {
+                    MessagesScreen(
+                        messagesState = UiState.Success(messagesList),
+                        userGroups = groupsList,
+                        currentUserId = "user_me",
+                        currentUserProfile = UserProfile(id = "user_me", fullName = "মাওলানা আব্দুল্লাহ"),
+                        targetUser = activeTarget,
+                        partnerProfiles = mapOf("partner_1" to partnerProfile),
+                        activePartnerProfile = partnerProfile,
+                        isSubmitting = false,
+                        initialSelectedImages = listOf(sampleDataUri1, sampleDataUri2),
+                        onSendMessage = { _, _, _, _ -> },
+                        onSendMessageWithImages = { targetId, targetName, subject, body, images, groupId, groupName, groupMembers ->
+                            sentBody = body
+                            sentImageUrls = images
+                            messagesList = messagesList + DirectMessage(
+                                id = "msg_photo_2",
+                                senderId = "user_me",
+                                senderName = "মাওলানা আব্দুল্লাহ",
+                                receiverId = targetId,
+                                receiverName = targetName,
+                                groupId = groupId,
+                                groupName = groupName,
+                                groupMemberIds = groupMembers,
+                                subject = subject,
+                                body = body,
+                                imageUrls = images
+                            )
+                        },
+                        onSelectRecipient = { id, name -> activeTarget = id to name },
+                        onClearRecipient = { activeTarget = null },
+                        onMarkRead = {},
+                        onMarkConversationRead = {},
+                        onCreateGroup = { name, photo, members, namesMap ->
+                            createdGroupName = name
+                            createdGroupMembers = members
+                            val newGrp = com.example.data.model.ChatGroup(
+                                id = "grp_2",
+                                name = name,
+                                photoUrl = photo,
+                                creatorId = "user_me",
+                                memberIds = listOf("user_me") + members,
+                                memberNames = namesMap + ("user_me" to "মাওলানা আব্দুল্লাহ")
+                            )
+                            groupsList = groupsList + newGrp
+                            activeTarget = "GROUP:grp_2" to name
+                        },
+                        onInspectUserProfile = { uid, name ->
+                            inspectedProfilePair = uid to name
+                        }
+                    )
+                }
+            }
+        }
+
+        // 1. Verify "ইনবক্স" text is NOT present in the chat header, and clicking header opens partner profile
+        composeTestRule.onNodeWithText("ইনবক্স").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("partner_header_profile_click_area").performClick()
+        assertEquals("partner_1" to "মুফতি মাহমুদ", inspectedProfilePair)
+
+        // 2. Verify sleek symbol-only Islamic reactions in message action sheet (no text labels like "দোয়া" inside reaction bar)
+        composeTestRule.onNodeWithTag("message_options_button_msg_1", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("message_action_sheet").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("reaction_chip_DUA").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("reaction_chip_MUHABBAT").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("reaction_chip_HILAL").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("reaction_chip_SUNDOR").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("reaction_chip_DEENI_PRERONA").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("reaction_chip_SAMMATI").assertIsDisplayed()
+        composeTestRule.onNodeWithText("দোয়া").assertDoesNotExist()
+        // Dismiss action sheet by clicking a reaction
+        composeTestRule.onNodeWithTag("reaction_chip_DUA").performClick()
+        composeTestRule.waitForIdle()
+
+        // 3. Verify pre-send photo preview strip (2 images initially), remove 1 image, then send remaining 1 image
+        composeTestRule.onNodeWithTag("selected_images_preview_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("remove_selected_image_0", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("message_body_input").performTextInput("ছবিসহ পয়গাম")
+        composeTestRule.onNodeWithTag("send_message_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(1, sentImageUrls.size)
+        assertEquals("ছবিসহ পয়গাম", sentBody)
+        composeTestRule.onNodeWithTag("message_images_grid_msg_photo_2", useUnmergedTree = true).assertExists()
+
+        // 4. Navigate back to conversation list and create a new Group conversation
+        composeTestRule.onNodeWithTag("back_to_inbox_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("create_group_button").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("create_group_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("group_name_input").performTextInput("দারুল ইফতা গ্রুপ")
+        composeTestRule.onNodeWithTag("select_group_member_partner_1").performClick()
+        composeTestRule.onNodeWithTag("confirm_create_group_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals("দারুল ইফতা গ্রুপ", createdGroupName)
+        assertTrue(createdGroupMembers.contains("partner_1"))
+
+        // Clicking header in group conversation opens Group Management dialog
+        composeTestRule.onNodeWithTag("partner_header_profile_click_area").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("group_management_dialog").assertIsDisplayed()
+    }
 }
+
 
 
