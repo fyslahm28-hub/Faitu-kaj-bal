@@ -193,8 +193,25 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val messagesState: StateFlow<UiState<List<DirectMessage>>> = repository.observeUserMessages(currentUserId)
-        .map<List<DirectMessage>, UiState<List<DirectMessage>>> { UiState.Success(it) }
+    // Optimistic local read message IDs so unread badge decrements/clears immediately while Firestore batch commits
+    private val _locallyReadMessageIds = MutableStateFlow<Set<String>>(emptySet())
+
+    val messagesState: StateFlow<UiState<List<DirectMessage>>> = combine(
+        repository.observeUserMessages(currentUserId),
+        _locallyReadMessageIds
+    ) { list, locallyReadIds ->
+        val deduplicated = list
+            .filter { it.id.isNotBlank() }
+            .distinctBy { it.id }
+            .map { msg ->
+                if (!msg.isRead && locallyReadIds.contains(msg.id)) {
+                    msg.copy(isRead = true)
+                } else {
+                    msg
+                }
+            }
+        UiState.Success(deduplicated) as UiState<List<DirectMessage>>
+    }
         .catch { e ->
             Log.w(TAG, "Error observing messages", e)
             emit(UiState.Error(e.localizedMessage ?: "মেসেজ লোড করা যায়নি"))
@@ -374,7 +391,21 @@ class QawmiViewModel(
     }
 
     fun clearMessageTarget() {
+        val previousTarget = _messageTargetUser.value?.first.orEmpty()
         _messageTargetUser.value = null
+        if (previousTarget.isNotBlank()) {
+            setTypingStatus(previousTarget, false)
+        }
+    }
+
+    fun setTypingStatus(targetUserId: String, isTyping: Boolean) {
+        viewModelScope.launch {
+            repository.updateTypingStatus(
+                targetUserId = targetUserId,
+                isTyping = isTyping,
+                defaultFullName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
+            )
+        }
     }
 
     fun clearBanners() {
@@ -647,6 +678,8 @@ class QawmiViewModel(
     }
 
     fun markMessageRead(messageId: String) {
+        if (messageId.isBlank()) return
+        _locallyReadMessageIds.value = _locallyReadMessageIds.value + messageId
         viewModelScope.launch {
             repository.markMessageAsRead(messageId)
         }
@@ -654,7 +687,14 @@ class QawmiViewModel(
 
     fun markConversationRead(otherUserId: String) {
         if (otherUserId.isBlank() || otherUserId == currentUserId) return
-        val currentMessages = (messagesState.value as? UiState.Success)?.data ?: return
+        val currentMessages = (messagesState.value as? UiState.Success)?.data ?: emptyList()
+        val matchingUnreadIds = currentMessages
+            .filter { it.senderId == otherUserId && it.receiverId == currentUserId && !it.isRead && it.id.isNotBlank() }
+            .map { it.id }
+            .toSet()
+        if (matchingUnreadIds.isNotEmpty()) {
+            _locallyReadMessageIds.value = _locallyReadMessageIds.value + matchingUnreadIds
+        }
         viewModelScope.launch {
             repository.markConversationMessagesAsRead(otherUserId, currentMessages)
         }

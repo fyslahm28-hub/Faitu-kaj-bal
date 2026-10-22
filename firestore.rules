@@ -84,7 +84,9 @@ service cloud.firestore {
              data.madrasaName is string && data.madrasaName.size() <= 200 &&
              (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 250000)) &&
              (!('isOnline' in data) || data.isOnline is bool) &&
-             (!('lastSeenAt' in data) || isValidTimestamp(data.lastSeenAt)) &&
+             (!('lastSeenAt' in data) || data.lastSeenAt == null || isValidTimestamp(data.lastSeenAt)) &&
+             (!('typingToUserId' in data) || (data.typingToUserId is string && data.typingToUserId.size() <= 128)) &&
+             (!('typingUpdatedAt' in data) || data.typingUpdatedAt == null || isValidTimestamp(data.typingUpdatedAt)) &&
              data.isVerified is bool &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
@@ -269,6 +271,7 @@ service cloud.firestore {
                          'userId', 'fullName', 'accountType', 'district', 'designation',
                          'qualification', 'experience', 'preferredDistricts', 'bio',
                          'contactInfo', 'madrasaName', 'photoUrl', 'isOnline', 'lastSeenAt',
+                         'typingToUserId', 'typingUpdatedAt',
                          'isVerified', 'createdAt', 'updatedAt'
                        ]) &&
                        (incoming().isVerified == false || isAdmin()) &&
@@ -285,7 +288,7 @@ service cloud.firestore {
                             'fullName', 'accountType', 'district', 'designation',
                             'qualification', 'experience', 'preferredDistricts', 'bio',
                             'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
-                            'lastSeenAt', 'updatedAt'
+                            'lastSeenAt', 'typingToUserId', 'typingUpdatedAt', 'updatedAt'
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -517,7 +520,7 @@ service cloud.firestore {
 
       allow update: if isSignedIn() &&
                        isValidId(messageId) &&
-                       isValidDirectMessage(incoming()) &&
+                       incoming().isRead is bool &&
                        incoming().senderId == existing().senderId &&
                        incoming().receiverId == existing().receiverId &&
                        incoming().createdAt == existing().createdAt &&

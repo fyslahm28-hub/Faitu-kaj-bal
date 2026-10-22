@@ -591,7 +591,7 @@ fun ProfileScreen(
     var madrasaName by remember { mutableStateOf(profile?.madrasaName ?: "") }
     var photoUrl by remember { mutableStateOf(profile?.photoUrl ?: "") }
 
-    var isEditExpanded by remember { mutableStateOf(true) }
+    var isEditExpanded by remember { mutableStateOf(false) }
     var selectedActivityTab by remember { mutableIntStateOf(0) } // 0 = আমার প্রকাশিত পোস্ট, 1 = আবেদন ও কার্যক্রম
 
     LaunchedEffect(profile) {
@@ -1003,7 +1003,7 @@ fun ProfileScreen(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (isEditExpanded) "সংক্ষিপ্ত ভিউ" else "তথ্য সম্পাদনা",
+                            text = if (isEditExpanded) "সম্পাদনা বন্ধ করুন" else "এডিট করুন",
                             style = MaterialTheme.typography.labelSmall,
                             color = QawmiDeepGreen,
                             fontWeight = FontWeight.Bold
@@ -1070,12 +1070,13 @@ fun ProfileScreen(
             }
         }
 
-        // 4. EDIT PROFILE FORM CARD (Saves directly to Firebase Firestore)
-        AnimatedVisibility(visible = isEditExpanded) {
+        // 4. EDIT PROFILE FORM CARD (Saves directly to Firebase Firestore & closes on save)
+        if (isEditExpanded) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(16.dp)),
+                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(16.dp))
+                    .testTag("profile_edit_form_card"),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = Color.White)
             ) {
@@ -1213,6 +1214,9 @@ fun ProfileScreen(
                                 madrasaName,
                                 photoUrl
                             )
+                            if (fullName.isNotBlank()) {
+                                isEditExpanded = false
+                            }
                         },
                         enabled = !isSubmitting,
                         modifier = Modifier
@@ -1233,7 +1237,7 @@ fun ProfileScreen(
                         } else {
                             Icon(Icons.Default.Save, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("প্রোফাইল আপডেট করুন", fontWeight = FontWeight.Bold)
+                            Text("প্রোফাইল সেভ করুন", fontWeight = FontWeight.Bold)
                         }
                     }
                 }

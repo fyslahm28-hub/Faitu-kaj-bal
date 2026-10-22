@@ -49,10 +49,14 @@ data class UserProfile(
     val contactInfo: String = "",
     val madrasaName: String = "",
     val photoUrl: String = "", // Base64 data:image/jpeg;base64,... or avatar preset / URL stored in Firestore
+    @field:PropertyName("isOnline")
     @get:PropertyName("isOnline")
     @set:PropertyName("isOnline")
     var isOnline: Boolean = false,
     @ServerTimestamp val lastSeenAt: Timestamp? = null,
+    val typingToUserId: String = "",
+    @ServerTimestamp val typingUpdatedAt: Timestamp? = null,
+    @field:PropertyName("isVerified")
     @get:PropertyName("isVerified")
     @set:PropertyName("isVerified")
     var isVerified: Boolean = false,
@@ -153,6 +157,7 @@ data class DirectMessage(
     val receiverName: String = "",
     val subject: String = "",
     val body: String = "",
+    @field:PropertyName("isRead")
     @get:PropertyName("isRead")
     @set:PropertyName("isRead")
     var isRead: Boolean = false,
@@ -169,6 +174,7 @@ data class AppNotification(
     val message: String = "",
     val type: String = "APPLICATION", // "APPLICATION", "MESSAGE", "VERIFICATION", "NEW_CIRCULAR", "NEW_APPLICATION", "ANNOUNCEMENT", "BOOST"
     val referenceId: String = "",
+    @field:PropertyName("isRead")
     @get:PropertyName("isRead")
     @set:PropertyName("isRead")
     var isRead: Boolean = false,

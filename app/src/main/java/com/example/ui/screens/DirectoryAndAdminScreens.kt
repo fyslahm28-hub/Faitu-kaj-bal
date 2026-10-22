@@ -12,6 +12,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,13 +59,16 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -655,10 +665,22 @@ private data class ConversationSummary(
     val partnerName: String,
     val partnerPhotoUrl: String,
     val isPartnerOnline: Boolean,
+    val isPartnerTyping: Boolean,
     val partnerLastSeenAt: Timestamp?,
     val latestMessage: DirectMessage,
     val unreadCount: Int
 )
+
+private fun isPartnerCurrentlyTypingToMe(
+    partnerProfile: UserProfile?,
+    currentUserId: String
+): Boolean {
+    if (partnerProfile == null || currentUserId.isBlank()) return false
+    if (partnerProfile.typingToUserId != currentUserId) return false
+    val updatedAt = partnerProfile.typingUpdatedAt ?: return true
+    val ageMillis = System.currentTimeMillis() - updatedAt.toDate().time
+    return ageMillis <= 15_000L
+}
 
 @Composable
 fun MessagesScreen(
@@ -673,6 +695,7 @@ fun MessagesScreen(
     onClearRecipient: () -> Unit = {},
     onMarkRead: (String) -> Unit,
     onMarkConversationRead: (String) -> Unit = {},
+    onTypingStatusChanged: (targetUserId: String, isTyping: Boolean) -> Unit = { _, _ -> },
     onInspectUserProfile: (String, String) -> Unit = { _, _ -> }
 ) {
     var receiverId by remember(targetUser) { mutableStateOf(targetUser?.first.orEmpty()) }
@@ -680,8 +703,14 @@ fun MessagesScreen(
     var subject by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
 
+    // Strictly deduplicate messages by id so the same message is never counted twice
     val allMessages = remember(messagesState) {
-        (messagesState as? UiState.Success)?.data ?: emptyList()
+        val raw = (messagesState as? UiState.Success)?.data ?: emptyList()
+        raw.distinctBy { msg ->
+            msg.id.ifBlank {
+                "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.createdAt?.nanoseconds ?: 0}_${msg.body}"
+            }
+        }
     }
 
     val totalUnreadMessagesCount = remember(allMessages, currentUserId) {
@@ -696,24 +725,32 @@ fun MessagesScreen(
             }
             .filterKeys { it.isNotBlank() && it != currentUserId }
             .map { (partnerId, msgs) ->
-                val sortedDesc = msgs.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                val uniqueMsgs = msgs.distinctBy { msg ->
+                    msg.id.ifBlank {
+                        "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.createdAt?.nanoseconds ?: 0}_${msg.body}"
+                    }
+                }
+                val sortedDesc = uniqueMsgs.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
                 val latest = sortedDesc.first()
                 val liveProfile = partnerProfiles[partnerId]
-                val fallbackName = msgs.firstNotNullOfOrNull { m ->
+                val fallbackName = uniqueMsgs.firstNotNullOfOrNull { m ->
                     if (m.senderId == partnerId) m.senderName.takeIf { it.isNotBlank() }
                     else m.receiverName.takeIf { it.isNotBlank() }
                 } ?: "সম্মানিত দ্বীনি ভাই"
-                val fallbackPhoto = msgs.firstNotNullOfOrNull { m ->
+                val fallbackPhoto = uniqueMsgs.firstNotNullOfOrNull { m ->
                     if (m.senderId == partnerId) m.senderPhotoUrl.takeIf { it.isNotBlank() } else null
                 }.orEmpty()
 
-                val unreadFromPartner = msgs.count { it.senderId == partnerId && it.receiverId == currentUserId && !it.isRead }
+                val unreadFromPartner = uniqueMsgs.count {
+                    it.senderId == partnerId && it.receiverId == currentUserId && !it.isRead
+                }
 
                 ConversationSummary(
                     partnerId = partnerId,
                     partnerName = liveProfile?.fullName?.takeIf { it.isNotBlank() } ?: fallbackName,
                     partnerPhotoUrl = liveProfile?.photoUrl?.takeIf { it.isNotBlank() } ?: fallbackPhoto,
                     isPartnerOnline = liveProfile?.isOnline == true,
+                    isPartnerTyping = isPartnerCurrentlyTypingToMe(liveProfile, currentUserId),
                     partnerLastSeenAt = liveProfile?.lastSeenAt,
                     latestMessage = latest,
                     unreadCount = unreadFromPartner
@@ -737,13 +774,40 @@ fun MessagesScreen(
     }
 
     // Automatically mark unread incoming messages in the open conversation as read
-    LaunchedEffect(receiverId, activeConversationMessages.size) {
+    val unreadInActiveChatCount = remember(activeConversationMessages, receiverId, currentUserId) {
+        if (receiverId.isBlank()) 0
+        else activeConversationMessages.count {
+            it.senderId == receiverId && it.receiverId == currentUserId && !it.isRead
+        }
+    }
+
+    LaunchedEffect(receiverId, unreadInActiveChatCount) {
+        if (receiverId.isNotBlank() && unreadInActiveChatCount > 0) {
+            activeConversationMessages
+                .filter { it.senderId == receiverId && it.receiverId == currentUserId && !it.isRead && it.id.isNotBlank() }
+                .forEach { unreadMsg -> onMarkRead(unreadMsg.id) }
+            onMarkConversationRead(receiverId)
+        }
+    }
+
+    // Real-time typing status broadcast to Firestore with auto-timeout
+    LaunchedEffect(receiverId, body) {
         if (receiverId.isNotBlank()) {
-            val hasUnread = activeConversationMessages.any {
-                it.senderId == receiverId && it.receiverId == currentUserId && !it.isRead
+            if (body.isNotBlank()) {
+                onTypingStatusChanged(receiverId, true)
+                delay(2500L)
+                onTypingStatusChanged(receiverId, false)
+            } else {
+                onTypingStatusChanged(receiverId, false)
             }
-            if (hasUnread) {
-                onMarkConversationRead(receiverId)
+        }
+    }
+
+    DisposableEffect(receiverId) {
+        val activeReceiver = receiverId
+        onDispose {
+            if (activeReceiver.isNotBlank()) {
+                onTypingStatusChanged(activeReceiver, false)
             }
         }
     }
@@ -753,8 +817,11 @@ fun MessagesScreen(
         ?: receiverName.ifBlank { "সম্মানিত প্রাপক" }
     val resolvedPartnerPhoto = resolvedPartnerProfile?.photoUrl.orEmpty()
     val isPartnerOnline = resolvedPartnerProfile?.isOnline == true
-    val partnerStatusText = remember(isPartnerOnline, resolvedPartnerProfile?.lastSeenAt) {
-        if (isPartnerOnline) {
+    val isPartnerTyping = isPartnerCurrentlyTypingToMe(resolvedPartnerProfile, currentUserId)
+    val partnerStatusText = remember(isPartnerTyping, isPartnerOnline, resolvedPartnerProfile?.lastSeenAt) {
+        if (isPartnerTyping) {
+            "টাইপ করছেন… • • •"
+        } else if (isPartnerOnline) {
             "অনলাইন (এখন সক্রিয়)"
         } else if (resolvedPartnerProfile?.lastSeenAt != null) {
             "অফলাইন • সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(resolvedPartnerProfile.lastSeenAt)}"
@@ -766,7 +833,7 @@ fun MessagesScreen(
     val chatListState = rememberLazyListState()
 
     // Automatically scroll to the latest message when opening a conversation or receiving/sending a new message
-    LaunchedEffect(receiverId, activeConversationMessages.size) {
+    LaunchedEffect(receiverId, activeConversationMessages.size, isPartnerTyping) {
         if (receiverId.isNotBlank() && activeConversationMessages.isNotEmpty()) {
             chatListState.scrollToItem(activeConversationMessages.lastIndex)
         }
@@ -774,6 +841,9 @@ fun MessagesScreen(
 
     // Back button inside an active conversation returns to the Inbox thread list
     BackHandler(enabled = receiverId.isNotBlank()) {
+        if (receiverId.isNotBlank()) {
+            onTypingStatusChanged(receiverId, false)
+        }
         receiverId = ""
         receiverName = ""
         onClearRecipient()
@@ -783,6 +853,7 @@ fun MessagesScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(QawmiSoftBg)
+            .imePadding()
             .testTag("messages_screen")
     ) {
         if (receiverId.isNotBlank()) {
@@ -853,7 +924,7 @@ fun MessagesScreen(
                             Text(
                                 text = partnerStatusText,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
+                                color = if (isPartnerTyping || isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 modifier = Modifier.testTag("active_partner_presence_text")
@@ -1029,7 +1100,15 @@ fun MessagesScreen(
                 }
             }
 
-            // 3. STICKY BOTTOM TEXT MESSAGE COMPOSER BAR
+            // 2.5 REAL-TIME MESSENGER-STYLE TYPING INDICATOR BUBBLE
+            if (isPartnerTyping) {
+                MessengerTypingIndicatorBubble(
+                    partnerName = resolvedPartnerName,
+                    partnerPhotoUrl = resolvedPartnerPhoto
+                )
+            }
+
+            // 3. STICKY BOTTOM TEXT MESSAGE COMPOSER BAR (Directly above keyboard)
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1047,7 +1126,9 @@ fun MessagesScreen(
                 ) {
                     OutlinedTextField(
                         value = body,
-                        onValueChange = { body = it },
+                        onValueChange = { newText ->
+                            body = newText
+                        },
                         placeholder = { Text("আপনার পয়গাম / মেসেজ লিখুন...") },
                         modifier = Modifier
                             .weight(1f)
@@ -1058,8 +1139,10 @@ fun MessagesScreen(
                     Button(
                         onClick = {
                             if (body.isNotBlank()) {
-                                onSendMessage(receiverId, resolvedPartnerName, subject, body)
+                                val messageToSend = body
                                 body = ""
+                                onTypingStatusChanged(receiverId, false)
+                                onSendMessage(receiverId, resolvedPartnerName, subject, messageToSend)
                             }
                         },
                         enabled = !isSubmitting && body.isNotBlank(),
@@ -1172,13 +1255,6 @@ fun MessagesScreen(
                                 items(conversationThreads, key = { it.partnerId }) { thread ->
                                     val latestMsg = thread.latestMessage
                                     val isLatestSentByMe = latestMsg.senderId == currentUserId
-                                    val presenceBadge = if (thread.isPartnerOnline) {
-                                        "অনলাইন"
-                                    } else if (thread.partnerLastSeenAt != null) {
-                                        "সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(thread.partnerLastSeenAt)}"
-                                    } else {
-                                        "অফলাইন"
-                                    }
 
                                     Card(
                                         modifier = Modifier
@@ -1241,21 +1317,38 @@ fun MessagesScreen(
                                                     )
                                                 }
 
+                                                val presenceBadge = if (thread.isPartnerTyping) {
+                                                    "টাইপ করছেন… • • •"
+                                                } else if (thread.isPartnerOnline) {
+                                                    "অনলাইন"
+                                                } else if (thread.partnerLastSeenAt != null) {
+                                                    "সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(thread.partnerLastSeenAt)}"
+                                                } else {
+                                                    "অফলাইন"
+                                                }
+
                                                 Text(
                                                     text = presenceBadge,
                                                     style = MaterialTheme.typography.labelSmall,
-                                                    color = if (thread.isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
+                                                    color = if (thread.isPartnerTyping || thread.isPartnerOnline) Color(0xFF1B5E20) else QawmiTextMuted,
                                                     fontSize = 10.5.sp,
-                                                    fontWeight = if (thread.isPartnerOnline) FontWeight.Bold else FontWeight.Normal
+                                                    fontWeight = if (thread.isPartnerTyping || thread.isPartnerOnline) FontWeight.Bold else FontWeight.Normal,
+                                                    modifier = Modifier.testTag("thread_presence_${thread.partnerId}")
                                                 )
 
                                                 Spacer(modifier = Modifier.height(3.dp))
 
                                                 Text(
-                                                    text = if (isLatestSentByMe) "আপনি: ${latestMsg.body}" else latestMsg.body,
+                                                    text = if (thread.isPartnerTyping) {
+                                                        "টাইপ করছেন… • • •"
+                                                    } else if (isLatestSentByMe) {
+                                                        "আপনি: ${latestMsg.body}"
+                                                    } else {
+                                                        latestMsg.body
+                                                    },
                                                     style = MaterialTheme.typography.bodyMedium,
-                                                    color = QawmiTextDark,
-                                                    fontWeight = if (thread.unreadCount > 0) FontWeight.Bold else FontWeight.Normal,
+                                                    color = if (thread.isPartnerTyping) QawmiDeepGreen else QawmiTextDark,
+                                                    fontWeight = if (thread.unreadCount > 0 || thread.isPartnerTyping) FontWeight.Bold else FontWeight.Normal,
                                                     maxLines = 2
                                                 )
 
@@ -1296,6 +1389,97 @@ fun MessagesScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessengerTypingIndicatorBubble(
+    partnerName: String,
+    partnerPhotoUrl: String
+) {
+    var activeDotIndex by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(400L)
+            activeDotIndex = (activeDotIndex + 1) % 3
+        }
+    }
+    val dot1Alpha = if (activeDotIndex == 0) 1f else 0.35f
+    val dot2Alpha = if (activeDotIndex == 1) 1f else 0.35f
+    val dot3Alpha = if (activeDotIndex == 2) 1f else 0.35f
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF4FAF7))
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .testTag("typing_indicator_bubble"),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        UserAvatarImage(
+            photoUrl = partnerPhotoUrl,
+            displayName = partnerName,
+            size = 24.dp,
+            borderColor = Color(0xFF00C853),
+            borderWidth = 1.dp,
+            showOnlineIndicator = false
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Surface(
+            shape = RoundedCornerShape(
+                topStart = 14.dp,
+                topEnd = 14.dp,
+                bottomStart = 3.dp,
+                bottomEnd = 14.dp
+            ),
+            color = Color.White,
+            shadowElevation = 1.dp,
+            modifier = Modifier.border(
+                width = 1.dp,
+                color = QawmiMintBorder,
+                shape = RoundedCornerShape(
+                    topStart = 14.dp,
+                    topEnd = 14.dp,
+                    bottomStart = 3.dp,
+                    bottomEnd = 14.dp
+                )
+            )
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .alpha(dot1Alpha)
+                        .clip(CircleShape)
+                        .background(QawmiDeepGreen)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .alpha(dot2Alpha)
+                        .clip(CircleShape)
+                        .background(QawmiDeepGreen)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .alpha(dot3Alpha)
+                        .clip(CircleShape)
+                        .background(QawmiDeepGreen)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "$partnerName টাইপ করছেন…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = QawmiDeepGreen,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }

@@ -172,13 +172,26 @@ class QawmiRepository(
 
     // --- 1. USER PROFILE, PHOTO & REAL-TIME PRESENCE (ONLINE / LAST SEEN) ---
 
+    private fun DocumentSnapshot.toUserProfileOrNull(): UserProfile? {
+        val obj = toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
+        val resolvedOnline = getBoolean("isOnline") ?: obj.isOnline
+        val resolvedVerified = getBoolean("isVerified") ?: obj.isVerified
+        val resolvedTypingTo = getString("typingToUserId") ?: obj.typingToUserId
+        return obj.copy(
+            id = id,
+            isOnline = resolvedOnline,
+            isVerified = resolvedVerified,
+            typingToUserId = resolvedTypingTo
+        )
+    }
+
     fun observeUserProfile(userId: String): Flow<UserProfile?> {
         val path = "users/$userId"
         return db.collection("users").document(userId)
             .snapshots()
             .map { snapshot ->
                 if (snapshot.exists()) {
-                    snapshot.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    snapshot.toUserProfileOrNull()
                 } else {
                     null
                 }
@@ -194,7 +207,7 @@ class QawmiRepository(
         return try {
             val snap = db.collection("users").document(userId).get().await()
             if (snap.exists()) {
-                snap.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snap.toUserProfileOrNull()
             } else {
                 null
             }
@@ -362,13 +375,15 @@ class QawmiRepository(
         return try {
             val snap = docRef.get().await()
             if (snap.exists()) {
-                docRef.update(
-                    mapOf(
-                        "isOnline" to isOnline,
-                        "lastSeenAt" to FieldValue.serverTimestamp(),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
+                val updates = mutableMapOf<String, Any>(
+                    "isOnline" to isOnline,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                if (!isOnline) {
+                    updates["typingToUserId"] = ""
+                }
+                docRef.update(updates).await()
             } else {
                 val payload = mapOf(
                     "userId" to uid,
@@ -385,6 +400,7 @@ class QawmiRepository(
                     "photoUrl" to "",
                     "isOnline" to isOnline,
                     "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "typingToUserId" to "",
                     "isVerified" to false,
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -396,6 +412,63 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateTypingStatus(
+        targetUserId: String,
+        isTyping: Boolean,
+        defaultFullName: String = "সম্মানিত দ্বীনি ভাই"
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val resolvedTarget = if (isTyping && targetUserId.isNotBlank() && targetUserId != uid) targetUserId else ""
+        val docRef = db.collection("users").document(uid)
+        return try {
+            val snap = docRef.get().await()
+            if (snap.exists()) {
+                val existingTyping = snap.getString("typingToUserId").orEmpty()
+                if (!isTyping && existingTyping.isEmpty()) {
+                    return Result.success(Unit)
+                }
+                docRef.update(
+                    mapOf(
+                        "typingToUserId" to resolvedTarget,
+                        "typingUpdatedAt" to FieldValue.serverTimestamp(),
+                        "isOnline" to true,
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else if (isTyping) {
+                val payload = mapOf(
+                    "userId" to uid,
+                    "fullName" to defaultFullName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" },
+                    "accountType" to "khadim",
+                    "district" to "",
+                    "designation" to "",
+                    "qualification" to "",
+                    "experience" to "",
+                    "preferredDistricts" to "",
+                    "bio" to "",
+                    "contactInfo" to "",
+                    "madrasaName" to "",
+                    "photoUrl" to "",
+                    "isOnline" to true,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "typingToUserId" to resolvedTarget,
+                    "typingUpdatedAt" to FieldValue.serverTimestamp(),
+                    "isVerified" to false,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(payload).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
             Result.failure(e)
         }
     }
@@ -899,12 +972,23 @@ class QawmiRepository(
 
     // --- 6. DIRECT MESSAGING (মেসেজিং ও মুযাকারা) ---
 
+    private fun DocumentSnapshot.toDirectMessageOrNull(): DirectMessage? {
+        val obj = toObject(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
+        val resolvedIsRead = getBoolean("isRead") ?: getBoolean("read") ?: obj.isRead
+        return obj.copy(
+            id = id,
+            isRead = resolvedIsRead
+        )
+    }
+
     fun observeUserMessages(userId: String): Flow<List<DirectMessage>> {
         val path = "messages"
         val sentFlow = db.collection(path)
             .whereEqualTo("senderId", userId)
             .snapshots()
-            .map { it.toObjects(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
+            }
             .catch { error ->
                 if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
                 throw error
@@ -913,14 +997,18 @@ class QawmiRepository(
         val receivedFlow = db.collection(path)
             .whereEqualTo("receiverId", userId)
             .snapshots()
-            .map { it.toObjects(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
+            }
             .catch { error ->
                 if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
                 throw error
             }
 
         return combine(sentFlow, receivedFlow) { sent, received ->
-            (sent + received)
+            // Merge received first so receiver's read state is authoritative, and deduplicate strictly by document id
+            (received + sent)
+                .filter { it.id.isNotBlank() }
                 .distinctBy { it.id }
                 .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
         }
@@ -938,14 +1026,16 @@ class QawmiRepository(
         if (receiverId.isBlank() || receiverId == uid) {
             return Result.failure(IllegalArgumentException("নিজের অ্যাকাউন্টে মেসেজ পাঠানো যাবে না।"))
         }
+        val safeSenderName = senderName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }
+        val safeReceiverName = receiverName.trim().ifBlank { "সম্মানিত প্রাপক" }
         val docRef = db.collection("messages").document()
         return try {
             val payload = mapOf(
                 "senderId" to uid,
-                "senderName" to senderName.trim(),
+                "senderName" to safeSenderName,
                 "senderPhotoUrl" to senderPhotoUrl.trim(),
                 "receiverId" to receiverId,
-                "receiverName" to receiverName.trim(),
+                "receiverName" to safeReceiverName,
                 "subject" to subject.trim(),
                 "body" to body.trim(),
                 "isRead" to false,
@@ -953,11 +1043,17 @@ class QawmiRepository(
             )
             docRef.set(payload).await()
 
+            // Clear typing status immediately upon sending a message
+            try {
+                updateTypingStatus(targetUserId = "", isTyping = false, defaultFullName = safeSenderName)
+            } catch (_: Exception) {
+            }
+
             if (receiverId.isNotBlank() && receiverId != uid) {
                 createNotification(
                     recipientId = receiverId,
-                    senderName = senderName.trim(),
-                    title = "নতুন পয়গাম: ${senderName.trim()}",
+                    senderName = safeSenderName,
+                    title = "নতুন পয়গাম: $safeSenderName",
                     message = body.trim().take(120),
                     type = "MESSAGE",
                     referenceId = docRef.id
@@ -974,6 +1070,7 @@ class QawmiRepository(
 
     suspend fun markMessageAsRead(messageId: String): Result<Unit> {
         requireUserId()
+        if (messageId.isBlank()) return Result.success(Unit)
         val docRef = db.collection("messages").document(messageId)
         return try {
             docRef.update("isRead", true).await()
@@ -988,17 +1085,34 @@ class QawmiRepository(
 
     suspend fun markConversationMessagesAsRead(otherUserId: String, messages: List<DirectMessage>): Result<Unit> {
         val uid = requireUserId()
-        val unreadFromPartner = messages.filter {
-            it.senderId == otherUserId && it.receiverId == uid && !it.isRead && it.id.isNotBlank()
-        }
-        if (unreadFromPartner.isEmpty()) return Result.success(Unit)
+        if (otherUserId.isBlank() || otherUserId == uid) return Result.success(Unit)
+
+        val unreadIds = messages
+            .filter { it.senderId == otherUserId && it.receiverId == uid && !it.isRead && it.id.isNotBlank() }
+            .map { it.id }
+            .toMutableSet()
 
         return try {
-            val batch = db.batch()
-            for (msg in unreadFromPartner) {
-                batch.update(db.collection("messages").document(msg.id), "isRead", true)
+            // Also verify against Firestore directly in case messagesState had not finished emitting when called
+            val receivedSnap = db.collection("messages")
+                .whereEqualTo("receiverId", uid)
+                .get()
+                .await()
+            for (doc in receivedSnap.documents) {
+                val docSender = doc.getString("senderId").orEmpty()
+                val docRead = doc.getBoolean("isRead") ?: doc.getBoolean("read") ?: false
+                if (docSender == otherUserId && !docRead && doc.id.isNotBlank()) {
+                    unreadIds.add(doc.id)
+                }
             }
-            batch.commit().await()
+
+            if (unreadIds.isNotEmpty()) {
+                val batch = db.batch()
+                for (msgId in unreadIds) {
+                    batch.update(db.collection("messages").document(msgId), "isRead", true)
+                }
+                batch.commit().await()
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

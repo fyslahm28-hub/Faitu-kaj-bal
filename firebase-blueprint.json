@@ -28,6 +28,8 @@
         "photoUrl": { "type": "string", "required": false },
         "isOnline": { "type": "boolean", "required": false },
         "lastSeenAt": { "type": "timestamp", "required": false },
+        "typingToUserId": { "type": "string", "required": false },
+        "typingUpdatedAt": { "type": "timestamp", "required": false },
         "isVerified": { "type": "boolean", "required": true },
         "createdAt": { "type": "timestamp", "required": true },
         "updatedAt": { "type": "timestamp", "required": true }

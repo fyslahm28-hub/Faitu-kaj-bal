@@ -15,9 +15,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -76,6 +78,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -184,9 +187,14 @@ fun MainAppScaffold(
     }
 
     val unreadDirectMessagesCount = remember(messagesState, viewModel.currentUserId) {
-        (messagesState as? UiState.Success)?.data?.count {
+        val list = (messagesState as? UiState.Success)?.data ?: emptyList()
+        list.distinctBy { msg ->
+            msg.id.ifBlank {
+                "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.createdAt?.nanoseconds ?: 0}_${msg.body}"
+            }
+        }.count {
             it.receiverId == viewModel.currentUserId && !it.isRead
-        } ?: 0
+        }
     }
 
     LaunchedEffect(notificationsState, viewModel.currentUserId) {
@@ -418,6 +426,11 @@ fun MainAppScaffold(
             MainDestination.PROFILE
         )
 
+        val density = LocalDensity.current
+        val isKeyboardOpen = WindowInsets.ime.getBottom(density) > 0
+        val hideBottomBarForActiveChatKeyboard =
+            currentDestination == MainDestination.MESSAGES && isKeyboardOpen
+
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             containerColor = QawmiSoftBg,
@@ -433,16 +446,18 @@ fun MainAppScaffold(
                 )
             },
             bottomBar = {
-                QawmiBottomNavBar(
-                    currentDestination = currentDestination,
-                    unreadMessagesCount = unreadDirectMessagesCount,
-                    onTabSelected = { tab ->
-                        if (tab == MainDestination.FEED) {
-                            viewModel.setFeedFilter(FeedFilterTab.ALL)
+                if (!hideBottomBarForActiveChatKeyboard) {
+                    QawmiBottomNavBar(
+                        currentDestination = currentDestination,
+                        unreadMessagesCount = unreadDirectMessagesCount,
+                        onTabSelected = { tab ->
+                            if (tab == MainDestination.FEED) {
+                                viewModel.setFeedFilter(FeedFilterTab.ALL)
+                            }
+                            viewModel.navigateBottomTab(tab)
                         }
-                        viewModel.navigateBottomTab(tab)
-                    }
-                )
+                    )
+                }
             }
         ) { innerPadding ->
             Column(
@@ -717,6 +732,9 @@ fun MainAppScaffold(
                                 onClearRecipient = { viewModel.clearMessageTarget() },
                                 onMarkRead = { msgId -> viewModel.markMessageRead(msgId) },
                                 onMarkConversationRead = { partnerUid -> viewModel.markConversationRead(partnerUid) },
+                                onTypingStatusChanged = { targetUid, isTyping ->
+                                    viewModel.setTypingStatus(targetUid, isTyping)
+                                },
                                 onInspectUserProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) }
                             )
                         }
@@ -952,15 +970,16 @@ private fun BottomNavItem(
                 if (badgeCount > 0) {
                     Box(
                         modifier = Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .background( Color(0xFFC62828) )
+                            .defaultMinSize(minWidth = 16.dp, minHeight = 16.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0xFFC62828))
+                            .padding(horizontal = 4.dp)
                             .testTag("${testTag}_badge"),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = IslamicDateAndPrayerHelper.toBanglaDigits(
-                                if (badgeCount > 9) "9+" else badgeCount.toString()
+                                if (badgeCount > 99) "99+" else badgeCount.toString()
                             ),
                             color = Color.White,
                             fontSize = 9.sp,

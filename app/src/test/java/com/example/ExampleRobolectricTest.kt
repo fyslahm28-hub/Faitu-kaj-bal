@@ -12,20 +12,26 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.Work
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.model.DirectMessage
 import com.example.data.model.UserProfile
 import com.example.ui.screens.DrawerMenuItem
 import com.example.ui.screens.MessagesScreen
+import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.PublicUserProfileDialog
 import com.example.ui.screens.QawmiBottomNavBar
 import com.example.ui.theme.MyApplicationTheme
@@ -237,4 +243,237 @@ class ExampleRobolectricTest {
         // Viewing another user's profile shows the "পয়গাম / মেসেজ পাঠান" button
         composeTestRule.onNodeWithTag("public_profile_message_button").assertIsDisplayed()
     }
+
+    @Test
+    fun `ProfileScreen closes edit form after saving and reopens when clicking Edit button`() {
+        var savedProfile by mutableStateOf(
+            UserProfile(
+                id = "user_me",
+                fullName = "মাওলানা আব্দুল্লাহ",
+                accountType = "khadim",
+                district = "ঢাকা",
+                designation = "মুহাদ্দিস",
+                qualification = "দাওরায়ে হাদীস",
+                experience = "৫ বছর",
+                preferredDistricts = "ঢাকা, গাজীপুর",
+                bio = "ইলমে হাদীসের খেদমতে নিয়োজিত",
+                contactInfo = "01700000000",
+                madrasaName = "জামিয়া রাহমানিয়া"
+            )
+        )
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(900.dp)) {
+                    ProfileScreen(
+                        userProfileState = UiState.Success(savedProfile),
+                        currentUserId = "user_me",
+                        currentUserDisplayName = savedProfile.fullName,
+                        currentUserEmail = "abdullah@example.com",
+                        feedPostsState = UiState.Success(emptyList()),
+                        mySentSubmissionsState = UiState.Success(emptyList()),
+                        receivedSubmissionsState = UiState.Success(emptyList()),
+                        bookmarksState = UiState.Success(emptyList()),
+                        isSubmitting = false,
+                        onUpdatePhotoImmediately = {},
+                        onViewPostDetail = {},
+                        onDeleteOwnPost = {},
+                        onNavigate = {},
+                        onSaveProfile = { name, type, dist, desig, qual, exp, pref, bio, phone, madrasa, photoUrl ->
+                            savedProfile = savedProfile.copy(
+                                fullName = name,
+                                accountType = type,
+                                district = dist,
+                                designation = desig,
+                                qualification = qual,
+                                experience = exp,
+                                preferredDistricts = pref,
+                                bio = bio,
+                                contactInfo = phone,
+                                madrasaName = madrasa,
+                                photoUrl = photoUrl
+                            )
+                        }
+                    )
+                }
+            }
+        }
+
+        // Initially edit form is closed; only saved profile info and "এডিট করুন" button are shown
+        composeTestRule.onNodeWithTag("profile_edit_form_card").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("toggle_edit_profile_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("এডিট করুন").assertIsDisplayed()
+
+        // Click "এডিট করুন" to open all fields for editing
+        composeTestRule.onNodeWithTag("toggle_edit_profile_button").performClick()
+        composeTestRule.onNodeWithTag("profile_edit_form_card").assertExists()
+
+        // Update name and district, then click Save
+        composeTestRule.onNodeWithTag("profile_name_input").performScrollTo().performTextReplacement("মুফতি আব্দুল্লাহ আল মামুন")
+        composeTestRule.onNodeWithTag("profile_district_input").performScrollTo().performTextReplacement("সিলেট")
+        composeTestRule.onNodeWithTag("save_profile_button").performScrollTo().performClick()
+
+        // Form must close immediately after saving, and updated info is preserved
+        composeTestRule.onNodeWithTag("profile_edit_form_card").assertDoesNotExist()
+        assertEquals("মুফতি আব্দুল্লাহ আল মামুন", savedProfile.fullName)
+        assertEquals("সিলেট", savedProfile.district)
+        composeTestRule.onNodeWithTag("toggle_edit_profile_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("এডিট করুন").assertIsDisplayed()
+
+        // Clicking "এডিট করুন" again reopens the form
+        composeTestRule.onNodeWithTag("toggle_edit_profile_button").performClick()
+        composeTestRule.onNodeWithTag("profile_edit_form_card").assertExists()
+    }
+
+    @Test
+    fun `Unread message count updates accurately for 1 2 3 messages deduplicates IDs and hides badge at 0`() {
+        var messagesList by mutableStateOf(
+            listOf(
+                // Duplicate ID msg_1 included twice to verify deduplication
+                DirectMessage(
+                    id = "msg_1",
+                    senderId = "partner_1",
+                    senderName = "মাওলানা কারীম",
+                    receiverId = "user_me",
+                    receiverName = "আমি",
+                    body = "প্রথম অপঠিত মেসেজ",
+                    isRead = false,
+                    createdAt = Timestamp(1700000100L, 0)
+                ),
+                DirectMessage(
+                    id = "msg_1",
+                    senderId = "partner_1",
+                    senderName = "মাওলানা কারীম",
+                    receiverId = "user_me",
+                    receiverName = "আমি",
+                    body = "প্রথম অপঠিত মেসেজ",
+                    isRead = false,
+                    createdAt = Timestamp(1700000100L, 0)
+                ),
+                DirectMessage(
+                    id = "msg_2",
+                    senderId = "partner_1",
+                    senderName = "মাওলানা কারীম",
+                    receiverId = "user_me",
+                    receiverName = "আমি",
+                    body = "দ্বিতীয় অপঠিত মেসেজ",
+                    isRead = false,
+                    createdAt = Timestamp(1700000200L, 0)
+                ),
+                DirectMessage(
+                    id = "msg_3",
+                    senderId = "partner_2",
+                    senderName = "জামিয়া ইসলামিয়া",
+                    receiverId = "user_me",
+                    receiverName = "আমি",
+                    body = "তৃতীয় অপঠিত মেসেজ",
+                    isRead = false,
+                    createdAt = Timestamp(1700000300L, 0)
+                )
+            )
+        )
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                val uniqueUnread = messagesList.distinctBy { it.id }.count { it.receiverId == "user_me" && !it.isRead }
+                Column(modifier = Modifier.width(400.dp).height(700.dp)) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        MessagesScreen(
+                            messagesState = UiState.Success(messagesList),
+                            currentUserId = "user_me",
+                            targetUser = null,
+                            isSubmitting = false,
+                            onSendMessage = { _, _, _, _ -> },
+                            onSelectRecipient = { _, _ -> },
+                            onMarkRead = {},
+                            onMarkConversationRead = {}
+                        )
+                    }
+                    QawmiBottomNavBar(
+                        currentDestination = MainDestination.MESSAGES,
+                        unreadMessagesCount = uniqueUnread,
+                        onTabSelected = {}
+                    )
+                }
+            }
+        }
+
+        // 3 distinct unread messages -> shows "৩ অপঠিত" and "৩" in bottom nav badge
+        composeTestRule.onNodeWithTag("unread_messages_count_badge").assertIsDisplayed()
+        composeTestRule.onNodeWithText("৩ অপঠিত").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("bottom_nav_messages_badge", useUnmergedTree = true).assertIsDisplayed()
+
+        // Mark 1 message read -> 2 unread remaining ("২ অপঠিত")
+        messagesList = messagesList.map { if (it.id == "msg_1") it.copy(isRead = true) else it }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("২ অপঠিত").assertIsDisplayed()
+
+        // Mark second message read -> 1 unread remaining ("১ অপঠিত")
+        messagesList = messagesList.map { if (it.id == "msg_2") it.copy(isRead = true) else it }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("১ অপঠিত").assertIsDisplayed()
+
+        // Mark all messages read -> 0 unread, badges disappear completely
+        messagesList = messagesList.map { it.copy(isRead = true) }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("unread_messages_count_badge").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("bottom_nav_messages_badge", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun `MessagesScreen shows real-time typing indicator when partner is typing and hides when stopped or sent`() {
+        var partnerProfileState by mutableStateOf(
+            UserProfile(
+                id = "partner_1",
+                fullName = "মুফতি মাহমুদ",
+                isOnline = true,
+                typingToUserId = "user_me",
+                typingUpdatedAt = Timestamp.now()
+            )
+        )
+        val typingEvents = mutableListOf<Pair<String, Boolean>>()
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(400.dp).height(640.dp)) {
+                    MessagesScreen(
+                        messagesState = UiState.Success(emptyList()),
+                        currentUserId = "user_me",
+                        targetUser = "partner_1" to "মুফতি মাহমুদ",
+                        partnerProfiles = mapOf("partner_1" to partnerProfileState),
+                        activePartnerProfile = partnerProfileState,
+                        isSubmitting = false,
+                        onSendMessage = { _, _, _, _ -> },
+                        onSelectRecipient = { _, _ -> },
+                        onClearRecipient = {},
+                        onMarkRead = {},
+                        onMarkConversationRead = {},
+                        onTypingStatusChanged = { targetUid, isTyping ->
+                            typingEvents.add(targetUid to isTyping)
+                        }
+                    )
+                }
+            }
+        }
+
+        // Partner is typing -> typing indicator bubble and header status are displayed
+        composeTestRule.onNodeWithTag("typing_indicator_bubble").assertIsDisplayed()
+        composeTestRule.onNodeWithText("মুফতি মাহমুদ টাইপ করছেন…").assertIsDisplayed()
+        composeTestRule.onNodeWithText("টাইপ করছেন… • • •").assertIsDisplayed()
+
+        // Partner stops typing -> indicator disappears immediately
+        partnerProfileState = partnerProfileState.copy(typingToUserId = "")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("typing_indicator_bubble").assertDoesNotExist()
+
+        // Current user types a message -> broadcasts typing = true, then sends -> broadcasts typing = false
+        composeTestRule.onNodeWithTag("message_body_input").performTextInput("আসসালামু আলাইকুম")
+        composeTestRule.waitForIdle()
+        assertTrue(typingEvents.contains("partner_1" to true))
+
+        composeTestRule.onNodeWithTag("send_message_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("partner_1" to false, typingEvents.last())
+    }
 }
+
