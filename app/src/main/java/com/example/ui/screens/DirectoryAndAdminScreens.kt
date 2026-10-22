@@ -1,8 +1,11 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +29,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -35,22 +40,30 @@ import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.MailOutline
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +71,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -79,6 +93,7 @@ import com.example.data.model.AppNotification
 import com.example.data.model.BookmarkItem
 import com.example.data.model.DirectMessage
 import com.example.data.model.FeedPost
+import com.example.data.model.IslamicReaction
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
 import com.example.ui.components.MadrasaThumbIllustration
@@ -682,10 +697,98 @@ private fun isPartnerCurrentlyTypingToMe(
     return ageMillis <= 15_000L
 }
 
+private data class ChatThemePalette(
+    val spec: String,
+    val titleBangla: String,
+    val subtitleBangla: String,
+    val chatBackgroundColor: Color,
+    val sentBubbleColor: Color,
+    val sentBubbleTextColor: Color,
+    val receivedBubbleColor: Color,
+    val headerAccentColor: Color
+)
+
+private val PresetChatThemes = listOf(
+    ChatThemePalette(
+        spec = "EMERALD_CLASSIC",
+        titleBangla = "সবুজ মিনার (ডিফল্ট আবহ)",
+        subtitleBangla = "ঐতিহ্যবাহী কওমি সবুজ ও প্রশান্তিময় সাদা",
+        chatBackgroundColor = Color(0xFFF4FAF7),
+        sentBubbleColor = Color(0xFF0A4D3C),
+        sentBubbleTextColor = Color.White,
+        receivedBubbleColor = Color.White,
+        headerAccentColor = Color(0xFF0A4D3C)
+    ),
+    ChatThemePalette(
+        spec = "ROYAL_GOLD",
+        titleBangla = "সোনালী নূর ও গম্বুজ",
+        subtitleBangla = "মার্জিত সোনালী আভা ও গাঢ় বাদামি-সবুজ",
+        chatBackgroundColor = Color(0xFFFDF8EE),
+        sentBubbleColor = Color(0xFF5C4308),
+        sentBubbleTextColor = Color.White,
+        receivedBubbleColor = Color(0xFFFFFDF9),
+        headerAccentColor = Color(0xFF7A590B)
+    ),
+    ChatThemePalette(
+        spec = "MIDNIGHT_HILAL",
+        titleBangla = "রাতের হিলাল ও প্রশান্তি",
+        subtitleBangla = "স্নিগ্ধ নীলচে-ধূসর ও গভীর নীল পয়গাম বক্স",
+        chatBackgroundColor = Color(0xFFEEF3F8),
+        sentBubbleColor = Color(0xFF163A5F),
+        sentBubbleTextColor = Color.White,
+        receivedBubbleColor = Color.White,
+        headerAccentColor = Color(0xFF163A5F)
+    ),
+    ChatThemePalette(
+        spec = "DESERT_SAND",
+        titleBangla = "মরুভূমির উষ্ণ আবহ",
+        subtitleBangla = "আরবীয় মরুর কোমল বালুকা ও খেজুর রঙ",
+        chatBackgroundColor = Color(0xFFFAF3EB),
+        sentBubbleColor = Color(0xFF6D3B24),
+        sentBubbleTextColor = Color.White,
+        receivedBubbleColor = Color.White,
+        headerAccentColor = Color(0xFF6D3B24)
+    )
+)
+
+private fun parseHexColorSafe(hex: String, fallback: Color): Color {
+    val clean = hex.trim().removePrefix("#")
+    if (clean.length != 6) return fallback
+    val rgb = clean.toLongOrNull(16) ?: return fallback
+    return Color(0xFF000000L or rgb)
+}
+
+private fun resolveChatThemePalette(spec: String?): ChatThemePalette {
+    val trimmed = spec?.trim().orEmpty()
+    if (trimmed.startsWith("CUSTOM:", ignoreCase = true)) {
+        val parts = trimmed.substringAfter(":").split("|")
+        val bgHex = parts.getOrNull(0).orEmpty()
+        val bubbleHex = parts.getOrNull(1).orEmpty()
+        val accentHex = parts.getOrNull(2).orEmpty().ifBlank { bubbleHex }
+        val bgColor = parseHexColorSafe(bgHex, Color(0xFFF2F7F5))
+        val bubbleColor = parseHexColorSafe(bubbleHex, Color(0xFF0A4D3C))
+        val accentColor = parseHexColorSafe(accentHex, bubbleColor)
+        return ChatThemePalette(
+            spec = trimmed,
+            titleBangla = "কাস্টম আবহ",
+            subtitleBangla = "আপনার নির্বাচিত কাস্টম রঙের কথোপকথন আবহ",
+            chatBackgroundColor = bgColor,
+            sentBubbleColor = bubbleColor,
+            sentBubbleTextColor = Color.White,
+            receivedBubbleColor = Color.White,
+            headerAccentColor = accentColor
+        )
+    }
+    return PresetChatThemes.find { it.spec.equals(trimmed, ignoreCase = true) }
+        ?: PresetChatThemes.first()
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessagesScreen(
     messagesState: UiState<List<DirectMessage>>,
     currentUserId: String,
+    currentUserProfile: UserProfile? = null,
     targetUser: Pair<String, String>?,
     partnerProfiles: Map<String, UserProfile> = emptyMap(),
     activePartnerProfile: UserProfile? = null,
@@ -696,21 +799,77 @@ fun MessagesScreen(
     onMarkRead: (String) -> Unit,
     onMarkConversationRead: (String) -> Unit = {},
     onTypingStatusChanged: (targetUserId: String, isTyping: Boolean) -> Unit = { _, _ -> },
-    onInspectUserProfile: (String, String) -> Unit = { _, _ -> }
+    onInspectUserProfile: (String, String) -> Unit = { _, _ -> },
+    onReactToMessage: (DirectMessage, String) -> Unit = { _, _ -> },
+    onEditMessage: (DirectMessage, String) -> Unit = { _, _ -> },
+    onDeleteMessageForMe: (DirectMessage) -> Unit = {},
+    onDeleteMessageForEveryone: (DirectMessage) -> Unit = {},
+    onToggleBlockUser: (targetUserId: String, block: Boolean) -> Unit = { _, _ -> },
+    onSaveConversationTheme: (partnerUserId: String, themeSpec: String) -> Unit = { _, _ -> }
 ) {
     var receiverId by remember(targetUser) { mutableStateOf(targetUser?.first.orEmpty()) }
     var receiverName by remember(targetUser) { mutableStateOf(targetUser?.second.orEmpty()) }
     var subject by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
 
-    // Strictly deduplicate messages by id so the same message is never counted twice
-    val allMessages = remember(messagesState) {
+    // State for Long-Press Message Action Sheet, Edit Dialog, 3-Dot Menu, and Theme Picker
+    var selectedMessageForAction by remember { mutableStateOf<DirectMessage?>(null) }
+    var messageBeingEdited by remember { mutableStateOf<DirectMessage?>(null) }
+    var editedBodyText by remember { mutableStateOf("") }
+    var showThreeDotMenu by remember { mutableStateOf(false) }
+    var showThemePickerDialog by remember { mutableStateOf(false) }
+
+    // Optimistic local state for immediate UI responsiveness during tests and real-time updates
+    var localThemeOverrides by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var localBlockOverrides by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    var locallyDeletedForMeIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var localReactionOverrides by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var localEditedBodies by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var locallyDeletedForEveryoneIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // Strictly deduplicate messages by id and filter out messages deleted for the current user
+    val allMessages = remember(
+        messagesState,
+        currentUserId,
+        locallyDeletedForMeIds,
+        localReactionOverrides,
+        localEditedBodies,
+        locallyDeletedForEveryoneIds
+    ) {
         val raw = (messagesState as? UiState.Success)?.data ?: emptyList()
-        raw.distinctBy { msg ->
-            msg.id.ifBlank {
-                "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.createdAt?.nanoseconds ?: 0}_${msg.body}"
+        raw
+            .filterNot { msg ->
+                locallyDeletedForMeIds.contains(msg.id) ||
+                    (msg.senderId == currentUserId && msg.deletedForSender) ||
+                    (msg.receiverId == currentUserId && msg.deletedForReceiver)
             }
-        }
+            .distinctBy { msg ->
+                msg.id.ifBlank {
+                    "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.createdAt?.nanoseconds ?: 0}_${msg.body}"
+                }
+            }
+            .map { msg ->
+                var updated = msg
+                localReactionOverrides[msg.id]?.let { reaction ->
+                    updated = if (msg.senderId == currentUserId) {
+                        updated.copy(senderReaction = reaction)
+                    } else {
+                        updated.copy(receiverReaction = reaction)
+                    }
+                }
+                localEditedBodies[msg.id]?.let { newBody ->
+                    updated = updated.copy(body = newBody, isEdited = true)
+                }
+                if (locallyDeletedForEveryoneIds.contains(msg.id)) {
+                    updated = updated.copy(
+                        body = "এই পয়গামটি প্রত্যাহার করা হয়েছে",
+                        isDeletedForEveryone = true,
+                        senderReaction = "",
+                        receiverReaction = ""
+                    )
+                }
+                updated
+            }
     }
 
     val totalUnreadMessagesCount = remember(allMessages, currentUserId) {
@@ -830,6 +989,21 @@ fun MessagesScreen(
         }
     }
 
+    // Resolve conversation theme (local override -> currentUserProfile -> partnerProfile -> default)
+    val activeThemeSpec = localThemeOverrides[receiverId]
+        ?: currentUserProfile?.chatThemes?.get(receiverId)
+        ?: resolvedPartnerProfile?.chatThemes?.get(currentUserId)
+        ?: "EMERALD_CLASSIC"
+    val activeThemePalette = remember(activeThemeSpec) {
+        resolveChatThemePalette(activeThemeSpec)
+    }
+
+    // Resolve block status (either blocked by current user or blocked by partner)
+    val isBlockedByMe = localBlockOverrides[receiverId]
+        ?: (receiverId.isNotBlank() && currentUserProfile?.blockedUserIds?.contains(receiverId) == true)
+    val isBlockedByPartner = receiverId.isNotBlank() &&
+        resolvedPartnerProfile?.blockedUserIds?.contains(currentUserId) == true
+
     val chatListState = rememberLazyListState()
 
     // Automatically scroll to the latest message when opening a conversation or receiving/sending a new message
@@ -849,19 +1023,433 @@ fun MessagesScreen(
         onClearRecipient()
     }
 
+    // Long-press Message Action & Islamic Reaction Dialog
+    selectedMessageForAction?.let { targetMsg ->
+        val isMyMessage = targetMsg.senderId == currentUserId
+        val myCurrentReaction = if (isMyMessage) targetMsg.senderReaction else targetMsg.receiverReaction
+        AlertDialog(
+            onDismissRequest = { selectedMessageForAction = null },
+            modifier = Modifier.testTag("message_action_sheet"),
+            containerColor = Color.White,
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Column {
+                    Text(
+                        text = "পয়গাম পরিচালনা ও ইসলামিক অভিবাদন",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "সুন্দর দ্বীনি অভিবাদন জানান অথবা পয়গাম পরিচালনা করুন",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = QawmiTextSecondary
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (!targetMsg.isDeletedForEveryone) {
+                        Text(
+                            text = "ইসলামিক অভিবাদন ও দোয়া প্রতিক্রিয়া:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = QawmiTextDark,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        // 2 rows of 3 Islamic reactions so all 6 are immediately visible without horizontal scrolling
+                        val reactions = IslamicReaction.entries
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            reactions.chunked(3).forEach { rowItems ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    rowItems.forEach { reaction ->
+                                        val isSelected = myCurrentReaction == reaction.code
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = if (isSelected) QawmiMintSurface else Color(0xFFF7F9F8),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .border(
+                                                    width = if (isSelected) 1.5.dp else 1.dp,
+                                                    color = if (isSelected) QawmiDeepGreen else QawmiMintBorder,
+                                                    shape = RoundedCornerShape(12.dp)
+                                                )
+                                                .clickable {
+                                                    val newCode = if (isSelected) "" else reaction.code
+                                                    if (targetMsg.id.isNotBlank()) {
+                                                        localReactionOverrides = localReactionOverrides + (targetMsg.id to newCode)
+                                                    }
+                                                    onReactToMessage(targetMsg, newCode)
+                                                    selectedMessageForAction = null
+                                                }
+                                                .testTag("reaction_chip_${reaction.code}")
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+                                                Text(text = reaction.emoji, fontSize = 18.sp)
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                Text(
+                                                    text = reaction.titleBangla,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = QawmiDeepGreen,
+                                                    fontWeight = FontWeight.Bold,
+                                                    textAlign = TextAlign.Center,
+                                                    maxLines = 1,
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalDivider(color = QawmiMintBorder)
+                    }
+
+                    // Edit option (strictly for sender when message is not retracted)
+                    if (isMyMessage && !targetMsg.isDeletedForEveryone) {
+                        OutlinedButton(
+                            onClick = {
+                                selectedMessageForAction = null
+                                messageBeingEdited = targetMsg
+                                editedBodyText = targetMsg.body
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("action_edit_message")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = null,
+                                tint = QawmiDeepGreen,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "পয়গাম সম্পাদনা করুন",
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    // Delete for Me (available for both sender and receiver)
+                    OutlinedButton(
+                        onClick = {
+                            if (targetMsg.id.isNotBlank()) {
+                                locallyDeletedForMeIds = locallyDeletedForMeIds + targetMsg.id
+                            }
+                            onDeleteMessageForMe(targetMsg)
+                            selectedMessageForAction = null
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("action_delete_for_me")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = null,
+                            tint = QawmiTextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "নিজের জন্য মুছুন (আমার ইনবক্স থেকে)",
+                            color = QawmiTextDark,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // Delete for Everyone (strictly for sender when not already retracted)
+                    if (isMyMessage && !targetMsg.isDeletedForEveryone) {
+                        Button(
+                            onClick = {
+                                if (targetMsg.id.isNotBlank()) {
+                                    locallyDeletedForEveryoneIds = locallyDeletedForEveryoneIds + targetMsg.id
+                                }
+                                onDeleteMessageForEveryone(targetMsg)
+                                selectedMessageForAction = null
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiAlertRed),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("action_delete_for_everyone")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "সবার জন্য পয়গাম প্রত্যাহার করুন",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedMessageForAction = null }) {
+                    Text("বন্ধ করুন", color = QawmiDeepGreen, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
+
+    // Message Edit Dialog
+    messageBeingEdited?.let { editingMsg ->
+        AlertDialog(
+            onDismissRequest = { messageBeingEdited = null },
+            modifier = Modifier.testTag("edit_message_dialog"),
+            containerColor = Color.White,
+            shape = RoundedCornerShape(18.dp),
+            title = {
+                Text(
+                    text = "পয়গাম সম্পাদনা করুন",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = QawmiDeepGreen,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "সম্পাদিত পয়গামটি প্রেরক ও প্রাপক উভয়ের কথোপকথনে সাথে সাথে আপডেট হবে।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = QawmiTextSecondary
+                    )
+                    OutlinedTextField(
+                        value = editedBodyText,
+                        onValueChange = { editedBodyText = it },
+                        label = { Text("সংশোধিত পয়গাম") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("edit_message_input"),
+                        maxLines = 5
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = editedBodyText.trim()
+                        if (trimmed.isNotBlank()) {
+                            if (editingMsg.id.isNotBlank()) {
+                                localEditedBodies = localEditedBodies + (editingMsg.id to trimmed)
+                            }
+                            onEditMessage(editingMsg, trimmed)
+                            messageBeingEdited = null
+                        }
+                    },
+                    enabled = editedBodyText.trim().isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                    modifier = Modifier.testTag("confirm_edit_message_button")
+                ) {
+                    Text("সংরক্ষণ করুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageBeingEdited = null }) {
+                    Text("বাতিল", color = QawmiTextSecondary)
+                }
+            }
+        )
+    }
+
+    // Conversation Theme & Custom Theme Picker Dialog
+    if (showThemePickerDialog && receiverId.isNotBlank()) {
+        var customBgHex by remember { mutableStateOf("#EEF7F2") }
+        var customBubbleHex by remember { mutableStateOf("#115E46") }
+        AlertDialog(
+            onDismissRequest = { showThemePickerDialog = false },
+            modifier = Modifier.testTag("chat_theme_picker_dialog"),
+            containerColor = Color.White,
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Column {
+                    Text(
+                        text = "কথোপকথনের আবহ ও থিম নির্বাচন",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "মনোরম ইসলামিক আবহ অথবা নিজস্ব কাস্টম রঙের থিম বেছে নিন",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = QawmiTextSecondary
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PresetChatThemes.forEach { preset ->
+                        val isCurrent = activeThemePalette.spec.equals(preset.spec, ignoreCase = true)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = preset.chatBackgroundColor,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(
+                                    width = if (isCurrent) 2.dp else 1.dp,
+                                    color = if (isCurrent) preset.sentBubbleColor else QawmiMintBorder,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .clickable {
+                                    localThemeOverrides = localThemeOverrides + (receiverId to preset.spec)
+                                    onSaveConversationTheme(receiverId, preset.spec)
+                                    showThemePickerDialog = false
+                                }
+                                .testTag("theme_option_${preset.spec}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = preset.titleBangla,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = preset.headerAccentColor,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = preset.subtitleBangla,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = QawmiTextSecondary,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .background(preset.sentBubbleColor)
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = QawmiMintBorder)
+
+                    Text(
+                        text = "কাস্টম থিম নির্মাতা (নিজস্ব রঙ নির্বাচন):",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        val customSwatches = listOf(
+                            "সবুজ-নূর" to ("#EAF6F0" to "#0D5C46"),
+                            "নীল-আসমান" to ("#EDF4FA" to "#1B4965"),
+                            "জয়তুন-স্বর্ণ" to ("#F7F5EB" to "#4A5D23")
+                        )
+                        customSwatches.forEachIndexed { idx, (label, pair) ->
+                            OutlinedButton(
+                                onClick = {
+                                    customBgHex = pair.first
+                                    customBubbleHex = pair.second
+                                },
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("custom_theme_preset_$idx")
+                            ) {
+                                Text(label, fontSize = 10.sp, color = QawmiDeepGreen, maxLines = 1)
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = customBgHex,
+                            onValueChange = { customBgHex = it },
+                            label = { Text("পটভূমি (#HEX)", fontSize = 11.sp) },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("custom_theme_bg_input")
+                        )
+                        OutlinedTextField(
+                            value = customBubbleHex,
+                            onValueChange = { customBubbleHex = it },
+                            label = { Text("পয়গাম বক্স (#HEX)", fontSize = 11.sp) },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("custom_theme_bubble_input")
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            val customSpec = "CUSTOM:${customBgHex.trim()}|${customBubbleHex.trim()}|${customBubbleHex.trim()}"
+                            localThemeOverrides = localThemeOverrides + (receiverId to customSpec)
+                            onSaveConversationTheme(receiverId, customSpec)
+                            showThemePickerDialog = false
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("apply_custom_theme_button")
+                    ) {
+                        Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("কাস্টম আবহ প্রয়োগ করুন")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showThemePickerDialog = false }) {
+                    Text("বন্ধ করুন", color = QawmiDeepGreen)
+                }
+            }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(QawmiSoftBg)
+            .background(activeThemePalette.chatBackgroundColor)
             .imePadding()
             .testTag("messages_screen")
     ) {
         if (receiverId.isNotBlank()) {
             // =========================================================================
             // ACTIVE CONVERSATION VIEW:
-            // 1. Fixed/Sticky Top Partner Profile Header
+            // 1. Fixed/Sticky Top Partner Profile Header + Three-Dot Menu
             // 2. Scrollable Middle Message List (Modifier.weight(1f))
-            // 3. Fixed/Sticky Bottom Text Message Composer Bar
+            // 3. Fixed/Sticky Bottom Text Message Composer Bar or Blocked Banner
             // =========================================================================
 
             // 1. STICKY TOP PARTNER HEADER
@@ -899,7 +1487,7 @@ fun MessagesScreen(
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "ইনবক্সে ফিরুন",
-                                tint = QawmiDeepGreen
+                                tint = activeThemePalette.headerAccentColor
                             )
                         }
                         Spacer(modifier = Modifier.width(4.dp))
@@ -917,7 +1505,7 @@ fun MessagesScreen(
                             Text(
                                 text = resolvedPartnerName,
                                 style = MaterialTheme.typography.titleSmall,
-                                color = QawmiDeepGreen,
+                                color = activeThemePalette.headerAccentColor,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1
                             )
@@ -933,7 +1521,7 @@ fun MessagesScreen(
                     }
 
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         OutlinedButton(
@@ -944,7 +1532,7 @@ fun MessagesScreen(
                                 .height(30.dp)
                                 .testTag("inspect_partner_profile_button")
                         ) {
-                            Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
+                            Text("প্রোফাইল", style = MaterialTheme.typography.labelSmall, color = activeThemePalette.headerAccentColor)
                         }
                         OutlinedButton(
                             onClick = {
@@ -960,6 +1548,88 @@ fun MessagesScreen(
                         ) {
                             Text("ইনবক্স", style = MaterialTheme.typography.labelSmall, color = QawmiTextSecondary)
                         }
+
+                        // Three-dot menu button for Conversation Theme & Block/Unblock
+                        Box {
+                            IconButton(
+                                onClick = { showThreeDotMenu = true },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("chat_three_dot_menu_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "কথোপকথন মেনু",
+                                    tint = activeThemePalette.headerAccentColor
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showThreeDotMenu,
+                                onDismissRequest = { showThreeDotMenu = false },
+                                modifier = Modifier
+                                    .background(Color.White)
+                                    .testTag("chat_three_dot_dropdown_menu")
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(
+                                                text = "কথোপকথনের আবহ ও থিম পরিবর্তন",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = QawmiDeepGreen,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = "বর্তমান: ${activeThemePalette.titleBangla}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = QawmiTextSecondary
+                                            )
+                                        }
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Palette,
+                                            contentDescription = null,
+                                            tint = QawmiDeepGreen
+                                        )
+                                    },
+                                    onClick = {
+                                        showThreeDotMenu = false
+                                        showThemePickerDialog = true
+                                    },
+                                    modifier = Modifier.testTag("menu_change_chat_theme")
+                                )
+                                HorizontalDivider(color = QawmiMintBorder)
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = if (isBlockedByMe) {
+                                                "যোগাযোগ পুনরায় চালু করুন (আনব্লক করুন)"
+                                            } else {
+                                                "যোগাযোগ বিরত রাখুন (ব্লক করুন)"
+                                            },
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = if (isBlockedByMe) QawmiDeepGreen else QawmiAlertRed,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Block,
+                                            contentDescription = null,
+                                            tint = if (isBlockedByMe) QawmiDeepGreen else QawmiAlertRed
+                                        )
+                                    },
+                                    onClick = {
+                                        val newBlockState = !isBlockedByMe
+                                        localBlockOverrides = localBlockOverrides + (receiverId to newBlockState)
+                                        onToggleBlockUser(receiverId, newBlockState)
+                                        showThreeDotMenu = false
+                                    },
+                                    modifier = Modifier.testTag("menu_toggle_block_user")
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -970,6 +1640,7 @@ fun MessagesScreen(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                        .background(activeThemePalette.chatBackgroundColor)
                         .padding(20.dp)
                         .testTag("conversation_messages_list"),
                     contentAlignment = Alignment.Center
@@ -988,13 +1659,13 @@ fun MessagesScreen(
                         Text(
                             text = "$resolvedPartnerName-এর সাথে কথোপকথন শুরু করুন",
                             style = MaterialTheme.typography.titleSmall,
-                            color = QawmiDeepGreen,
+                            color = activeThemePalette.headerAccentColor,
                             fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "নিচের বক্সে আপনার পয়গাম লিখে পাঠান। পাঠানো মেসেজ সাথে সাথে রিয়েল-টাইমে প্রাপকের ইনবক্সে পৌঁছে যাবে।",
+                            text = "নিচের বক্সে আপনার পয়গাম লিখে পাঠান। পাঠানো পয়গাম সাথে সাথে রিয়েল-টাইমে প্রাপকের ইনবক্সে পৌঁছে যাবে।",
                             style = MaterialTheme.typography.bodySmall,
                             color = QawmiTextSecondary,
                             textAlign = TextAlign.Center
@@ -1007,91 +1678,212 @@ fun MessagesScreen(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .background(Color(0xFFF4FAF7))
+                        .background(activeThemePalette.chatBackgroundColor)
                         .padding(horizontal = 12.dp)
                         .testTag("conversation_messages_list"),
                     contentPadding = PaddingValues(vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(
                         items = activeConversationMessages,
                         key = { msg -> msg.id.ifBlank { "${msg.senderId}_${msg.receiverId}_${msg.createdAt?.seconds ?: 0}_${msg.body.hashCode()}" } }
                     ) { chatMsg ->
                         val sentByMe = chatMsg.senderId == currentUserId
-                        Row(
+                        val senderReactionObj = IslamicReaction.fromCode(chatMsg.senderReaction)
+                        val receiverReactionObj = IslamicReaction.fromCode(chatMsg.receiverReaction)
+                        val activeReactions = listOfNotNull(
+                            senderReactionObj?.let { "প্রেরক" to it },
+                            receiverReactionObj?.let { "প্রাপক" to it }
+                        )
+
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("chat_message_item_${chatMsg.id}"),
-                            horizontalArrangement = if (sentByMe) Arrangement.End else Arrangement.Start,
-                            verticalAlignment = Alignment.Bottom
+                            horizontalAlignment = if (sentByMe) Alignment.End else Alignment.Start
                         ) {
-                            if (!sentByMe) {
-                                UserAvatarImage(
-                                    photoUrl = resolvedPartnerPhoto,
-                                    displayName = resolvedPartnerName,
-                                    size = 28.dp,
-                                    borderColor = QawmiMintBorder,
-                                    borderWidth = 1.dp,
-                                    modifier = Modifier.clickable {
-                                        onInspectUserProfile(receiverId, resolvedPartnerName)
-                                    }
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                            }
-                            Surface(
-                                shape = RoundedCornerShape(
-                                    topStart = 14.dp,
-                                    topEnd = 14.dp,
-                                    bottomStart = if (sentByMe) 14.dp else 3.dp,
-                                    bottomEnd = if (sentByMe) 3.dp else 14.dp
-                                ),
-                                color = if (sentByMe) QawmiDeepGreen else Color.White,
-                                shadowElevation = 1.dp,
-                                modifier = Modifier
-                                    .fillMaxWidth(0.82f)
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (sentByMe) QawmiDeepGreen else QawmiMintBorder,
-                                        shape = RoundedCornerShape(
-                                            topStart = 14.dp,
-                                            topEnd = 14.dp,
-                                            bottomStart = if (sentByMe) 14.dp else 3.dp,
-                                            bottomEnd = if (sentByMe) 3.dp else 14.dp
-                                        )
-                                    )
+                            Row(
+                                verticalAlignment = Alignment.Bottom,
+                                horizontalArrangement = if (sentByMe) Arrangement.End else Arrangement.Start
                             ) {
-                                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                                    if (chatMsg.subject.isNotBlank() && chatMsg.subject != "খেদমত সংক্রান্ত যোগাযোগ") {
-                                        Text(
-                                            text = "বিষয়: ${chatMsg.subject}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (sentByMe) QawmiGold else QawmiDeepGreen,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                    }
-                                    Text(
-                                        text = chatMsg.body,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = if (sentByMe) Color.White else QawmiTextDark
+                                if (!sentByMe) {
+                                    UserAvatarImage(
+                                        photoUrl = resolvedPartnerPhoto,
+                                        displayName = resolvedPartnerName,
+                                        size = 28.dp,
+                                        borderColor = QawmiMintBorder,
+                                        borderWidth = 1.dp,
+                                        modifier = Modifier.clickable {
+                                            onInspectUserProfile(receiverId, resolvedPartnerName)
+                                        }
                                     )
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.End,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = buildString {
-                                                append(IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt))
-                                                if (sentByMe) {
-                                                    append(if (chatMsg.isRead) " • ✓✓ পঠিত" else " • ✓ প্রেরিত")
-                                                }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(
+                                        topStart = 14.dp,
+                                        topEnd = 14.dp,
+                                        bottomStart = if (sentByMe) 14.dp else 3.dp,
+                                        bottomEnd = if (sentByMe) 3.dp else 14.dp
+                                    ),
+                                    color = if (chatMsg.isDeletedForEveryone) {
+                                        Color(0xFFECEFF1)
+                                    } else if (sentByMe) {
+                                        activeThemePalette.sentBubbleColor
+                                    } else {
+                                        activeThemePalette.receivedBubbleColor
+                                    },
+                                    shadowElevation = 1.dp,
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.82f)
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (chatMsg.isDeletedForEveryone) {
+                                                Color(0xFFCFD8DC)
+                                            } else if (sentByMe) {
+                                                activeThemePalette.sentBubbleColor
+                                            } else {
+                                                QawmiMintBorder
                                             },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontSize = 10.sp,
-                                            color = if (sentByMe) Color(0xFFDDF3EC) else QawmiTextMuted
+                                            shape = RoundedCornerShape(
+                                                topStart = 14.dp,
+                                                topEnd = 14.dp,
+                                                bottomStart = if (sentByMe) 14.dp else 3.dp,
+                                                bottomEnd = if (sentByMe) 3.dp else 14.dp
+                                            )
                                         )
+                                        .combinedClickable(
+                                            onClick = { },
+                                            onLongClick = { selectedMessageForAction = chatMsg }
+                                        )
+                                        .testTag("chat_message_bubble_${chatMsg.id}")
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.Top
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                if (chatMsg.subject.isNotBlank() && chatMsg.subject != "খেদমত সংক্রান্ত যোগাযোগ" && !chatMsg.isDeletedForEveryone) {
+                                                    Text(
+                                                        text = "বিষয়: ${chatMsg.subject}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (sentByMe) QawmiGold else activeThemePalette.headerAccentColor,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                    Spacer(modifier = Modifier.height(2.dp))
+                                                }
+                                                Text(
+                                                    text = if (chatMsg.isDeletedForEveryone) {
+                                                        "এই পয়গামটি প্রত্যাহার করা হয়েছে"
+                                                    } else {
+                                                        chatMsg.body
+                                                    },
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = if (chatMsg.isDeletedForEveryone) {
+                                                        QawmiTextMuted
+                                                    } else if (sentByMe) {
+                                                        activeThemePalette.sentBubbleTextColor
+                                                    } else {
+                                                        QawmiTextDark
+                                                    }
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { selectedMessageForAction = chatMsg },
+                                                modifier = Modifier
+                                                    .size(22.dp)
+                                                    .testTag("message_options_button_${chatMsg.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.MoreVert,
+                                                    contentDescription = "পয়গাম অপশন",
+                                                    tint = if (chatMsg.isDeletedForEveryone) {
+                                                        QawmiTextMuted
+                                                    } else if (sentByMe) {
+                                                        Color(0xFFDDF3EC)
+                                                    } else {
+                                                        QawmiTextMuted
+                                                    },
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            if (chatMsg.isEdited && !chatMsg.isDeletedForEveryone) {
+                                                Text(
+                                                    text = "সম্পাদিত • ",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = if (sentByMe) QawmiGold else activeThemePalette.headerAccentColor,
+                                                    modifier = Modifier.testTag("message_edited_badge_${chatMsg.id}")
+                                                )
+                                            }
+                                            Text(
+                                                text = buildString {
+                                                    append(IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt))
+                                                    if (sentByMe) {
+                                                        append(if (chatMsg.isRead) " • ✓✓ পঠিত" else " • ✓ প্রেরিত")
+                                                    }
+                                                },
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 10.sp,
+                                                color = if (chatMsg.isDeletedForEveryone) {
+                                                    QawmiTextMuted
+                                                } else if (sentByMe) {
+                                                    Color(0xFFDDF3EC)
+                                                } else {
+                                                    QawmiTextMuted
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Islamic Reaction Badges below the bubble (distinctive pill layout, not Messenger clone)
+                            if (activeReactions.isNotEmpty() && !chatMsg.isDeletedForEveryone) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .padding(horizontal = if (sentByMe) 4.dp else 34.dp)
+                                        .testTag("message_reactions_row_${chatMsg.id}")
+                                ) {
+                                    activeReactions.forEach { (_, reaction) ->
+                                        Surface(
+                                            shape = RoundedCornerShape(50),
+                                            color = Color.White,
+                                            shadowElevation = 1.dp,
+                                            modifier = Modifier
+                                                .border(1.dp, QawmiGold, RoundedCornerShape(50))
+                                                .clickable { selectedMessageForAction = chatMsg }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(text = reaction.emoji, fontSize = 12.sp)
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = reaction.titleBangla,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = activeThemePalette.headerAccentColor,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1100,64 +1892,119 @@ fun MessagesScreen(
                 }
             }
 
-            // 2.5 REAL-TIME MESSENGER-STYLE TYPING INDICATOR BUBBLE
-            if (isPartnerTyping) {
+            // 2.5 REAL-TIME TYPING INDICATOR BUBBLE
+            if (isPartnerTyping && !isBlockedByMe && !isBlockedByPartner) {
                 MessengerTypingIndicatorBubble(
                     partnerName = resolvedPartnerName,
                     partnerPhotoUrl = resolvedPartnerPhoto
                 )
             }
 
-            // 3. STICKY BOTTOM TEXT MESSAGE COMPOSER BAR (Directly above keyboard)
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(width = 1.dp, color = QawmiMintBorder)
-                    .testTag("sticky_chat_composer_bar"),
-                color = Color.White,
-                shadowElevation = 6.dp
-            ) {
-                Row(
+            // 3. STICKY BOTTOM TEXT MESSAGE COMPOSER BAR OR BLOCKED STATUS BANNER
+            if (isBlockedByMe || isBlockedByPartner) {
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .border(width = 1.dp, color = QawmiMintBorder)
+                        .testTag("blocked_conversation_banner"),
+                    color = Color(0xFFFFF8F6),
+                    shadowElevation = 6.dp
                 ) {
-                    OutlinedTextField(
-                        value = body,
-                        onValueChange = { newText ->
-                            body = newText
-                        },
-                        placeholder = { Text("আপনার পয়গাম / মেসেজ লিখুন...") },
+                    Row(
                         modifier = Modifier
-                            .weight(1f)
-                            .testTag("message_body_input"),
-                        maxLines = 4,
-                        shape = RoundedCornerShape(22.dp)
-                    )
-                    Button(
-                        onClick = {
-                            if (body.isNotBlank()) {
-                                val messageToSend = body
-                                body = ""
-                                onTypingStatusChanged(receiverId, false)
-                                onSendMessage(receiverId, resolvedPartnerName, subject, messageToSend)
-                            }
-                        },
-                        enabled = !isSubmitting && body.isNotBlank(),
-                        colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
-                        shape = RoundedCornerShape(50),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                        modifier = Modifier.testTag("send_message_button")
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "পয়গাম পাঠান",
-                            modifier = Modifier.size(18.dp)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isBlockedByMe) {
+                                    "আপনি এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান বিরত (ব্লক) রেখেছেন"
+                                } else {
+                                    "এই কথোপকথনে বর্তমানে পয়গাম প্রেরণ সীমাবদ্ধ রয়েছে"
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                                color = QawmiAlertRed,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (isBlockedByMe) {
+                                    "পুনরায় পয়গাম পাঠাতে নিচের আনব্লক বাটনে কিংবা উপরের থ্রি-ডট মেনুতে চাপ দিন।"
+                                } else {
+                                    "প্রাপক যোগাযোগ পুনরায় চালু করলে আপনি পয়গাম পাঠাতে পারবেন।"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = QawmiTextSecondary
+                            )
+                        }
+                        if (isBlockedByMe) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    localBlockOverrides = localBlockOverrides + (receiverId to false)
+                                    onToggleBlockUser(receiverId, false)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.testTag("unblock_partner_button")
+                            ) {
+                                Text("আনব্লক করুন", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                }
+            } else {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(width = 1.dp, color = QawmiMintBorder)
+                        .testTag("sticky_chat_composer_bar"),
+                    color = Color.White,
+                    shadowElevation = 6.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = body,
+                            onValueChange = { newText ->
+                                body = newText
+                            },
+                            placeholder = { Text("আপনার পয়গাম / মেসেজ লিখুন...") },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("message_body_input"),
+                            maxLines = 4,
+                            shape = RoundedCornerShape(22.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("পাঠান", fontWeight = FontWeight.Bold)
+                        Button(
+                            onClick = {
+                                if (body.isNotBlank()) {
+                                    val messageToSend = body
+                                    body = ""
+                                    onTypingStatusChanged(receiverId, false)
+                                    onSendMessage(receiverId, resolvedPartnerName, subject, messageToSend)
+                                }
+                            },
+                            enabled = !isSubmitting && body.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = activeThemePalette.sentBubbleColor),
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                            modifier = Modifier.testTag("send_message_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "পয়গাম পাঠান",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("পাঠান", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }

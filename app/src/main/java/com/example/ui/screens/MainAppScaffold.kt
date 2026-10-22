@@ -721,6 +721,7 @@ fun MainAppScaffold(
                             MessagesScreen(
                                 messagesState = messagesState,
                                 currentUserId = viewModel.currentUserId,
+                                currentUserProfile = (userProfileState as? UiState.Success)?.data,
                                 targetUser = messageTargetUser,
                                 partnerProfiles = chatPartnerProfiles,
                                 activePartnerProfile = activeChatPartnerProfile,
@@ -735,7 +736,13 @@ fun MainAppScaffold(
                                 onTypingStatusChanged = { targetUid, isTyping ->
                                     viewModel.setTypingStatus(targetUid, isTyping)
                                 },
-                                onInspectUserProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) }
+                                onInspectUserProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) },
+                                onReactToMessage = { msg, code -> viewModel.reactToMessage(msg, code) },
+                                onEditMessage = { msg, newBody -> viewModel.editMessage(msg, newBody) },
+                                onDeleteMessageForMe = { msg -> viewModel.deleteMessageForMe(msg) },
+                                onDeleteMessageForEveryone = { msg -> viewModel.deleteMessageForEveryone(msg) },
+                                onToggleBlockUser = { targetUid, block -> viewModel.toggleBlockUser(targetUid, block) },
+                                onSaveConversationTheme = { partnerUid, themeSpec -> viewModel.saveConversationTheme(partnerUid, themeSpec) }
                             )
                         }
 

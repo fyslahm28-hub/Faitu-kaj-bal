@@ -12,7 +12,7 @@
       }
     },
     "UserProfile": {
-      "description": "Authenticated user profile for Qawmi Madrasa teachers/seekers (Khadim) and Madrasa authorities (Muhtamim) with profile photo and real-time online/last-seen presence.",
+      "description": "Authenticated user profile for Qawmi Madrasa teachers/seekers (Khadim) and Madrasa authorities (Muhtamim) with profile photo, real-time online/last-seen/typing presence, blocked user IDs, and custom conversation themes.",
       "properties": {
         "userId": { "type": "string", "required": true },
         "fullName": { "type": "string", "required": true },
@@ -30,6 +30,8 @@
         "lastSeenAt": { "type": "timestamp", "required": false },
         "typingToUserId": { "type": "string", "required": false },
         "typingUpdatedAt": { "type": "timestamp", "required": false },
+        "blockedUserIds": { "type": "array", "required": false },
+        "chatThemes": { "type": "object", "required": false },
         "isVerified": { "type": "boolean", "required": true },
         "createdAt": { "type": "timestamp", "required": true },
         "updatedAt": { "type": "timestamp", "required": true }
@@ -113,7 +115,7 @@
       }
     },
     "DirectMessage": {
-      "description": "Direct message sent between Madrasa authorities and teachers/applicants.",
+      "description": "Direct message (Paygam) sent between Madrasa authorities and teachers/applicants, supporting Islamic reactions, message editing, and scoped deletion.",
       "properties": {
         "senderId": { "type": "string", "required": true },
         "senderName": { "type": "string", "required": true },
@@ -123,6 +125,13 @@
         "subject": { "type": "string", "required": true },
         "body": { "type": "string", "required": true },
         "isRead": { "type": "boolean", "required": true },
+        "senderReaction": { "type": "string", "required": false },
+        "receiverReaction": { "type": "string", "required": false },
+        "isEdited": { "type": "boolean", "required": false },
+        "editedAt": { "type": "timestamp", "required": false },
+        "deletedForSender": { "type": "boolean", "required": false },
+        "deletedForReceiver": { "type": "boolean", "required": false },
+        "isDeletedForEveryone": { "type": "boolean", "required": false },
         "createdAt": { "type": "timestamp", "required": true }
       }
     },
@@ -173,7 +182,7 @@
     {
       "path": "/users/{userId}",
       "entity": "UserProfile",
-      "access": "Authenticated users can read profiles; only the owner can create/update their own profile (admins can toggle isVerified)."
+      "access": "Authenticated users can read profiles; only the owner can create/update their own profile, blockedUserIds, and chatThemes (admins can toggle isVerified)."
     },
     {
       "path": "/users/{userId}/bookmarks/{bookmarkId}",
@@ -203,7 +212,7 @@
     {
       "path": "/messages/{messageId}",
       "entity": "DirectMessage",
-      "access": "Authenticated users can create messages where senderId == auth.uid; only sender or receiver can read; receiver can mark isRead."
+      "access": "Authenticated users can create messages where senderId == auth.uid and neither party has blocked the other; sender can edit body, react, delete-for-sender, or delete-for-everyone; receiver can mark isRead, react, or delete-for-receiver."
     },
     {
       "path": "/notifications/{notificationId}",

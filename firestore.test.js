@@ -204,3 +204,132 @@ test("Telegram notifications queue: regular users can enqueue event logs, only a
   }).firestore();
   await assertSucceeds(adminDb.collection("telegram_notifications").get());
 });
+
+test("DirectMessage: supports Islamic reactions, sender-only edit and delete-for-everyone, and per-user delete-for-me", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  const createdTs = nowDate();
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("msg_adv_1").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: BOB_UID,
+      receiverName: "জামিয়া দারুল উলুম",
+      subject: "খেদমত সংক্রান্ত যোগাযোগ",
+      body: "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ",
+      isRead: false,
+      createdAt: createdTs,
+    })
+  );
+
+  // Receiver (Bob) can add an Islamic reaction (DUA) and mark read
+  await assertSucceeds(
+    bobDb.collection("messages").doc("msg_adv_1").update({
+      isRead: true,
+      receiverReaction: "DUA",
+    })
+  );
+
+  // Receiver (Bob) CANNOT edit the message body or delete for everyone
+  await assertFails(
+    bobDb.collection("messages").doc("msg_adv_1").update({
+      body: "অননুমোদিত পরিবর্তন",
+      isEdited: true,
+    })
+  );
+  await assertFails(
+    bobDb.collection("messages").doc("msg_adv_1").update({
+      isDeletedForEveryone: true,
+    })
+  );
+
+  // Sender (Alice) can add her own Islamic reaction (DEENI_PRERONA) and edit her message
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("msg_adv_1").update({
+      body: "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহি ওয়া বারাকাতুহু",
+      isEdited: true,
+      editedAt: nowDate(),
+      senderReaction: "DEENI_PRERONA",
+    })
+  );
+
+  // Receiver (Bob) can delete for himself (deletedForReceiver)
+  await assertSucceeds(
+    bobDb.collection("messages").doc("msg_adv_1").update({
+      deletedForReceiver: true,
+    })
+  );
+
+  // Sender (Alice) can delete for everyone (isDeletedForEveryone)
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("msg_adv_1").update({
+      body: "এই পয়গামটি প্রত্যাহার করা হয়েছে",
+      isDeletedForEveryone: true,
+    })
+  );
+});
+
+test("Blocking & Chat Themes: blocking prevents sending messages in both directions until unblocked", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  const ts = nowDate();
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).set({
+      userId: BOB_UID,
+      fullName: "মুফতি মাহমুদ",
+      accountType: "muhtamim",
+      district: "ঢাকা",
+      designation: "মুহতামিম",
+      qualification: "দাওরায়ে হাদীস",
+      experience: "১০ বছর",
+      preferredDistricts: "ঢাকা",
+      bio: "",
+      contactInfo: "01700000000",
+      madrasaName: "জামিয়া রাহমানিয়া",
+      blockedUserIds: [ALICE_UID],
+      chatThemes: { [ALICE_UID]: "ROYAL_GOLD" },
+      isVerified: false,
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // While Bob has blocked Alice, Alice cannot send a message to Bob
+  await assertFails(
+    aliceDb.collection("messages").doc("msg_blocked_1").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: BOB_UID,
+      receiverName: "মুফতি মাহমুদ",
+      subject: "যোগাযোগ",
+      body: "ব্লক অবস্থায় পয়গাম",
+      isRead: false,
+      createdAt: nowDate(),
+    })
+  );
+
+  // Bob unblocks Alice
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).update({
+      blockedUserIds: [],
+      updatedAt: nowDate(),
+    })
+  );
+
+  // Now Alice can send a message to Bob
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("msg_unblocked_1").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: BOB_UID,
+      receiverName: "মুফতি মাহমুদ",
+      subject: "যোগাযোগ",
+      body: "আনব্লক করার পর পয়গাম",
+      isRead: false,
+      createdAt: nowDate(),
+    })
+  );
+});
+

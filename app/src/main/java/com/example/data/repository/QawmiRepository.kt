@@ -177,11 +177,25 @@ class QawmiRepository(
         val resolvedOnline = getBoolean("isOnline") ?: obj.isOnline
         val resolvedVerified = getBoolean("isVerified") ?: obj.isVerified
         val resolvedTypingTo = getString("typingToUserId") ?: obj.typingToUserId
+        val rawBlocked = (get("blockedUserIds") as? List<*>)
+            ?.mapNotNull { it as? String }
+            ?: obj.blockedUserIds
+        val rawThemes = (get("chatThemes") as? Map<*, *>)
+            ?.entries
+            ?.mapNotNull { (k, v) ->
+                val key = k as? String
+                val value = v as? String
+                if (key != null && value != null) key to value else null
+            }
+            ?.toMap()
+            ?: obj.chatThemes
         return obj.copy(
             id = id,
             isOnline = resolvedOnline,
             isVerified = resolvedVerified,
-            typingToUserId = resolvedTypingTo
+            typingToUserId = resolvedTypingTo,
+            blockedUserIds = rawBlocked,
+            chatThemes = rawThemes
         )
     }
 
@@ -975,9 +989,23 @@ class QawmiRepository(
     private fun DocumentSnapshot.toDirectMessageOrNull(): DirectMessage? {
         val obj = toObject(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
         val resolvedIsRead = getBoolean("isRead") ?: getBoolean("read") ?: obj.isRead
+        val resolvedSenderReaction = getString("senderReaction") ?: obj.senderReaction
+        val resolvedReceiverReaction = getString("receiverReaction") ?: obj.receiverReaction
+        val resolvedIsEdited = getBoolean("isEdited") ?: obj.isEdited
+        val resolvedEditedAt = getTimestamp("editedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: obj.editedAt
+        val resolvedDeletedForSender = getBoolean("deletedForSender") ?: obj.deletedForSender
+        val resolvedDeletedForReceiver = getBoolean("deletedForReceiver") ?: obj.deletedForReceiver
+        val resolvedDeletedForEveryone = getBoolean("isDeletedForEveryone") ?: obj.isDeletedForEveryone
         return obj.copy(
             id = id,
-            isRead = resolvedIsRead
+            isRead = resolvedIsRead,
+            senderReaction = resolvedSenderReaction,
+            receiverReaction = resolvedReceiverReaction,
+            isEdited = resolvedIsEdited,
+            editedAt = resolvedEditedAt,
+            deletedForSender = resolvedDeletedForSender,
+            deletedForReceiver = resolvedDeletedForReceiver,
+            isDeletedForEveryone = resolvedDeletedForEveryone
         )
     }
 
@@ -1030,6 +1058,27 @@ class QawmiRepository(
         val safeReceiverName = receiverName.trim().ifBlank { "সম্মানিত প্রাপক" }
         val docRef = db.collection("messages").document()
         return try {
+            // Check block status between sender and receiver before sending
+            val senderSnap = db.collection("users").document(uid).get().await()
+            val senderBlockedList = (senderSnap.get("blockedUserIds") as? List<*>)
+                ?.mapNotNull { it as? String }
+                .orEmpty()
+            if (receiverId in senderBlockedList) {
+                return Result.failure(
+                    IllegalStateException("আপনি এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান বিরত (ব্লক) রেখেছেন। পুনরায় পয়গাম পাঠাতে আনব্লক করুন।")
+                )
+            }
+
+            val receiverSnap = db.collection("users").document(receiverId).get().await()
+            val receiverBlockedList = (receiverSnap.get("blockedUserIds") as? List<*>)
+                ?.mapNotNull { it as? String }
+                .orEmpty()
+            if (uid in receiverBlockedList) {
+                return Result.failure(
+                    IllegalStateException("এই কথোপকথনে পয়গাম প্রেরণ বর্তমানে প্রাপক কর্তৃক সীমাবদ্ধ রয়েছে।")
+                )
+            }
+
             val payload = mapOf(
                 "senderId" to uid,
                 "senderName" to safeSenderName,
@@ -1118,6 +1167,261 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, "messages")
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Adds, updates, or toggles off an Islamic reaction (🤲 দোয়া, ❤️ ভালোবাসা, 🌙 চাঁদ, ✨ সুন্দর, 🕌 দ্বীনি অনুপ্রেরণা, 👍 সম্মতি)
+     * on a Paygam message. Real-time visible to both sender and receiver.
+     */
+    suspend fun reactToMessage(
+        message: DirectMessage,
+        reactionCode: String
+    ): Result<Unit> {
+        val uid = requireUserId()
+        if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
+        if (message.isDeletedForEveryone) {
+            return Result.failure(IllegalStateException("প্রত্যাহারকৃত পয়গামে অভিবাদন যুক্ত করা যাবে না।"))
+        }
+        val docRef = db.collection("messages").document(message.id)
+        return try {
+            val fieldToUpdate = when (uid) {
+                message.senderId -> "senderReaction"
+                message.receiverId -> "receiverReaction"
+                else -> return Result.failure(IllegalStateException("শুধুমাত্র কথোপকথনের পক্ষদ্বয় অভিবাদন যুক্ত করতে পারবেন।"))
+            }
+            val currentReaction = if (uid == message.senderId) message.senderReaction else message.receiverReaction
+            val nextReaction = if (currentReaction == reactionCode) "" else reactionCode
+            docRef.update(fieldToUpdate, nextReaction).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Edits the body of a Paygam message. Restricted strictly to the original sender.
+     * Both users see the updated message body and the 'সম্পাদিত' indicator in real time.
+     */
+    suspend fun editDirectMessage(
+        message: DirectMessage,
+        newBody: String
+    ): Result<Unit> {
+        val uid = requireUserId()
+        if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
+        if (uid != message.senderId) {
+            return Result.failure(IllegalStateException("শুধুমাত্র পয়গাম প্রেরক নিজের পয়গাম সম্পাদনা করতে পারবেন।"))
+        }
+        if (message.isDeletedForEveryone) {
+            return Result.failure(IllegalStateException("প্রত্যাহারকৃত পয়গাম সম্পাদনা করা যাবে না।"))
+        }
+        val trimmed = newBody.trim()
+        if (trimmed.isBlank()) {
+            return Result.failure(IllegalArgumentException("পয়গামের মূল বক্তব্য খালি রাখা যাবে না।"))
+        }
+        val docRef = db.collection("messages").document(message.id)
+        return try {
+            docRef.update(
+                mapOf(
+                    "body" to trimmed,
+                    "isEdited" to true,
+                    "editedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Deletes/hides a Paygam message only for the current user (নিজের জন্য মুছুন).
+     * Both sender and receiver can delete a message from their own view.
+     */
+    suspend fun deleteMessageForMe(message: DirectMessage): Result<Unit> {
+        val uid = requireUserId()
+        if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
+        val docRef = db.collection("messages").document(message.id)
+        return try {
+            val fieldToUpdate = when (uid) {
+                message.senderId -> "deletedForSender"
+                message.receiverId -> "deletedForReceiver"
+                else -> return Result.failure(IllegalStateException("অনুমোদনহীন অনুরোধ।"))
+            }
+            docRef.update(fieldToUpdate, true).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Recalls/deletes a Paygam message for everyone in the conversation (সবার জন্য প্রত্যাহার করুন).
+     * Strictly permitted only for the original sender (`uid == message.senderId`).
+     */
+    suspend fun deleteMessageForEveryone(message: DirectMessage): Result<Unit> {
+        val uid = requireUserId()
+        if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
+        if (uid != message.senderId) {
+            return Result.failure(IllegalStateException("শুধুমাত্র পয়গাম প্রেরক সবার জন্য পয়গাম প্রত্যাহার করতে পারবেন।"))
+        }
+        val docRef = db.collection("messages").document(message.id)
+        return try {
+            docRef.update(
+                mapOf(
+                    "body" to "এই পয়গামটি প্রত্যাহার করা হয়েছে",
+                    "isDeletedForEveryone" to true,
+                    "senderReaction" to ""
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Blocks or unblocks a conversation partner in Firestore.
+     * When blocked, message exchange between the two users is halted until unblocked.
+     */
+    suspend fun setBlockedUserStatus(
+        targetUserId: String,
+        block: Boolean,
+        defaultFullName: String = "সম্মানিত দ্বীনি ভাই"
+    ): Result<Boolean> {
+        val uid = requireUserId()
+        if (targetUserId.isBlank() || targetUserId == uid) {
+            return Result.failure(IllegalArgumentException("সঠিক ব্যবহারকারী নির্বাচন করুন।"))
+        }
+        val docRef = db.collection("users").document(uid)
+        return try {
+            val snap = docRef.get().await()
+            if (!snap.exists()) {
+                val initialBlocked = if (block) listOf(targetUserId) else emptyList()
+                val payload = mapOf(
+                    "userId" to uid,
+                    "fullName" to defaultFullName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" },
+                    "accountType" to "khadim",
+                    "district" to "",
+                    "designation" to "",
+                    "qualification" to "",
+                    "experience" to "",
+                    "preferredDistricts" to "",
+                    "bio" to "",
+                    "contactInfo" to "",
+                    "madrasaName" to "",
+                    "photoUrl" to "",
+                    "isOnline" to true,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "typingToUserId" to "",
+                    "blockedUserIds" to initialBlocked,
+                    "isVerified" to false,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(payload).await()
+            } else {
+                val currentBlocked = (snap.get("blockedUserIds") as? List<*>)
+                    ?.mapNotNull { it as? String }
+                    .orEmpty()
+                val updatedBlocked = if (block) {
+                    (currentBlocked + targetUserId).distinct()
+                } else {
+                    currentBlocked.filter { it != targetUserId }
+                }
+                docRef.update(
+                    mapOf(
+                        "blockedUserIds" to updatedBlocked,
+                        "typingToUserId" to "",
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(block)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Saves the selected preset or custom theme for a conversation partner in Firestore.
+     */
+    suspend fun updateConversationTheme(
+        partnerUserId: String,
+        themeSpec: String,
+        defaultFullName: String = "সম্মানিত দ্বীনি ভাই"
+    ): Result<String> {
+        val uid = requireUserId()
+        if (partnerUserId.isBlank()) {
+            return Result.failure(IllegalArgumentException("সঠিক কথোপকথন নির্বাচন করুন।"))
+        }
+        val safeTheme = themeSpec.trim().ifBlank { "EMERALD_CLASSIC" }
+        val docRef = db.collection("users").document(uid)
+        return try {
+            val snap = docRef.get().await()
+            if (!snap.exists()) {
+                val payload = mapOf(
+                    "userId" to uid,
+                    "fullName" to defaultFullName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" },
+                    "accountType" to "khadim",
+                    "district" to "",
+                    "designation" to "",
+                    "qualification" to "",
+                    "experience" to "",
+                    "preferredDistricts" to "",
+                    "bio" to "",
+                    "contactInfo" to "",
+                    "madrasaName" to "",
+                    "photoUrl" to "",
+                    "isOnline" to true,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "typingToUserId" to "",
+                    "chatThemes" to mapOf(partnerUserId to safeTheme),
+                    "isVerified" to false,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(payload).await()
+            } else {
+                val existingThemes = (snap.get("chatThemes") as? Map<*, *>)
+                    ?.entries
+                    ?.mapNotNull { (k, v) ->
+                        val key = k as? String
+                        val value = v as? String
+                        if (key != null && value != null) key to value else null
+                    }
+                    ?.toMap()
+                    .orEmpty()
+                    .toMutableMap()
+                existingThemes[partnerUserId] = safeTheme
+                docRef.update(
+                    mapOf(
+                        "chatThemes" to existingThemes,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(safeTheme)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
             Result.failure(e)
         }
     }

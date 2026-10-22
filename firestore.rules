@@ -29,6 +29,18 @@ service cloud.firestore {
       return ts is timestamp && ts <= request.time;
     }
 
+    function hasUserBlocked(blockerUid, targetUid) {
+      let path = /databases/$(database)/documents/users/$(blockerUid);
+      return exists(path) &&
+             ('blockedUserIds' in get(path).data) &&
+             get(path).data.blockedUserIds is list &&
+             (targetUid in get(path).data.blockedUserIds);
+    }
+
+    function isBlockedBetween(uid1, uid2) {
+      return hasUserBlocked(uid1, uid2) || hasUserBlocked(uid2, uid1);
+    }
+
     // Server-side Admin Role, Custom Claims & Authorized Admin Identity verification
     function isTokenVerifiedAdmin() {
       return isSignedIn() && (
@@ -87,6 +99,8 @@ service cloud.firestore {
              (!('lastSeenAt' in data) || data.lastSeenAt == null || isValidTimestamp(data.lastSeenAt)) &&
              (!('typingToUserId' in data) || (data.typingToUserId is string && data.typingToUserId.size() <= 128)) &&
              (!('typingUpdatedAt' in data) || data.typingUpdatedAt == null || isValidTimestamp(data.typingUpdatedAt)) &&
+             (!('blockedUserIds' in data) || (data.blockedUserIds is list && data.blockedUserIds.size() <= 200)) &&
+             (!('chatThemes' in data) || (data.chatThemes is map && data.chatThemes.size() <= 200)) &&
              data.isVerified is bool &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
@@ -167,6 +181,18 @@ service cloud.firestore {
              isValidTimestamp(data.updatedAt);
     }
 
+    function isValidReactionCode(code) {
+      return code is string && code.size() <= 40 && (
+        code == '' ||
+        code == 'DUA' ||
+        code == 'MUHABBAT' ||
+        code == 'HILAL' ||
+        code == 'SUNDOR' ||
+        code == 'DEENI_PRERONA' ||
+        code == 'SAMMATI'
+      );
+    }
+
     function isValidDirectMessage(data) {
       return data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
@@ -176,6 +202,13 @@ service cloud.firestore {
              data.subject is string && data.subject.size() <= 200 &&
              data.body is string && data.body.size() >= 1 && data.body.size() <= 1500 &&
              data.isRead is bool &&
+             (!('senderReaction' in data) || isValidReactionCode(data.senderReaction)) &&
+             (!('receiverReaction' in data) || isValidReactionCode(data.receiverReaction)) &&
+             (!('isEdited' in data) || data.isEdited is bool) &&
+             (!('editedAt' in data) || data.editedAt == null || isValidTimestamp(data.editedAt)) &&
+             (!('deletedForSender' in data) || data.deletedForSender is bool) &&
+             (!('deletedForReceiver' in data) || data.deletedForReceiver is bool) &&
+             (!('isDeletedForEveryone' in data) || data.isDeletedForEveryone is bool) &&
              isValidTimestamp(data.createdAt);
     }
 
@@ -271,7 +304,7 @@ service cloud.firestore {
                          'userId', 'fullName', 'accountType', 'district', 'designation',
                          'qualification', 'experience', 'preferredDistricts', 'bio',
                          'contactInfo', 'madrasaName', 'photoUrl', 'isOnline', 'lastSeenAt',
-                         'typingToUserId', 'typingUpdatedAt',
+                         'typingToUserId', 'typingUpdatedAt', 'blockedUserIds', 'chatThemes',
                          'isVerified', 'createdAt', 'updatedAt'
                        ]) &&
                        (incoming().isVerified == false || isAdmin()) &&
@@ -288,7 +321,8 @@ service cloud.firestore {
                             'fullName', 'accountType', 'district', 'designation',
                             'qualification', 'experience', 'preferredDistricts', 'bio',
                             'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
-                            'lastSeenAt', 'typingToUserId', 'typingUpdatedAt', 'updatedAt'
+                            'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
+                            'blockedUserIds', 'chatThemes', 'updatedAt'
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -495,7 +529,7 @@ service cloud.firestore {
       );
     }
 
-    // Direct Messages (মেসেজিং)
+    // Direct Messages (পয়গাম ও কথোপকথন)
     match /messages/{messageId} {
       allow get: if isSignedIn() && isValidId(messageId) && (
         existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid
@@ -507,6 +541,8 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        isValidId(messageId) &&
                        incoming().senderId == request.auth.uid &&
+                       incoming().receiverId != request.auth.uid &&
+                       !isBlockedBetween(incoming().senderId, incoming().receiverId) &&
                        incoming().isRead == false &&
                        incoming().keys().hasAll([
                          'senderId', 'senderName', 'receiverId', 'receiverName',
@@ -514,18 +550,38 @@ service cloud.firestore {
                        ]) &&
                        incoming().keys().hasOnly([
                          'senderId', 'senderName', 'senderPhotoUrl', 'receiverId', 'receiverName',
-                         'subject', 'body', 'isRead', 'createdAt'
+                         'subject', 'body', 'isRead', 'senderReaction', 'receiverReaction',
+                         'isEdited', 'editedAt', 'deletedForSender', 'deletedForReceiver',
+                         'isDeletedForEveryone', 'createdAt'
                        ]) &&
                        isValidDirectMessage(incoming());
 
       allow update: if isSignedIn() &&
                        isValidId(messageId) &&
-                       incoming().isRead is bool &&
                        incoming().senderId == existing().senderId &&
                        incoming().receiverId == existing().receiverId &&
                        incoming().createdAt == existing().createdAt &&
-                       request.auth.uid == existing().receiverId &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
+                       (!('senderReaction' in incoming()) || isValidReactionCode(incoming().senderReaction)) &&
+                       (!('receiverReaction' in incoming()) || isValidReactionCode(incoming().receiverReaction)) &&
+                       (!('isEdited' in incoming()) || incoming().isEdited is bool) &&
+                       (!('editedAt' in incoming()) || incoming().editedAt == null || isValidTimestamp(incoming().editedAt)) &&
+                       (!('deletedForSender' in incoming()) || incoming().deletedForSender is bool) &&
+                       (!('deletedForReceiver' in incoming()) || incoming().deletedForReceiver is bool) &&
+                       (!('isDeletedForEveryone' in incoming()) || incoming().isDeletedForEveryone is bool) && (
+                         (request.auth.uid == existing().receiverId &&
+                          incoming().isRead is bool &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'isRead', 'receiverReaction', 'deletedForReceiver'
+                          ])) ||
+                         (request.auth.uid == existing().senderId &&
+                          incoming().body is string &&
+                          incoming().body.size() >= 1 &&
+                          incoming().body.size() <= 1500 &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'body', 'isEdited', 'editedAt', 'senderReaction',
+                            'deletedForSender', 'isDeletedForEveryone'
+                          ]))
+                       );
 
       allow delete: if isSignedIn() && isValidId(messageId) && (
         existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid

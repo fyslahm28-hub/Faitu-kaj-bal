@@ -56,6 +56,8 @@ data class UserProfile(
     @ServerTimestamp val lastSeenAt: Timestamp? = null,
     val typingToUserId: String = "",
     @ServerTimestamp val typingUpdatedAt: Timestamp? = null,
+    val blockedUserIds: List<String> = emptyList(),
+    val chatThemes: Map<String, String> = emptyMap(),
     @field:PropertyName("isVerified")
     @get:PropertyName("isVerified")
     @set:PropertyName("isVerified")
@@ -161,8 +163,49 @@ data class DirectMessage(
     @get:PropertyName("isRead")
     @set:PropertyName("isRead")
     var isRead: Boolean = false,
+    val senderReaction: String = "",
+    val receiverReaction: String = "",
+    @field:PropertyName("isEdited")
+    @get:PropertyName("isEdited")
+    @set:PropertyName("isEdited")
+    var isEdited: Boolean = false,
+    @ServerTimestamp val editedAt: Timestamp? = null,
+    @field:PropertyName("deletedForSender")
+    @get:PropertyName("deletedForSender")
+    @set:PropertyName("deletedForSender")
+    var deletedForSender: Boolean = false,
+    @field:PropertyName("deletedForReceiver")
+    @get:PropertyName("deletedForReceiver")
+    @set:PropertyName("deletedForReceiver")
+    var deletedForReceiver: Boolean = false,
+    @field:PropertyName("isDeletedForEveryone")
+    @get:PropertyName("isDeletedForEveryone")
+    @set:PropertyName("isDeletedForEveryone")
+    var isDeletedForEveryone: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
+
+enum class IslamicReaction(
+    val code: String,
+    val emoji: String,
+    val banglaTitle: String
+) {
+    DUA("DUA", "🤲", "দোয়া"),
+    MUHABBAT("MUHABBAT", "❤️", "ভালোবাসা"),
+    HILAL("HILAL", "🌙", "চাঁদ"),
+    SUNDOR("SUNDOR", "✨", "সুন্দর"),
+    DEENI_PRERONA("DEENI_PRERONA", "🕌", "দ্বীনি অনুপ্রেরণা"),
+    SAMMATI("SAMMATI", "👍", "সম্মতি");
+
+    val titleBangla: String
+        get() = banglaTitle
+
+    companion object {
+        fun fromCode(code: String): IslamicReaction? {
+            return entries.firstOrNull { it.code == code }
+        }
+    }
+}
 
 @IgnoreExtraProperties
 data class AppNotification(

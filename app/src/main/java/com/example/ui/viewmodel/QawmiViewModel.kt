@@ -202,6 +202,10 @@ class QawmiViewModel(
     ) { list, locallyReadIds ->
         val deduplicated = list
             .filter { it.id.isNotBlank() }
+            .filterNot { msg ->
+                (msg.senderId == currentUserId && msg.deletedForSender) ||
+                    (msg.receiverId == currentUserId && msg.deletedForReceiver)
+            }
             .distinctBy { it.id }
             .map { msg ->
                 if (!msg.isRead && locallyReadIds.contains(msg.id)) {
@@ -697,6 +701,83 @@ class QawmiViewModel(
         }
         viewModelScope.launch {
             repository.markConversationMessagesAsRead(otherUserId, currentMessages)
+        }
+    }
+
+    fun reactToMessage(message: DirectMessage, reactionCode: String) {
+        viewModelScope.launch {
+            val result = repository.reactToMessage(message, reactionCode)
+            result.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "অভিবাদন যুক্ত করতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun editMessage(message: DirectMessage, newBody: String) {
+        val trimmed = newBody.trim()
+        if (trimmed.isBlank()) {
+            _errorBanner.value = "অনুগ্রহ করে পয়গামের কথা লিখুন।"
+            return
+        }
+        viewModelScope.launch {
+            val result = repository.editDirectMessage(message, trimmed)
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পয়গামটি সম্পাদিত হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "পয়গাম সম্পাদনা করতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun deleteMessageForMe(message: DirectMessage) {
+        viewModelScope.launch {
+            val result = repository.deleteMessageForMe(message)
+            result.onSuccess {
+                _feedbackBanner.value = "পয়গামটি আপনার কথোপকথন থেকে সরিয়ে দেওয়া হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "পয়গাম মুছতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun deleteMessageForEveryone(message: DirectMessage) {
+        viewModelScope.launch {
+            val result = repository.deleteMessageForEveryone(message)
+            result.onSuccess {
+                _feedbackBanner.value = "পয়গামটি উভয়ের কথোপকথন থেকে প্রত্যাহার করা হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "পয়গাম প্রত্যাহার করতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun toggleBlockUser(targetUserId: String, block: Boolean) {
+        if (targetUserId.isBlank() || targetUserId == currentUserId) return
+        viewModelScope.launch {
+            val defaultName = resolveActorDisplayName("সম্মানিত সদস্য")
+            val result = repository.setBlockedUserStatus(targetUserId, block, defaultName)
+            result.onSuccess {
+                _feedbackBanner.value = if (block) {
+                    "এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান বিরত (ব্লক) রাখা হয়েছে।"
+                } else {
+                    "আলহামদুলিল্লাহ, এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান পুনরায় চালু হয়েছে।"
+                }
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "ব্লক স্ট্যাটাস পরিবর্তন করতে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun saveConversationTheme(partnerUserId: String, themeSpec: String) {
+        if (partnerUserId.isBlank()) return
+        viewModelScope.launch {
+            val defaultName = resolveActorDisplayName("সম্মানিত সদস্য")
+            val result = repository.updateConversationTheme(partnerUserId, themeSpec, defaultName)
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, কথোপকথনের আবহ ও থিম সংরক্ষিত হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "থিম সংরক্ষণ করতে ত্রুটি হয়েছে।"
+            }
         }
     }
 

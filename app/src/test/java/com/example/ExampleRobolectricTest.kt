@@ -475,5 +475,175 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         assertEquals("partner_1" to false, typingEvents.last())
     }
+
+    @Test
+    @Config(qualifiers = "w420dp-h840dp")
+    fun `MessagesScreen supports Islamic reactions, message editing, scoped deletion, theme customization, and blocking`() {
+        var myProfile by mutableStateOf(
+            UserProfile(
+                id = "user_me",
+                fullName = "মাওলানা আব্দুল্লাহ"
+            )
+        )
+        var partnerProfile by mutableStateOf(
+            UserProfile(
+                id = "partner_1",
+                fullName = "মুফতি মাহমুদ",
+                isOnline = true
+            )
+        )
+        var messagesList by mutableStateOf(
+            listOf(
+                DirectMessage(
+                    id = "msg_sent_1",
+                    senderId = "user_me",
+                    senderName = "মাওলানা আব্দুল্লাহ",
+                    receiverId = "partner_1",
+                    receiverName = "মুফতি মাহমুদ",
+                    subject = "হাদিস দরস প্রসঙ্গে",
+                    body = "আসসালামু আলাইকুম, আগামীকাল দরস কখন শুরু হবে?"
+                ),
+                DirectMessage(
+                    id = "msg_received_2",
+                    senderId = "partner_1",
+                    senderName = "মুফতি মাহমুদ",
+                    receiverId = "user_me",
+                    receiverName = "মাওলানা আব্দুল্লাহ",
+                    subject = "হাদিস দরস প্রসঙ্গে",
+                    body = "ওয়া আলাইকুমুস সালাম, সকাল ৯টায় ইনশাআল্লাহ।"
+                )
+            )
+        )
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(760.dp)) {
+                    MessagesScreen(
+                        messagesState = UiState.Success(
+                            messagesList.filterNot { msg ->
+                                (msg.senderId == "user_me" && msg.deletedForSender) ||
+                                    (msg.receiverId == "user_me" && msg.deletedForReceiver)
+                            }
+                        ),
+                        currentUserId = "user_me",
+                        currentUserProfile = myProfile,
+                        targetUser = "partner_1" to "মুফতি মাহমুদ",
+                        partnerProfiles = mapOf("partner_1" to partnerProfile),
+                        activePartnerProfile = partnerProfile,
+                        isSubmitting = false,
+                        onSendMessage = { _, _, _, _ -> },
+                        onSelectRecipient = { _, _ -> },
+                        onClearRecipient = {},
+                        onMarkRead = {},
+                        onMarkConversationRead = {},
+                        onTypingStatusChanged = { _, _ -> },
+                        onReactToMessage = { msg, reactionCode ->
+                            messagesList = messagesList.map { item ->
+                                if (item.id == msg.id) {
+                                    if (item.senderId == "user_me") {
+                                        val next = if (item.senderReaction == reactionCode) "" else reactionCode
+                                        item.copy(senderReaction = next)
+                                    } else {
+                                        val next = if (item.receiverReaction == reactionCode) "" else reactionCode
+                                        item.copy(receiverReaction = next)
+                                    }
+                                } else item
+                            }
+                        },
+                        onEditMessage = { msg, newBody ->
+                            messagesList = messagesList.map { item ->
+                                if (item.id == msg.id) item.copy(body = newBody, isEdited = true) else item
+                            }
+                        },
+                        onDeleteMessageForMe = { msg ->
+                            messagesList = messagesList.map { item ->
+                                if (item.id == msg.id) {
+                                    if (item.senderId == "user_me") item.copy(deletedForSender = true)
+                                    else item.copy(deletedForReceiver = true)
+                                } else item
+                            }
+                        },
+                        onDeleteMessageForEveryone = { msg ->
+                            messagesList = messagesList.map { item ->
+                                if (item.id == msg.id) {
+                                    item.copy(
+                                        body = "এই পয়গামটি প্রত্যাহার করা হয়েছে",
+                                        isDeletedForEveryone = true,
+                                        senderReaction = "",
+                                        receiverReaction = ""
+                                    )
+                                } else item
+                            }
+                        },
+                        onToggleBlockUser = { partnerUid, block ->
+                            val updated = if (block) myProfile.blockedUserIds + partnerUid else myProfile.blockedUserIds - partnerUid
+                            myProfile = myProfile.copy(blockedUserIds = updated)
+                        },
+                        onSaveConversationTheme = { partnerUid, themeValue ->
+                            myProfile = myProfile.copy(chatThemes = myProfile.chatThemes + (partnerUid to themeValue))
+                        }
+                    )
+                }
+            }
+        }
+
+        // 1. Open message action sheet on received message and apply an Islamic reaction (DUA 🤲)
+        composeTestRule.onNodeWithTag("message_options_button_msg_received_2", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("message_action_sheet").assertIsDisplayed()
+        // Receiver cannot edit or delete for everyone on partner's message
+        composeTestRule.onNodeWithTag("action_edit_message").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("action_delete_for_everyone").assertDoesNotExist()
+
+        composeTestRule.onNodeWithTag("reaction_chip_DUA").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("message_reactions_row_msg_received_2", useUnmergedTree = true).assertIsDisplayed()
+
+        // 2. Open message action sheet on own sent message and edit it
+        composeTestRule.onNodeWithTag("message_options_button_msg_sent_1", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("action_edit_message").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("action_delete_for_everyone").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("action_edit_message").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("edit_message_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("edit_message_input").performTextReplacement("আসসালামু আলাইকুম, আগামীকাল সকাল ৮:৩০ মিনিটে দরস শুরু হবে?")
+        composeTestRule.onNodeWithTag("confirm_edit_message_button").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("আসসালামু আলাইকুম, আগামীকাল সকাল ৮:৩০ মিনিটে দরস শুরু হবে?").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("message_edited_badge_msg_sent_1", useUnmergedTree = true).assertIsDisplayed()
+
+        // 3. Retract own message for everyone
+        composeTestRule.onNodeWithTag("message_options_button_msg_sent_1", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("action_delete_for_everyone").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("এই পয়গামটি প্রত্যাহার করা হয়েছে").assertIsDisplayed()
+
+        // 4. Three-dot menu -> change conversation theme & block/unblock user
+        composeTestRule.onNodeWithTag("chat_three_dot_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("menu_change_chat_theme").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("chat_theme_picker_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("theme_option_ROYAL_GOLD").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("ROYAL_GOLD", myProfile.chatThemes["partner_1"])
+
+        // Block user from 3-dot menu
+        composeTestRule.onNodeWithTag("chat_three_dot_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("menu_toggle_block_user").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("blocked_conversation_banner").assertIsDisplayed()
+
+        // Unblock user via banner button
+        composeTestRule.onNodeWithTag("unblock_partner_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("blocked_conversation_banner").assertDoesNotExist()
+    }
 }
+
 
