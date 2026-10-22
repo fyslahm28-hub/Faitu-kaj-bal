@@ -100,3 +100,11 @@ jobs:
         with:
           name: Qawmi-Kormosangsthan-APK
           path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload APK to Firebase App Distribution
+        uses: wzieba/Firebase-Distribution-Github-Action@v1
+        with:
+          appId: ${{ secrets.FIREBASE_APP_ID }}
+          serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          file: app/build/outputs/apk/debug/app-debug.apk
+          releaseNotes: "Automatic build from GitHub Actions"
+          
