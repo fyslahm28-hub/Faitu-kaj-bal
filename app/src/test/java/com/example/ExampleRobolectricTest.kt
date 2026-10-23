@@ -947,9 +947,10 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithText("টেলিগ্রাম ইন্টিগ্রেশন").assertIsDisplayed()
         composeTestRule.onNodeWithText("@Q_kormosngsthan_Bangladesh").assertDoesNotExist()
         composeTestRule.onNodeWithText("চ্যাট আইডি (Chat ID): 6255562134").assertIsDisplayed()
-        composeTestRule.onNodeWithText("বট আইডি (Bot ID): 8655012321").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("admin_telegram_chat_id_input").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("admin_telegram_bot_id_input").assertIsDisplayed()
+        composeTestRule.onNodeWithText("বট আইডি (Bot ID): 8917160878").assertIsDisplayed()
+        composeTestRule.onNodeWithText("🔒 অ্যাপের ভেতরে স্থায়ীভাবে ফিট ও সক্রিয়").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_telegram_chat_id_input").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("admin_telegram_bot_id_input").assertDoesNotExist()
     }
 
     @Test

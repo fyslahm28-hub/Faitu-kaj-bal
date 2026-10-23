@@ -69,7 +69,7 @@ class ExampleUnitTest {
     @Test
     fun telegramNotificationHelper_formatsChatAndBotIdAndRedactsSensitiveSecrets() {
         assertEquals("6255562134", TelegramNotificationHelper.resolveTargetChatId())
-        assertEquals("8655012321", TelegramNotificationHelper.resolveConfiguredBotId())
+        assertEquals("8917160878", TelegramNotificationHelper.resolveConfiguredBotId())
 
         val message = TelegramNotificationHelper.formatTelegramEventMessage(
             eventType = "ADMIN_LOGIN",
@@ -80,12 +80,12 @@ class ExampleUnitTest {
         )
 
         assertTrue(message.contains("6255562134"))
-        assertTrue(message.contains("8655012321"))
+        assertTrue(message.contains("8917160878"))
         assertFalse(message.contains("Q_kormosngsthan_Bangladesh"))
         assertFalse(message.contains("Q_kormosongsthan_Bangladesh"))
         assertTrue(message.contains("সময়:"))
         assertTrue(message.contains("কার্যক্রমের ধরন:"))
-        assertTrue(message.contains("সংশ্লিষ্ট পরিচয়: fyslahm28@gmail.com"))
+        assertTrue(message.contains("সম্পাদনকারী অ্যাডমিন/পরিচয়: fyslahm28@gmail.com"))
         assertTrue(message.contains("01300448147"))
 
         // Verify sensitive secrets, passwords, OTPs, reset links, and bot tokens are strictly redacted
@@ -108,7 +108,7 @@ class ExampleUnitTest {
         val targetChatId = TelegramNotificationHelper.resolveTargetChatId()
         val configuredBotId = TelegramNotificationHelper.resolveConfiguredBotId()
         assertEquals("6255562134", targetChatId)
-        assertEquals("8655012321", configuredBotId)
+        assertEquals("8917160878", configuredBotId)
         // Attempt dispatch using BuildConfig credentials (gracefully returns Boolean without throwing)
         val dispatched = TelegramNotificationHelper.dispatchToTelegramBot(
             eventType = "ADMIN_SECURITY",

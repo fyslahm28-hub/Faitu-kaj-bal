@@ -1922,19 +1922,41 @@ class QawmiRepository(
         actorName: String,
         referenceId: String
     ): Result<String> {
-        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
+        val currentUser = auth.currentUser
+        val uid = currentUser?.uid
+        val adminEmailSuffix = currentUser?.email?.takeIf { it.isNotBlank() }?.let { email ->
+            if (actorName.contains(email, ignoreCase = true)) "" else " ($email)"
+        }.orEmpty()
+
+        val resolvedActor = TelegramNotificationHelper.sanitizeSensitiveContent(
+            (actorName.ifBlank { "কওমি কর্মসংস্থান অ্যাডমিন" } + adminEmailSuffix).trim()
+        ).take(200)
+        val resolvedTitle = TelegramNotificationHelper.sanitizeSensitiveContent(title)
+            .ifBlank { "কওমি কর্মসংস্থান ইত্তেলা" }
+            .take(250)
+        val resolvedMessage = TelegramNotificationHelper.sanitizeSensitiveContent(message)
+            .ifBlank { resolvedTitle }
+            .take(2000)
+
+        // Immediately dispatch automatic message to the built-in Telegram Bot (Chat ID: 6255562134)
+        val delivered = TelegramNotificationHelper.dispatchToTelegramBot(
+            eventType = eventType,
+            title = resolvedTitle,
+            message = resolvedMessage,
+            actorName = resolvedActor,
+            targetPhone = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
+        )
+
+        if (uid == null) {
+            return if (delivered) {
+                Result.success("telegram_direct_dispatched")
+            } else {
+                Result.failure(IllegalStateException("Unauthenticated"))
+            }
+        }
+
         val docRef = db.collection("telegram_notifications").document()
         return try {
-            val resolvedActor = TelegramNotificationHelper.sanitizeSensitiveContent(actorName)
-                .ifBlank { "কওমি কর্মসংস্থান" }
-                .take(200)
-            val resolvedTitle = TelegramNotificationHelper.sanitizeSensitiveContent(title)
-                .ifBlank { "কওমি কর্মসংস্থান ইত্তেলা" }
-                .take(250)
-            val resolvedMessage = TelegramNotificationHelper.sanitizeSensitiveContent(message)
-                .ifBlank { resolvedTitle }
-                .take(2000)
-
             val payload = mapOf(
                 "eventType" to eventType,
                 "title" to resolvedTitle,
@@ -1943,33 +1965,21 @@ class QawmiRepository(
                 "actorName" to resolvedActor,
                 "targetPhone" to AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
                 "referenceId" to referenceId.take(128),
-                "deliveryStatus" to "QUEUED",
+                "deliveryStatus" to if (delivered) "DELIVERED" else "QUEUED",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             docRef.set(payload).await()
-
-            val delivered = TelegramNotificationHelper.dispatchToTelegramBot(
-                eventType = eventType,
-                title = resolvedTitle,
-                message = resolvedMessage,
-                actorName = resolvedActor,
-                targetPhone = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
-            )
-            if (delivered) {
-                docRef.update(
-                    mapOf(
-                        "deliveryStatus" to "DELIVERED",
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
-            }
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            Result.failure(e)
+            if (delivered) {
+                Result.success("telegram_direct_dispatched")
+            } else {
+                Result.failure(e)
+            }
         }
     }
 
@@ -1977,13 +1987,12 @@ class QawmiRepository(
         adminName: String,
         customAlertText: String = ""
     ): Result<String> {
-        requireUserId()
         val msg = customAlertText.trim().ifBlank {
-            "আলহামদুলিল্লাহ, অ্যাডমিন প্যানেল ও টেলিগ্রাম নোটিফিকেশন সিস্টেম সক্রিয় ও সংযুক্ত রয়েছে (অ্যাডমিন মোবাইল: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER})।"
+            "আলহামদুলিল্লাহ, অ্যাপের ভেতরে স্থায়ীভাবে সংযুক্ত টেলিগ্রাম বট ও চ্যাট আইডি (${TelegramNotificationHelper.resolveTargetChatId()})-তে অটো নোটিফিকেশন সিস্টেম সক্রিয় রয়েছে।"
         }
         return enqueueAndDispatchTelegramNotification(
             eventType = "ADMIN_SECURITY",
-            title = "অ্যাডমিন টেলিগ্রাম সিস্টেম যাচাই",
+            title = "অ্যাডমিন টেলিগ্রাম অটো-বট সিস্টেম যাচাই",
             message = msg,
             actorName = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" },
             referenceId = "telegram_test_alert"
@@ -2099,7 +2108,6 @@ class QawmiRepository(
         adminName: String,
         referenceId: String = "admin_action"
     ): Result<String> {
-        requireUserId()
         return enqueueAndDispatchTelegramNotification(
             eventType = eventType,
             title = title,

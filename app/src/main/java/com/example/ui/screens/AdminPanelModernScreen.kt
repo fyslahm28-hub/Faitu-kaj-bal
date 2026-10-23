@@ -389,10 +389,11 @@ fun ModernAdminPanelRoot(
                 AdminSubScreen.FORM_CUSTOMIZATION -> {
                     AdminFormCustomizationView(
                         onBack = { handleBack() },
+                        onRecordLiveAdminAction = onRecordLiveAdminAction,
                         onSaveFormConfig = { formName, desc, fields ->
                             onRecordLiveAdminAction(
                                 "ADMIN_SETTINGS_CHANGE",
-                                "আবেদন ফর্ম সম্পাদনা করা হয়েছে",
+                                "আবেদন ফর্ম ও নিয়ম-নীতি সম্পাদনা করা হয়েছে",
                                 "ফর্ম: $formName | প্রয়োজনীয় তথ্য: ${fields.joinToString(", ")} | নির্দেশনা: ${desc.take(120)}",
                                 "form_customization"
                             )
@@ -411,7 +412,7 @@ fun ModernAdminPanelRoot(
                             notifyNewApplication = enabled
                             onRecordLiveAdminAction(
                                 "ADMIN_SETTINGS_CHANGE",
-                                "অ্যাপ সেটিংস পরিবর্তন করা হয়েছে",
+                                "অ্যাপের নিয়ম-নীতি ও সেটিংস পরিবর্তন",
                                 "নতুন আবেদন নোটিফিকেশন: ${if (enabled) "চালু" else "বন্ধ"} করা হয়েছে।",
                                 "setting_new_app"
                             )
@@ -420,7 +421,7 @@ fun ModernAdminPanelRoot(
                             notifyNewNotice = enabled
                             onRecordLiveAdminAction(
                                 "ADMIN_SETTINGS_CHANGE",
-                                "অ্যাপ সেটিংস পরিবর্তন করা হয়েছে",
+                                "অ্যাপের নিয়ম-নীতি ও সেটিংস পরিবর্তন",
                                 "নতুন বিজ্ঞপ্তি নোটিফিকেশন: ${if (enabled) "চালু" else "বন্ধ"} করা হয়েছে।",
                                 "setting_new_notice"
                             )
@@ -429,7 +430,7 @@ fun ModernAdminPanelRoot(
                             pushNotificationsEnabled = enabled
                             onRecordLiveAdminAction(
                                 "ADMIN_SETTINGS_CHANGE",
-                                "অ্যাপ সেটিংস পরিবর্তন করা হয়েছে",
+                                "অ্যাপের নিয়ম-নীতি ও সেটিংস পরিবর্তন",
                                 "পুশ নোটিফিকেশন: ${if (enabled) "চালু" else "বন্ধ"} করা হয়েছে।",
                                 "setting_push"
                             )
@@ -438,7 +439,7 @@ fun ModernAdminPanelRoot(
                             appAnalyticsEnabled = enabled
                             onRecordLiveAdminAction(
                                 "ADMIN_SETTINGS_CHANGE",
-                                "অ্যাপ সেটিংস পরিবর্তন করা হয়েছে",
+                                "অ্যাপের নিয়ম-নীতি ও সেটিংস পরিবর্তন",
                                 "অ্যাপ অ্যানালিটিক্স: ${if (enabled) "চালু" else "বন্ধ"} করা হয়েছে।",
                                 "setting_analytics"
                             )
@@ -483,46 +484,37 @@ fun ModernAdminPanelRoot(
                         onToggleAdminNotif = { enabled ->
                             tgAdminNotif = enabled
                             onRecordLiveAdminAction(
-                                "ADMIN_SETTINGS_CHANGE",
-                                "টেলিগ্রাম নোটিফিকেশন সেটিংস পরিবর্তন",
-                                "অ্যাডমিন নোটিফিকেশন: ${if (enabled) "সক্রিয়" else "নিষ্ক্রিয়"} করা হয়েছে।",
+                                if (enabled) "ADMIN_SETTINGS_CHANGE" else "ADMIN_SECURITY",
+                                "টেলিগ্রাম নোটিফিকেশন নীতি পরিবর্তন",
+                                "অ্যাডমিন নোটিফিকেশন অপশনটি ${if (enabled) "সক্রিয়" else "নিষ্ক্রিয় করার চেষ্টা/পরিবর্তন"} করা হয়েছে।",
                                 "tg_admin_notif"
                             )
                         },
                         onToggleNewAppNotif = { enabled ->
                             tgNewAppNotif = enabled
                             onRecordLiveAdminAction(
-                                "ADMIN_SETTINGS_CHANGE",
-                                "টেলিগ্রাম নোটিফিকেশন সেটিংস পরিবর্তন",
-                                "নতুন আবেদন নোটিফিকেশন: ${if (enabled) "সক্রিয়" else "নিষ্ক্রিয়"} করা হয়েছে।",
+                                if (enabled) "ADMIN_SETTINGS_CHANGE" else "ADMIN_SECURITY",
+                                "টেলিগ্রাম নোটিফিকেশন নীতি পরিবর্তন",
+                                "নতুন আবেদন নোটিফিকেশন অপশনটি ${if (enabled) "সক্রিয়" else "নিষ্ক্রিয় করার চেষ্টা/পরিবর্তন"} করা হয়েছে।",
                                 "tg_app_notif"
                             )
                         },
                         onToggleImportantUpdate = { enabled ->
                             tgImportantUpdate = enabled
                             onRecordLiveAdminAction(
-                                "ADMIN_SETTINGS_CHANGE",
-                                "টেলিগ্রাম নোটিফিকেশন সেটিংস পরিবর্তন",
-                                "গুরুত্বপূর্ণ আপডেট: ${if (enabled) "সক্রিয়" else "নিষ্ক্রিয়"} করা হয়েছে।",
+                                if (enabled) "ADMIN_SETTINGS_CHANGE" else "ADMIN_SECURITY",
+                                "টেলিগ্রাম নোটিফিকেশন নীতি পরিবর্তন",
+                                "গুরুত্বপূর্ণ আপডেট অপশনটি ${if (enabled) "সক্রিয়" else "নিষ্ক্রিয় করার চেষ্টা/পরিবর্তন"} করা হয়েছে।",
                                 "tg_important_update"
                             )
                         },
                         onToggleSecurityAlert = { enabled ->
                             tgSecurityAlert = enabled
                             onRecordLiveAdminAction(
-                                "ADMIN_SETTINGS_CHANGE",
-                                "টেলিগ্রাম নোটিফিকেশন সেটিংস পরিবর্তন",
-                                "সিকিউরিটি সতর্কতা: ${if (enabled) "সক্রিয়" else "নিষ্ক্রিয়"} করা হয়েছে।",
+                                "ADMIN_SECURITY",
+                                "সিকিউরিটি সতর্কতা অপশন পরিবর্তন",
+                                "অ্যাডমিন প্যানেলে সিকিউরিটি সতর্কতা সুইচটি ${if (enabled) "সক্রিয়" else "বন্ধ করার চেষ্টা"} করা হয়েছে (অটো-বট মনিটরিং সর্বদা সচল)।",
                                 "tg_security_alert"
-                            )
-                        },
-                        onSaveTelegramConfig = { chatId, botId ->
-                            TelegramNotificationHelper.updateRuntimeTelegramConfig(chatId, botId)
-                            onRecordLiveAdminAction(
-                                "ADMIN_SETTINGS_CHANGE",
-                                "টেলিগ্রাম চ্যাট আইডি ও বট আইডি হালনাগাদ",
-                                "চ্যাট আইডি: $chatId | বট আইডি: $botId সংযুক্ত করা হয়েছে।",
-                                "tg_config_update"
                             )
                         },
                         onSendTestTelegramAlert = onSendTestTelegramAlert,
@@ -2770,6 +2762,7 @@ private fun AdminAddNewNoticeView(
 @Composable
 private fun AdminFormCustomizationView(
     onBack: () -> Unit,
+    onRecordLiveAdminAction: (eventType: String, title: String, message: String, referenceId: String) -> Unit,
     onSaveFormConfig: (formName: String, description: String, requiredFields: List<String>) -> Unit
 ) {
     var formName by rememberSaveable { mutableStateOf("দ্বীনি খেদমত আবেদন") }
@@ -2848,22 +2841,54 @@ private fun AdminFormCustomizationView(
                     FormCheckboxRow(
                         label = "শিক্ষাগত যোগ্যতা",
                         checked = reqEducation,
-                        onCheckedChange = { reqEducation = it }
+                        onCheckedChange = {
+                            reqEducation = it
+                            onRecordLiveAdminAction(
+                                "ADMIN_SETTINGS_CHANGE",
+                                "আবেদন ফর্মের শর্ত পরিবর্তন",
+                                "'শিক্ষাগত যোগ্যতা' ফিল্ডটি ${if (it) "বাধ্যতামূলক" else "ঐচ্ছিক"} করা হয়েছে।",
+                                "form_field_education"
+                            )
+                        }
                     )
                     FormCheckboxRow(
                         label = "অভিজ্ঞতা",
                         checked = reqExperience,
-                        onCheckedChange = { reqExperience = it }
+                        onCheckedChange = {
+                            reqExperience = it
+                            onRecordLiveAdminAction(
+                                "ADMIN_SETTINGS_CHANGE",
+                                "আবেদন ফর্মের শর্ত পরিবর্তন",
+                                "'অভিজ্ঞতা' ফিল্ডটি ${if (it) "বাধ্যতামূলক" else "ঐচ্ছিক"} করা হয়েছে।",
+                                "form_field_experience"
+                            )
+                        }
                     )
                     FormCheckboxRow(
                         label = "জাতীয় পরিচয়পত্র",
                         checked = reqNid,
-                        onCheckedChange = { reqNid = it }
+                        onCheckedChange = {
+                            reqNid = it
+                            onRecordLiveAdminAction(
+                                "ADMIN_SETTINGS_CHANGE",
+                                "আবেদন ফর্মের শর্ত পরিবর্তন",
+                                "'জাতীয় পরিচয়পত্র' ফিল্ডটি ${if (it) "বাধ্যতামূলক" else "ঐচ্ছিক"} করা হয়েছে।",
+                                "form_field_nid"
+                            )
+                        }
                     )
                     FormCheckboxRow(
                         label = "অন্যান্য",
                         checked = reqOthers,
-                        onCheckedChange = { reqOthers = it }
+                        onCheckedChange = {
+                            reqOthers = it
+                            onRecordLiveAdminAction(
+                                "ADMIN_SETTINGS_CHANGE",
+                                "আবেদন ফর্মের শর্ত পরিবর্তন",
+                                "'অন্যান্য' ফিল্ডটি ${if (it) "বাধ্যতামূলক" else "ঐচ্ছিক"} করা হয়েছে।",
+                                "form_field_others"
+                            )
+                        }
                     )
 
                     extraFields.forEach { extra ->
@@ -2900,9 +2925,16 @@ private fun AdminFormCustomizationView(
                                 .size(48.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .clickable {
-                                    if (customFieldInput.trim().isNotBlank()) {
-                                        extraFields.add(customFieldInput.trim())
+                                    val newField = customFieldInput.trim()
+                                    if (newField.isNotBlank()) {
+                                        extraFields.add(newField)
                                         customFieldInput = ""
+                                        onRecordLiveAdminAction(
+                                            "ADMIN_SETTINGS_CHANGE",
+                                            "আবেদন ফর্মে নতুন ফিল্ড সংযোজন",
+                                            "আবেদন ফর্মে নতুন ফিল্ড '$newField' যোগ করা হয়েছে।",
+                                            "form_field_custom_add"
+                                        )
                                     }
                                 }
                         ) {
@@ -3398,16 +3430,11 @@ private fun AdminTelegramIntegrationView(
     onToggleNewAppNotif: (Boolean) -> Unit,
     onToggleImportantUpdate: (Boolean) -> Unit,
     onToggleSecurityAlert: (Boolean) -> Unit,
-    onSaveTelegramConfig: (chatId: String, botId: String) -> Unit,
     onSendTestTelegramAlert: (String) -> Unit,
     onBack: () -> Unit
 ) {
-    var chatIdInput by rememberSaveable {
-        mutableStateOf(TelegramNotificationHelper.resolveTargetChatId())
-    }
-    var botIdInput by rememberSaveable {
-        mutableStateOf(TelegramNotificationHelper.resolveConfiguredBotId())
-    }
+    val fittedChatId = TelegramNotificationHelper.resolveTargetChatId()
+    val fittedBotId = TelegramNotificationHelper.resolveConfiguredBotId()
 
     Column(modifier = Modifier.fillMaxSize()) {
         AdminTopHeaderBar(
@@ -3422,7 +3449,7 @@ private fun AdminTelegramIntegrationView(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Telegram Bot & Chat ID Card (No channel username, only user's Chat ID and Bot ID)
+            // Permanently Fitted Telegram Bot & Chat ID Status Card (No editable input boxes)
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -3454,20 +3481,20 @@ private fun AdminTelegramIntegrationView(
                     Spacer(modifier = Modifier.width(14.dp))
                     Column {
                         Text(
-                            text = "Telegram Bot ও Chat সংযোগ",
+                            text = "Telegram Bot অটো-সিকিউরিটি সংযোগ",
                             style = MaterialTheme.typography.titleMedium,
                             color = QawmiTextDark,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "চ্যাট আইডি (Chat ID): ${chatIdInput.ifBlank { TelegramNotificationHelper.DEFAULT_ADMIN_CHAT_ID }}",
+                            text = "চ্যাট আইডি (Chat ID): $fittedChatId",
                             style = MaterialTheme.typography.bodySmall,
                             color = QawmiTextDark,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "বট আইডি (Bot ID): ${botIdInput.ifBlank { TelegramNotificationHelper.DEFAULT_ADMIN_BOT_ID }}",
+                            text = "বট আইডি (Bot ID): $fittedBotId",
                             style = MaterialTheme.typography.bodySmall,
                             color = QawmiTextSecondary,
                             fontWeight = FontWeight.Medium
@@ -3478,7 +3505,7 @@ private fun AdminTelegramIntegrationView(
                             color = AdminBadgeActiveGreen
                         ) {
                             Text(
-                                text = "⚡ সংযুক্ত",
+                                text = "🔒 অ্যাপের ভেতরে স্থায়ীভাবে ফিট ও সক্রিয়",
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color.White,
@@ -3489,55 +3516,41 @@ private fun AdminTelegramIntegrationView(
                 }
             }
 
-            // Chat ID & Bot ID Configuration Card
+            // Read-Only Auto-Alert Policy Info Card
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .border(1.dp, AdminCardBorder, RoundedCornerShape(16.dp)),
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                colors = CardDefaults.cardColors(containerColor = QawmiMintSurface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
             ) {
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalAlignment = Alignment.Top
                 ) {
-                    Text(
-                        text = "টেলিগ্রাম বট ও চ্যাট আইডি কনফিগারেশন",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = AdminHeaderDarkGreen,
-                        fontWeight = FontWeight.Bold
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = null,
+                        tint = AdminHeaderDarkGreen,
+                        modifier = Modifier.size(22.dp)
                     )
-                    OutlinedTextField(
-                        value = chatIdInput,
-                        onValueChange = { chatIdInput = it },
-                        label = { Text("টেলিগ্রাম চ্যাট আইডি (Chat ID)") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AdminHeaderDarkGreen,
-                            unfocusedBorderColor = AdminCardBorder
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("admin_telegram_chat_id_input")
-                    )
-                    OutlinedTextField(
-                        value = botIdInput,
-                        onValueChange = { botIdInput = it },
-                        label = { Text("টেলিগ্রাম বট আইডি (Bot ID)") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AdminHeaderDarkGreen,
-                            unfocusedBorderColor = AdminCardBorder
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("admin_telegram_bot_id_input")
-                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "স্বয়ংক্রিয় অ্যাডমিন নজরদারি ও অটো-বট ইত্তেলা",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = AdminHeaderDarkGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "টেলিগ্রাম চ্যাট আইডি ($fittedChatId) ও বট টোকেন অ্যাপের ভেতরে স্থায়ীভাবে সংযুক্ত রয়েছে। অ্যাডমিন প্যানেল থেকে যেকোনো অ্যাডমিন অ্যাপের কোনো নিয়ম-নীতি পরিবর্তন, পোস্ট/ব্যবহারকারী নিয়ন্ত্রণ বা যেকোনো কার্যকলাপ করলে সাথে সাথে স্বয়ংক্রিয় বার্তা (Auto Message) বটে চলে যাবে।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiTextDark
+                        )
+                    }
                 }
             }
 
@@ -3585,9 +3598,9 @@ private fun AdminTelegramIntegrationView(
 
             Button(
                 onClick = {
-                    val resolvedChat = chatIdInput.trim().ifBlank { TelegramNotificationHelper.DEFAULT_ADMIN_CHAT_ID }
-                    val resolvedBot = botIdInput.trim().ifBlank { TelegramNotificationHelper.DEFAULT_ADMIN_BOT_ID }
-                    onSaveTelegramConfig(resolvedChat, resolvedBot)
+                    onSendTestTelegramAlert(
+                        "আলহামদুলিল্লাহ, অ্যাপের ভেতরে স্থায়ীভাবে সংযুক্ত চ্যাট আইডি ($fittedChatId) ও বট আইডি ($fittedBotId)-তে স্বয়ংক্রিয় টেলিগ্রাম অ্যালার্ট সিস্টেম সক্রিয় রয়েছে।"
+                    )
                 },
                 enabled = !isSubmitting,
                 colors = ButtonDefaults.buttonColors(containerColor = AdminHeaderDarkGreen),
@@ -3595,7 +3608,7 @@ private fun AdminTelegramIntegrationView(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
-                    .testTag("admin_save_telegram_config_button")
+                    .testTag("admin_send_telegram_test_button")
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.Send,
@@ -3605,33 +3618,9 @@ private fun AdminTelegramIntegrationView(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "চ্যাট আইডি ও বট আইডি সংরক্ষণ করুন",
+                    text = "লাইভ টেস্ট নোটিফিকেশন পাঠান",
                     style = MaterialTheme.typography.titleSmall,
                     color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            OutlinedButton(
-                onClick = {
-                    val resolvedChat = chatIdInput.trim().ifBlank { TelegramNotificationHelper.DEFAULT_ADMIN_CHAT_ID }
-                    val resolvedBot = botIdInput.trim().ifBlank { TelegramNotificationHelper.DEFAULT_ADMIN_BOT_ID }
-                    TelegramNotificationHelper.updateRuntimeTelegramConfig(resolvedChat, resolvedBot)
-                    onSendTestTelegramAlert(
-                        "আলহামদুলিল্লাহ, চ্যাট আইডি ($resolvedChat) ও বট আইডি ($resolvedBot)-তে লাইভ টেলিগ্রাম নোটিফিকেশন সক্রিয় রয়েছে।"
-                    )
-                },
-                enabled = !isSubmitting,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(46.dp)
-                    .testTag("admin_send_telegram_test_button")
-            ) {
-                Text(
-                    text = "লাইভ টেস্ট নোটিফিকেশন পাঠান",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AdminHeaderDarkGreen,
                     fontWeight = FontWeight.Bold
                 )
             }

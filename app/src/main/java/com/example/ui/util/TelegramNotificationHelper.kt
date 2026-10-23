@@ -16,19 +16,10 @@ import java.util.TimeZone
 object TelegramNotificationHelper {
 
     const val DEFAULT_ADMIN_CHAT_ID = "6255562134"
-    const val DEFAULT_ADMIN_BOT_ID = "8655012321"
+    const val DEFAULT_ADMIN_BOT_ID = "8917160878"
 
     private const val PLACEHOLDER_TOKEN = "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE"
     private const val PLACEHOLDER_CHAT_ID = "TELEGRAM_CHAT_ID_DEFAULT_VALUE"
-
-    @Volatile
-    private var customChatIdOverride: String? = null
-
-    @Volatile
-    private var customBotIdOverride: String? = null
-
-    @Volatile
-    private var customBotTokenOverride: String? = null
 
     // Regex patterns to strictly redact any accidental secrets, tokens, OTPs, or reset links
     private val BOT_TOKEN_REGEX = Regex("""\b\d{8,12}:[A-Za-z0-9_-]{25,}\b""")
@@ -36,26 +27,10 @@ object TelegramNotificationHelper {
     private val RESET_LINK_REGEX = Regex("""https?://[^\s]*(oobCode|resetPassword|apiKey=)[^\s]*""", RegexOption.IGNORE_CASE)
     private val PASSWORD_KV_REGEX = Regex("""(?i)(password|পাসওয়ার্ড|পাসওয়ার্ড|otp|secret|token)\s*[:=]\s*\S+""")
 
-    fun updateRuntimeTelegramConfig(chatId: String, botIdOrToken: String) {
-        val cleanChatId = chatId.trim()
-        if (cleanChatId.isNotBlank()) {
-            customChatIdOverride = cleanChatId
-        }
-        val cleanBot = botIdOrToken.trim()
-        if (cleanBot.isNotBlank()) {
-            if (cleanBot.contains(":")) {
-                customBotTokenOverride = cleanBot
-                customBotIdOverride = cleanBot.substringBefore(":").trim()
-            } else {
-                customBotIdOverride = cleanBot
-            }
-        }
-    }
-
+    /**
+     * Permanently fitted target Chat ID inside the app (6255562134).
+     */
     fun resolveTargetChatId(): String {
-        val override = customChatIdOverride?.trim().orEmpty()
-        if (override.isNotBlank()) return override
-
         val configured = BuildConfig.TELEGRAM_CHAT_ID.trim()
         return if (configured.isNotBlank() && configured != PLACEHOLDER_CHAT_ID) {
             configured
@@ -64,22 +39,14 @@ object TelegramNotificationHelper {
         }
     }
 
+    /**
+     * Permanently fitted Telegram Bot ID inside the app (8917160878).
+     */
     fun resolveConfiguredBotId(): String {
-        val override = customBotIdOverride?.trim().orEmpty()
-        if (override.isNotBlank()) return override
-
-        val token = resolveActiveBotToken()
-        val extractedId = token.substringBefore(":").trim()
-        return if (extractedId.isNotBlank() && extractedId.all { it.isDigit() }) {
-            extractedId
-        } else {
-            DEFAULT_ADMIN_BOT_ID
-        }
+        return DEFAULT_ADMIN_BOT_ID
     }
 
     private fun resolveActiveBotToken(): String {
-        val overrideToken = customBotTokenOverride?.trim().orEmpty()
-        if (overrideToken.isNotBlank()) return overrideToken
         return BuildConfig.TELEGRAM_BOT_TOKEN.trim()
     }
 
@@ -122,17 +89,17 @@ object TelegramNotificationHelper {
         val eventBadge = when (eventType) {
             "ADMIN_LOGIN" -> "🔑 অ্যাডমিন লগইন"
             "ADMIN_LOGOUT" -> "🚪 অ্যাডমিন লগআউট"
-            "ADMIN_SETTINGS_CHANGE" -> "⚙️ অ্যাডমিন সেটিংস ও অনুমতি পরিবর্তন"
-            "FAILED_AUTH_ATTEMPT" -> "🚨 ব্যর্থ লগইন / অননুমোদিত প্রচেষ্টা"
-            "ADMIN_SECURITY" -> "🔐 অ্যাডমিন নিরাপত্তা ও পাসওয়ার্ড ইত্তেলা"
-            "ADMIN_VERIFICATION" -> "✅ অ্যাডমিন যাচাইকরণ ও Boost"
-            "CONTENT_MODERATION" -> "🛡️ কনটেন্ট ও পোস্ট পরিচালনা"
-            "ADMIN_ANNOUNCEMENT" -> "📣 অ্যাডমিন জরুরি ঘোষণা"
+            "ADMIN_SETTINGS_CHANGE" -> "⚙️ অ্যাডমিন নিয়ম-নীতি ও সেটিংস পরিবর্তন"
+            "FAILED_AUTH_ATTEMPT" -> "🚨 ব্যর্থ লগইন / অননুমোদিত বা সন্দেহজনক প্রচেষ্টা"
+            "ADMIN_SECURITY" -> "🔐 অ্যাডমিন নিরাপত্তা ও দায়িত্ব পরিবর্তন ইত্তেলা"
+            "ADMIN_VERIFICATION" -> "✅ অ্যাডমিন যাচাইকরণ, ব্লক ও Boost নিয়ন্ত্রণ"
+            "CONTENT_MODERATION" -> "🛡️ কনটেন্ট অপসারণ ও মডারেশন অ্যাকশন"
+            "ADMIN_ANNOUNCEMENT" -> "📣 অ্যাডমিন জরুরি ঘোষণা ও বিজ্ঞপ্তি প্রকাশ"
             "NEW_CIRCULAR" -> "📢 নতুন নিয়োগ বিজ্ঞপ্তি"
             "NEW_APPLICATION" -> "📝 নতুন খেদমত আবেদন"
-            "KHEDMOT_SUBMISSION" -> "📨 বিজ্ঞপ্তিতে নতুন আবেদন জমা"
+            "KHEDMOT_SUBMISSION" -> "📨 বিজ্ঞপ্তিতে আবেদন পর্যালোচনা ও সিদ্ধান্ত"
             "NEW_MADRASA" -> "🕌 নতুন মাদরাসা নিবন্ধন"
-            else -> "🔔 কওমি কর্মসংস্থান অ্যাক্টিভিটি"
+            else -> "🔔 কওমি কর্মসংস্থান অটো অ্যাক্টিভিটি অ্যালার্ট"
         }
 
         val safeTitle = sanitizeSensitiveContent(title)
@@ -140,21 +107,21 @@ object TelegramNotificationHelper {
         val safeActor = sanitizeSensitiveContent(actorName)
 
         return buildString {
-            appendLine("【কওমি কর্মসংস্থান • প্রধান অ্যাডমিন টেলিগ্রাম ইত্তেলা】")
+            appendLine("【কওমি কর্মসংস্থান • স্বয়ংক্রিয় অ্যাডমিন বট অ্যালার্ট】")
             appendLine("টেলিগ্রাম চ্যাট আইডি: ${resolveTargetChatId()}")
             appendLine("টেলিগ্রাম বট আইডি: ${resolveConfiguredBotId()}")
             appendLine("সময়: $timestampText")
             appendLine("কার্যক্রমের ধরন: $eventBadge")
             appendLine("শিরোনাম: $safeTitle")
-            appendLine("বিবরণ: $safeMessage")
-            appendLine("সংশ্লিষ্ট পরিচয়: $safeActor")
+            appendLine("বিস্তারিত পরিবর্তন/কার্যকলাপ: $safeMessage")
+            appendLine("সম্পাদনকারী অ্যাডমিন/পরিচয়: $safeActor")
             appendLine("অ্যাডমিন হটলাইন: $targetPhone")
         }.trim()
     }
 
     /**
-     * Dispatches a real Telegram Bot API notification using the configured Bot Token and
-     * Admin Chat ID (`6255562134`) from BuildConfig / runtime config.
+     * Automatically dispatches a real-time Telegram Bot API notification using the permanently
+     * fitted Bot Token and Admin Chat ID (`6255562134`) from BuildConfig.
      */
     suspend fun dispatchToTelegramBot(
         eventType: String,
