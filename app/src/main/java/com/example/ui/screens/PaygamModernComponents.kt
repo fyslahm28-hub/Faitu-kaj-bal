@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -537,10 +538,14 @@ fun PaygamFullScreenImageViewerDialog(
     val coroutineScope = rememberCoroutineScope()
     var showViewerMenu by remember { mutableStateOf(false) }
     var zoomScale by remember { mutableFloatStateOf(1f) }
+    var panOffsetX by remember { mutableFloatStateOf(0f) }
+    var panOffsetY by remember { mutableFloatStateOf(0f) }
     var reloadNonce by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(pagerState.currentPage) {
         zoomScale = 1f
+        panOffsetX = 0f
+        panOffsetY = 0f
     }
 
     val currentIndex = pagerState.currentPage.coerceIn(0, (images.size - 1).coerceAtLeast(0))
@@ -619,6 +624,40 @@ fun PaygamFullScreenImageViewerDialog(
                         }
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = Color(0x33FFFFFF),
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .clickable {
+                                        when {
+                                            zoomScale < 1.8f -> {
+                                                zoomScale = 2f
+                                            }
+                                            zoomScale < 2.8f -> {
+                                                zoomScale = 3f
+                                            }
+                                            else -> {
+                                                zoomScale = 1f
+                                                panOffsetX = 0f
+                                                panOffsetY = 0f
+                                            }
+                                        }
+                                    }
+                                    .testTag("toggle_viewer_zoom_button")
+                            ) {
+                                Text(
+                                    text = when {
+                                        zoomScale >= 2.8f -> "🔍 ৩x"
+                                        zoomScale >= 1.8f -> "🔍 ২x"
+                                        else -> "🔍 জুম"
+                                    },
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                )
+                            }
                             IconButton(
                                 onClick = { onSaveSingleImage(currentImageUrl, currentIndex + 1) },
                                 modifier = Modifier.testTag("save_single_image_button")
@@ -697,19 +736,45 @@ fun PaygamFullScreenImageViewerDialog(
                 ) {
                     HorizontalPager(
                         state = pagerState,
+                        userScrollEnabled = zoomScale <= 1.05f,
                         modifier = Modifier.fillMaxSize()
                     ) { pageIdx ->
                         val pageUrl = images.getOrElse(pageIdx) { "" }
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(horizontal = 8.dp, vertical = 12.dp)
+                                .padding(horizontal = 4.dp, vertical = 8.dp)
                                 .pointerInput(pageIdx) {
                                     detectTapGestures(
                                         onDoubleTap = {
-                                            zoomScale = if (zoomScale > 1.1f) 1f else 2f
+                                            if (zoomScale > 2.4f) {
+                                                zoomScale = 1f
+                                                panOffsetX = 0f
+                                                panOffsetY = 0f
+                                            } else if (zoomScale > 1.2f) {
+                                                zoomScale = 3f
+                                            } else {
+                                                zoomScale = 2f
+                                            }
                                         }
                                     )
+                                }
+                                .pointerInput(pageIdx, zoomScale > 1.02f) {
+                                    if (zoomScale > 1.02f) {
+                                        detectTransformGestures { _, pan, zoom, _ ->
+                                            val newScale = (zoomScale * zoom).coerceIn(1f, 4f)
+                                            zoomScale = newScale
+                                            if (newScale <= 1.02f) {
+                                                panOffsetX = 0f
+                                                panOffsetY = 0f
+                                            } else {
+                                                val maxPanX = (size.width * (newScale - 1f)) / 2f
+                                                val maxPanY = (size.height * (newScale - 1f)) / 2f
+                                                panOffsetX = (panOffsetX + pan.x).coerceIn(-maxPanX, maxPanX)
+                                                panOffsetY = (panOffsetY + pan.y).coerceIn(-maxPanY, maxPanY)
+                                            }
+                                        }
+                                    }
                                 },
                             contentAlignment = Alignment.Center
                         ) {
@@ -737,7 +802,9 @@ fun PaygamFullScreenImageViewerDialog(
                                             .fillMaxSize()
                                             .graphicsLayer(
                                                 scaleX = if (pageIdx == currentIndex) zoomScale else 1f,
-                                                scaleY = if (pageIdx == currentIndex) zoomScale else 1f
+                                                scaleY = if (pageIdx == currentIndex) zoomScale else 1f,
+                                                translationX = if (pageIdx == currentIndex) panOffsetX else 0f,
+                                                translationY = if (pageIdx == currentIndex) panOffsetY else 0f
                                             )
                                     )
                                 }

@@ -579,6 +579,7 @@ fun ChatAttachmentImage(
                 bitmap = decodedBitmap,
                 contentDescription = contentDescription,
                 contentScale = contentScale,
+                filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
                 modifier = modifier
             )
         }
@@ -590,6 +591,7 @@ fun ChatAttachmentImage(
                 model = imageUrl,
                 contentDescription = contentDescription,
                 contentScale = contentScale,
+                filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
                 modifier = modifier
             )
         }

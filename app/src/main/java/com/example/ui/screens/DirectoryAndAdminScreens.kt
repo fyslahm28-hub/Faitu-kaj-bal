@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -925,16 +926,17 @@ fun MessagesScreen(
             if (remainingSlots <= 0) {
                 photoLimitWarning = "একবারে সর্বোচ্চ ৫টি ছবি নির্বাচন করা যাবে।"
             } else {
-                val encodedList = ProfilePhotoHelper.processSelectedChatImages(
+                val updatedList = ProfilePhotoHelper.processSelectedChatImages(
                     context = context,
-                    uris = uris.take(remainingSlots)
+                    uris = uris.take(remainingSlots),
+                    existingImages = selectedImages
                 )
                 if (uris.size > remainingSlots) {
                     photoLimitWarning = "সর্বোচ্চ ৫টি ছবি নির্বাচন করা হয়েছে (৫টির বেশি নির্বাচন করা যাবে না)।"
                 } else {
                     photoLimitWarning = null
                 }
-                selectedImages = (selectedImages + encodedList).take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
+                selectedImages = updatedList.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
             }
         }
     }
@@ -2799,13 +2801,22 @@ fun MessagesScreen(
                                                     ) {
                                                         rowImgs.forEachIndexed { colIdx, imgUrl ->
                                                             val globalIdx = rowIdx * 2 + colIdx
+                                                            val isSinglePhoto = chatMsg.imageUrls.size == 1
                                                             ChatAttachmentImage(
                                                                 imageUrl = imgUrl,
                                                                 contentDescription = "পয়গামের ছবি ${globalIdx + 1}",
+                                                                contentScale = if (isSinglePhoto) ContentScale.Fit else ContentScale.Crop,
                                                                 modifier = Modifier
                                                                     .weight(1f)
-                                                                    .height(if (chatMsg.imageUrls.size == 1) 170.dp else 110.dp)
+                                                                    .then(
+                                                                        if (isSinglePhoto) {
+                                                                            Modifier.heightIn(min = 190.dp, max = 310.dp)
+                                                                        } else {
+                                                                            Modifier.height(145.dp)
+                                                                        }
+                                                                    )
                                                                     .clip(RoundedCornerShape(10.dp))
+                                                                    .background(Color(0xFFF7FBF9))
                                                                     .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
                                                                     .clickable {
                                                                         fullScreenViewerSourceMessage = chatMsg
@@ -3976,607 +3987,51 @@ fun NotificationsScreen(
 fun AdminPanelScreen(
     isAdminUser: Boolean,
     adminEmail: String = "",
+    adminDisplayName: String = "অ্যাডমিন",
+    adminPhotoUrl: String = "",
+    usersState: UiState<List<UserProfile>> = UiState.Success(emptyList()),
+    submissionsState: UiState<List<KhedmotSubmission>> = UiState.Success(emptyList()),
     madrasasState: UiState<List<MadrasaProfile>>,
     feedPostsState: UiState<List<FeedPost>>,
     telegramNotificationsState: UiState<List<TelegramNotificationLog>> = UiState.Success(emptyList()),
     isSubmitting: Boolean = false,
+    onVerifyUser: (UserProfile, Boolean) -> Unit = { _, _ -> },
+    onUpdateSubmissionStatus: (KhedmotSubmission, String) -> Unit = { _, _ -> },
     onVerifyMadrasa: (MadrasaProfile, Boolean) -> Unit,
     onVerifyPost: (FeedPost, Boolean, String) -> Unit,
     onToggleBoostPost: (FeedPost, Boolean) -> Unit,
     onSendAnnouncement: (title: String, message: String) -> Unit,
+    onPublishQuickNotice: (title: String, description: String, noticeType: String) -> Unit = { title, desc, _ ->
+        onSendAnnouncement(title, desc)
+    },
+    onRecordLiveAdminAction: (eventType: String, title: String, message: String, referenceId: String) -> Unit = { _, _, _, _ -> },
     onRequestPasswordReset: (email: String) -> Unit = {},
     onSendTestTelegramAlert: (customMessage: String) -> Unit = {},
     onDeletePost: (String) -> Unit
 ) {
-    val context = LocalContext.current
-    var announcementTitle by remember { mutableStateOf("") }
-    var announcementBody by remember { mutableStateOf("") }
-    var resetEmailInput by remember(adminEmail) {
-        mutableStateOf(adminEmail.ifBlank { "fyslahm28@gmail.com" })
-    }
-    var customTelegramMessage by remember { mutableStateOf("") }
-    val isBotConfigured = remember { TelegramNotificationHelper.isTelegramBotConfigured() }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(14.dp)
-            .testTag("admin_panel_screen")
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, QawmiMintBorder, RoundedCornerShape(16.dp)),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = QawmiMintSurface)
-        ) {
-            Row(
-                modifier = Modifier.padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.AdminPanelSettings,
-                    contentDescription = null,
-                    tint = QawmiDeepGreen,
-                    modifier = Modifier.size(32.dp)
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = "অ্যাডমিন ও তদারকি প্যানেল (নাজিমে আলা)",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = QawmiTextDark,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = if (isAdminUser) {
-                            "যাচাইকৃত অ্যাডমিন: ${adminEmail.ifBlank { "নাজিমে আলা" }} • মোবাইল: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER}"
-                        } else {
-                            "অনুমোদনহীন প্রবেশাধিকার: শুধুমাত্র যাচাইকৃত অ্যাডমিন এই প্যানেল ব্যবহার করতে পারবেন।"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (isAdminUser) QawmiDeepGreen else Color(0xFFC62828),
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        if (!isAdminUser) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color(0xFFEF9A9A), RoundedCornerShape(14.dp)),
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "অ্যাডমিন অ্যাক্সেস সংরক্ষিত",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = Color(0xFFC62828),
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "শুধুমাত্র অনুমোদিত অ্যাডমিন অ্যাকাউন্ট (Firebase Authentication ও সার্ভার-সাইড Security Rules দ্বারা যাচাইকৃত) দিয়ে লগইন করলে অ্যাডমিন প্যানেল ব্যবহার করা যাবে।",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = QawmiTextDark
-                    )
-                }
-            }
-            return@Column
-        }
-
-        val madrasas = (madrasasState as? UiState.Success)?.data ?: emptyList()
-        val posts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
-        val telegramLogs = (telegramNotificationsState as? UiState.Success)?.data ?: emptyList()
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            // 1. ADMIN IDENTITY, SECURITY & PASSWORD RECOVERY CARD
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "১. অনুমোদিত অ্যাডমিন পরিচয় ও পাসওয়ার্ড পুনরুদ্ধার",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = QawmiDeepGreen,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = QawmiDeepGreen
-                            ) {
-                                Text(
-                                    text = "SUPER_ADMIN ✓",
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = QawmiGold,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = QawmiSoftBg,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp)
-                            ) {
-                                Text(
-                                    text = "সার্ভার-যাচাইকৃত অনুমোদিত অ্যাডমিন ইমেইলসমূহ:",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = QawmiDeepGreen,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                AdminSecurityHelper.AUTHORIZED_ADMIN_EMAILS.forEach { mail ->
-                                    Text(
-                                        text = "• $mail",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = QawmiTextDark,
-                                        fontWeight = if (mail.equals(adminEmail, ignoreCase = true)) FontWeight.Bold else FontWeight.Normal
-                                    )
-                                }
-                                Text(
-                                    text = "অ্যাডমিন মোবাইল নম্বর: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = QawmiDeepGreen,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        OutlinedTextField(
-                            value = resetEmailInput,
-                            onValueChange = { resetEmailInput = it },
-                            label = { Text("পাসওয়ার্ড পুনরুদ্ধারের জন্য নিবন্ধিত অ্যাডমিন ইমেইল") },
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("admin_panel_reset_email_input")
-                        )
-
-                        Button(
-                            onClick = { onRequestPasswordReset(resetEmailInput) },
-                            enabled = !isSubmitting,
-                            colors = ButtonDefaults.buttonColors(containerColor = QawmiSeekerBlue),
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier
-                                .align(Alignment.End)
-                                .testTag("admin_panel_reset_password_button")
-                        ) {
-                            Icon(Icons.Default.LockReset, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Password Reset Link পাঠান")
-                        }
-                    }
-                }
-            }
-
-            // 2. TELEGRAM NOTIFICATION SYSTEM & REAL-TIME DISPATCH CENTER
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, QawmiDeepGreen, RoundedCornerShape(14.dp)),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "২. টেলিগ্রাম নোটিফিকেশন সিস্টেম ও ইত্তেলা লগ",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = QawmiDeepGreen,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = if (isBotConfigured) QawmiVerifiedGreen else QawmiDarkGreen
-                            ) {
-                                Text(
-                                    text = if (isBotConfigured) "Bot API সংযুক্ত ✓" else "Firestore Queue সক্রিয়",
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        Text(
-                            text = buildString {
-                                append("প্রধান অ্যাডমিন টেলিগ্রাম আইডি: ${TelegramNotificationHelper.DEFAULT_TELEGRAM_CHANNEL}")
-                                if (isBotConfigured) {
-                                    append(" • Bot Token ও Chat ID সংযুক্ত ও সচল ✓")
-                                }
-                                append("\nঅ্যাডমিন লগইন/লগআউট, বিজ্ঞপ্তি, আবেদন, মাদরাসা যাচাই ও নিরাপত্তা অডিট লগ স্বয়ংক্রিয়ভাবে বটের মাধ্যমে সরাসরি আপনার ইনবক্সে প্রেরিত হচ্ছে (হটলাইন: ${AdminSecurityHelper.ADMIN_MOBILE_NUMBER})।")
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = QawmiTextSecondary
-                        )
-
-                        OutlinedTextField(
-                            value = customTelegramMessage,
-                            onValueChange = { customTelegramMessage = it },
-                            label = { Text("প্রধান অ্যাডমিনের টেলিগ্রামে তাৎক্ষণিক বার্তা (ঐচ্ছিক)") },
-                            placeholder = { Text("যেমন: নতুন বিজ্ঞপ্তি ও মাদরাসা যাচাইকরণ সম্পন্ন হয়েছে...") },
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("admin_telegram_custom_input")
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedButton(
-                                onClick = { TelegramNotificationHelper.openTelegramChannel(context) },
-                                shape = RoundedCornerShape(50),
-                                modifier = Modifier.testTag("admin_open_telegram_channel_button")
-                            ) {
-                                Text(
-                                    text = TelegramNotificationHelper.DEFAULT_TELEGRAM_CHANNEL,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = QawmiDeepGreen,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-
-                            Button(
-                                onClick = {
-                                    onSendTestTelegramAlert(customTelegramMessage)
-                                    customTelegramMessage = ""
-                                },
-                                enabled = !isSubmitting,
-                                colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
-                                shape = RoundedCornerShape(50),
-                                modifier = Modifier.testTag("admin_send_telegram_test_button")
-                            ) {
-                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("টেলিগ্রাম ইত্তেলা পাঠান")
-                            }
-                        }
-
-                        if (telegramLogs.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "সাম্প্রতিক টেলিগ্রাম ইত্তেলা সমূহ (${IslamicDateAndPrayerHelper.toBanglaDigits(telegramLogs.size.toString())} টি):",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = QawmiDeepGreen,
-                                fontWeight = FontWeight.Bold
-                            )
-                            telegramLogs.take(5).forEach { tgLog ->
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = QawmiSoftBg,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
-                                        .testTag("telegram_log_item_${tgLog.id}")
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = tgLog.title,
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = QawmiDeepGreen,
-                                                fontWeight = FontWeight.Bold,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Surface(
-                                                shape = RoundedCornerShape(50),
-                                                color = if (tgLog.deliveryStatus == "DELIVERED") QawmiVerifiedGreen else QawmiGold
-                                            ) {
-                                                Text(
-                                                    text = if (tgLog.deliveryStatus == "DELIVERED") "DELIVERED" else "QUEUED",
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontSize = 9.5.sp,
-                                                    color = if (tgLog.deliveryStatus == "DELIVERED") Color.White else QawmiTextDark,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                            }
-                                        }
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = tgLog.message,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = QawmiTextDark
-                                        )
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "${tgLog.actorName} • ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(tgLog.createdAt)}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = QawmiTextMuted
-                                            )
-                                            OutlinedButton(
-                                                onClick = {
-                                                    val formatted = TelegramNotificationHelper.formatTelegramEventMessage(
-                                                        eventType = tgLog.eventType,
-                                                        title = tgLog.title,
-                                                        message = tgLog.message,
-                                                        actorName = tgLog.actorName,
-                                                        targetPhone = tgLog.targetPhone
-                                                    )
-                                                    TelegramNotificationHelper.shareAlertToTelegram(context, formatted)
-                                                },
-                                                shape = RoundedCornerShape(50),
-                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                                modifier = Modifier.height(26.dp)
-                                            ) {
-                                                Text(
-                                                    text = "টেলিগ্রামে ফরোয়ার্ড",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = QawmiDeepGreen
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 3. ADMIN BROADCAST ANNOUNCEMENT CARD
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, QawmiDeepGreen, RoundedCornerShape(14.dp)),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "৩. সকল ব্যবহারকারীর জন্য অ্যাডমিনের ঘোষণা (Push ও ইন-অ্যাপ ইত্তেলা)",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = QawmiDeepGreen,
-                            fontWeight = FontWeight.Bold
-                        )
-                        OutlinedTextField(
-                            value = announcementTitle,
-                            onValueChange = { announcementTitle = it },
-                            label = { Text("ঘোষণার শিরোনাম *") },
-                            placeholder = { Text("যেমন: নতুন শিক্ষাবর্ষের খেদমত বিজ্ঞপ্তি সংক্রান্ত জরুরি এলান") },
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("admin_announcement_title_input")
-                        )
-                        OutlinedTextField(
-                            value = announcementBody,
-                            onValueChange = { announcementBody = it },
-                            label = { Text("বিস্তারিত ঘোষণা / বার্তা *") },
-                            placeholder = { Text("সকল মুহতামিম ও মুদাররিস ভাইদের অবগতির জন্য জানানো যাচ্ছে যে...") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(88.dp)
-                                .testTag("admin_announcement_body_input")
-                        )
-                        Button(
-                            onClick = {
-                                onSendAnnouncement(announcementTitle, announcementBody)
-                                announcementTitle = ""
-                                announcementBody = ""
-                            },
-                            enabled = !isSubmitting,
-                            colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier
-                                .align(Alignment.End)
-                                .testTag("admin_send_announcement_button")
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("ঘোষণা প্রকাশ করুন")
-                        }
-                    }
-                }
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "প্রকাশিত বিজ্ঞপ্তি ও Boost নিয়ন্ত্রণ (${posts.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = QawmiDeepGreen,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            items(posts, key = { "adm_p_${it.id}" }) { post ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(
-                            width = if (post.isBoosted) 2.dp else 1.dp,
-                            color = if (post.isBoosted) QawmiGold else QawmiMintBorder,
-                            shape = RoundedCornerShape(14.dp)
-                        ),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (post.isBoosted) Color(0xFFFFFDF6) else Color.White
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(post.title, fontWeight = FontWeight.Bold, color = QawmiTextDark)
-                                    if (post.isBoosted) {
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Surface(
-                                            shape = RoundedCornerShape(50),
-                                            color = QawmiDarkGreen
-                                        ) {
-                                            Text(
-                                                text = "★ Boosted",
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = QawmiGold,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    }
-                                }
-                                Text(
-                                    text = "পদ: ${post.designation} (${post.district})",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = QawmiTextSecondary
-                                )
-                            }
-                            IconButton(onClick = { onDeletePost(post.id) }) {
-                                Icon(Icons.Default.DeleteOutline, contentDescription = "মুছুন", tint = Color(0xFFC62828))
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Button(
-                                onClick = { onToggleBoostPost(post, !post.isBoosted) },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (post.isBoosted) QawmiDarkGreen else QawmiGold,
-                                    contentColor = if (post.isBoosted) Color.White else QawmiTextDark
-                                ),
-                                shape = RoundedCornerShape(50),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                modifier = Modifier
-                                    .height(32.dp)
-                                    .testTag("admin_panel_boost_btn_${post.id}")
-                            ) {
-                                Text(
-                                    text = if (post.isBoosted) "★ Boost সরান" else "★ ফিডে Boost করুন",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-
-                            Button(
-                                onClick = { onVerifyPost(post, !post.isVerifiedMadrasa, "APPROVED") },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (post.isVerifiedMadrasa) QawmiSeekerBlue else QawmiDeepGreen
-                                ),
-                                shape = RoundedCornerShape(50),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                modifier = Modifier.height(32.dp)
-                            ) {
-                                Text(
-                                    text = if (post.isVerifiedMadrasa) "আনভেরিফাই" else "ভেরিফাই ব্যাজ দিন",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "মাদরাসা যাচাইকরণ তালিকা (${madrasas.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = QawmiDeepGreen,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            items(madrasas, key = { "adm_m_${it.id}" }) { madrasa ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(madrasa.name, fontWeight = FontWeight.Bold, color = QawmiTextDark)
-                            Text("জেলা: ${madrasa.district} | মারহালা: ${madrasa.highestMarhala}", style = MaterialTheme.typography.bodySmall)
-                            Text(
-                                text = if (madrasa.isVerified) "অবস্থা: যাচাইকৃত ✓" else "অবস্থা: অযাচাইকৃত",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (madrasa.isVerified) QawmiVerifiedGreen else QawmiTextMuted
-                            )
-                        }
-                        Button(
-                            onClick = { onVerifyMadrasa(madrasa, !madrasa.isVerified) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (madrasa.isVerified) QawmiSeekerBlue else QawmiDeepGreen
-                            ),
-                            shape = RoundedCornerShape(50)
-                        ) {
-                            Text(
-                                text = if (madrasa.isVerified) "বাতিল" else "যাচাইকৃত করুন",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
+    ModernAdminPanelRoot(
+        isAdminUser = isAdminUser,
+        adminDisplayName = adminDisplayName,
+        adminPhotoUrl = adminPhotoUrl,
+        usersState = usersState,
+        submissionsState = submissionsState,
+        madrasasState = madrasasState,
+        feedPostsState = feedPostsState,
+        telegramNotificationsState = telegramNotificationsState,
+        isSubmitting = isSubmitting,
+        onVerifyUser = onVerifyUser,
+        onUpdateSubmissionStatus = onUpdateSubmissionStatus,
+        onVerifyMadrasa = onVerifyMadrasa,
+        onVerifyPost = onVerifyPost,
+        onToggleBoostPost = onToggleBoostPost,
+        onPublishQuickNotice = onPublishQuickNotice,
+        onSendAnnouncement = onSendAnnouncement,
+        onRecordLiveAdminAction = onRecordLiveAdminAction,
+        onSendTestTelegramAlert = onSendTestTelegramAlert,
+        onDeletePost = onDeletePost
+    )
 }
+
 
 @Composable
 fun FullPrayerScheduleScreen() {

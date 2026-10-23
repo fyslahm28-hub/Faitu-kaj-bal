@@ -142,7 +142,7 @@ class QawmiRepository(
             }
             return Result.failure(
                 IllegalArgumentException(
-                    "শুধুমাত্র অনুমোদিত অ্যাডমিন ইমেইলে (foysalahamad102@gmail.com, foysalahamad204@gmail.com, fyslahm28@gmail.com) পাসওয়ার্ড রিসেট লিংক পাঠানো যাবে।"
+                    "অনুমোদনহীন ইমেইল। পাসওয়ার্ড রিসেট শুধুমাত্র যাচাইকৃত অ্যাডমিন সেশনের জন্য প্রযোজ্য।"
                 )
             )
         }
@@ -1989,4 +1989,124 @@ class QawmiRepository(
             referenceId = "telegram_test_alert"
         )
     }
+
+    // --- 9. ADMIN PANEL MANAGEMENT (ব্যবহারকারী, আবেদন, সেটিংস ও লাইভ টেলিগ্রাম ইত্তেলা) ---
+
+    fun observeAllUsersForAdmin(): Flow<List<UserProfile>> {
+        val path = "users"
+        return db.collection(path)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { it.toUserProfileOrNull() }
+                    .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                emit(emptyList())
+            }
+    }
+
+    fun observeAllSubmissionsForAdmin(): Flow<List<KhedmotSubmission>> {
+        val path = "khedmot_submissions"
+        return db.collection(path)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toObjects(KhedmotSubmission::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                emit(emptyList())
+            }
+    }
+
+    suspend fun adminUpdateUserVerification(
+        user: UserProfile,
+        verified: Boolean,
+        adminName: String
+    ): Result<Unit> {
+        requireUserId()
+        val targetId = user.id.ifBlank { user.userId }
+        if (targetId.isBlank()) {
+            return Result.failure(IllegalArgumentException("ব্যবহারকারীর আইডি পাওয়া যায়নি।"))
+        }
+        val docRef = db.collection("users").document(targetId)
+        return try {
+            docRef.update(
+                mapOf(
+                    "isVerified" to verified,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            val resolvedAdmin = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" }
+            val eventType = if (verified) "ADMIN_VERIFICATION" else "CONTENT_MODERATION"
+            val title = if (verified) {
+                "ব্যবহারকারী সক্রিয় ও অনুমোদন করা হয়েছে"
+            } else {
+                "ব্যবহারকারী ব্লক / নিষ্ক্রিয় করা হয়েছে"
+            }
+            val message = if (verified) {
+                "ব্যবহারকারী '${user.fullName.ifBlank { targetId }}'-কে সক্রিয় (যাচাইকৃত) করা হয়েছে।"
+            } else {
+                "ব্যবহারকারী '${user.fullName.ifBlank { targetId }}'-এর অ্যাকাউন্ট নিষ্ক্রিয় / ব্লক করা হয়েছে।"
+            }
+            enqueueAndDispatchTelegramNotification(
+                eventType = eventType,
+                title = title,
+                message = message,
+                actorName = resolvedAdmin,
+                referenceId = targetId
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun adminUpdateSubmissionStatus(
+        submission: KhedmotSubmission,
+        newStatus: String,
+        adminName: String
+    ): Result<Unit> {
+        val resolvedAdmin = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" }
+        val res = updateSubmissionStatus(submission, newStatus, resolvedAdmin)
+        res.onSuccess {
+            val statusBangla = when (newStatus) {
+                "ACCEPTED" -> "নির্বাচিত (অনুমোদিত)"
+                "SHORTLISTED" -> "পর্যালোচনাধীন (প্রাথমিক নির্বাচিত)"
+                "REJECTED" -> "বাতিল"
+                else -> "নতুন"
+            }
+            enqueueAndDispatchTelegramNotification(
+                eventType = "KHEDMOT_SUBMISSION",
+                title = if (newStatus == "ACCEPTED") "আবেদন অনুমোদন করা হয়েছে" else "আবেদনের অবস্থা পরিবর্তন: $statusBangla",
+                message = "প্রার্থী: ${submission.applicantName} | পদ: ${submission.postDesignation} | বিজ্ঞপ্তি: ${submission.postTitle} | বর্তমান অবস্থা: $statusBangla",
+                actorName = resolvedAdmin,
+                referenceId = submission.id.ifBlank { "submission_update" }
+            )
+        }
+        return res
+    }
+
+    suspend fun adminRecordLiveChangeNotification(
+        eventType: String,
+        title: String,
+        message: String,
+        adminName: String,
+        referenceId: String = "admin_action"
+    ): Result<String> {
+        requireUserId()
+        return enqueueAndDispatchTelegramNotification(
+            eventType = eventType,
+            title = title,
+            message = message,
+            actorName = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" },
+            referenceId = referenceId
+        )
+    }
 }
+

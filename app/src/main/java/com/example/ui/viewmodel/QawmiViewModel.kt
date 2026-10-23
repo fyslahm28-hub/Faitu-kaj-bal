@@ -49,7 +49,12 @@ enum class MainDestination {
     MESSAGES,
     NOTIFICATIONS,
     ADMIN_PANEL,
-    PRAYER_SCHEDULE
+    PRAYER_SCHEDULE,
+    APP_SETTINGS,
+    ABOUT_APP,
+    ABOUT_DEVELOPER,
+    PRIVACY_AND_TERMS,
+    HELP_AND_SUPPORT
 }
 
 enum class FeedFilterTab {
@@ -299,6 +304,36 @@ class QawmiViewModel(
                     .catch { e ->
                         Log.w(TAG, "Error observing Telegram notifications", e)
                         emit(UiState.Error(e.localizedMessage ?: "টেলিগ্রাম নোটিফিকেশন লগ লোড করা যায়নি"))
+                    }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    val adminUsersState: StateFlow<UiState<List<UserProfile>>> = isAdminState
+        .flatMapLatest { isAdmin ->
+            if (!isAdmin) {
+                flowOf(UiState.Success(emptyList()))
+            } else {
+                repository.observeAllUsersForAdmin()
+                    .map<List<UserProfile>, UiState<List<UserProfile>>> { UiState.Success(it) }
+                    .catch { e ->
+                        Log.w(TAG, "Error observing admin users", e)
+                        emit(UiState.Error(e.localizedMessage ?: "ব্যবহারকারীর তালিকা লোড করা যায়নি"))
+                    }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    val adminSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = isAdminState
+        .flatMapLatest { isAdmin ->
+            if (!isAdmin) {
+                flowOf(UiState.Success(emptyList()))
+            } else {
+                repository.observeAllSubmissionsForAdmin()
+                    .map<List<KhedmotSubmission>, UiState<List<KhedmotSubmission>>> { UiState.Success(it) }
+                    .catch { e ->
+                        Log.w(TAG, "Error observing admin submissions", e)
+                        emit(UiState.Error(e.localizedMessage ?: "আবেদনের তালিকা লোড করা যায়নি"))
                     }
             }
         }
@@ -1106,9 +1141,139 @@ class QawmiViewModel(
             val result = repository.sendAdminTestTelegramNotification(adminName, customMessage)
             _isSubmitting.value = false
             result.onSuccess {
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, টেলিগ্রাম চ্যানেল (${com.example.ui.util.TelegramNotificationHelper.DEFAULT_TELEGRAM_CHANNEL}) ও অডিট লগে ইত্তেলা সফলভাবে সংরক্ষিত হয়েছে।"
+                val chatId = com.example.ui.util.TelegramNotificationHelper.resolveTargetChatId()
+                val botId = com.example.ui.util.TelegramNotificationHelper.resolveConfiguredBotId()
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, টেলিগ্রাম বট (Bot ID: $botId, Chat ID: $chatId) ও অডিট লগে ইত্তেলা সফলভাবে পাঠানো হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "টেলিগ্রাম নোটিফিকেশন পাঠাতে সমস্যা হয়েছে।"
+            }
+        }
+    }
+
+    fun showFeedbackMessage(message: String) {
+        _errorBanner.value = null
+        _feedbackBanner.value = message
+    }
+
+    fun adminUpdateUserVerification(user: UserProfile, verified: Boolean) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
+            return
+        }
+        viewModelScope.launch {
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.adminUpdateUserVerification(user, verified, adminName)
+            result.onSuccess {
+                _feedbackBanner.value = if (verified) {
+                    "ব্যবহারকারীকে সক্রিয় করা হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+                } else {
+                    "ব্যবহারকারী ব্লক / নিষ্ক্রিয় করা হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+                }
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "ব্যবহারকারীর অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
+            }
+        }
+    }
+
+    fun adminUpdateSubmissionStatus(submission: KhedmotSubmission, newStatus: String) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন আবেদনের অবস্থা পরিবর্তন করতে পারবেন।"
+            return
+        }
+        viewModelScope.launch {
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.adminUpdateSubmissionStatus(submission, newStatus, adminName)
+            result.onSuccess {
+                _feedbackBanner.value = "আবেদনের অবস্থা হালনাগাদ হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "আবেদনের অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
+            }
+        }
+    }
+
+    fun adminRecordChangeNotification(
+        eventType: String,
+        title: String,
+        message: String,
+        referenceId: String = "admin_action"
+    ) {
+        if (!isAdminUser) return
+        viewModelScope.launch {
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.adminRecordLiveChangeNotification(
+                eventType = eventType,
+                title = title,
+                message = message,
+                adminName = adminName,
+                referenceId = referenceId
+            )
+            result.onSuccess {
+                _feedbackBanner.value = "$title — টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+            }
+        }
+    }
+
+    fun adminPublishQuickNotice(
+        title: String,
+        description: String,
+        noticeType: String,
+        onComplete: () -> Unit = {}
+    ) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন বিজ্ঞপ্তি প্রকাশ করতে পারবেন।"
+            return
+        }
+        if (title.isBlank() || description.isBlank()) {
+            _errorBanner.value = "অনুগ্রহ করে বিজ্ঞপ্তির শিরোনাম ও বিবরণ পূরণ করুন।"
+            return
+        }
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val isFeatured = noticeType == "প্রধান" || noticeType == "জরুরি"
+            val result = repository.createFeedPost(
+                authorName = adminName,
+                postType = "JOB_CIRCULAR",
+                title = title.trim(),
+                district = "সারা বাংলাদেশ",
+                upazilaOrLocation = noticeType,
+                designation = if (noticeType == "জরুরি") "জরুরি বিজ্ঞপ্তি" else "দ্বীনি খেদমত বিজ্ঞপ্তি",
+                qualification = "সংশ্লিষ্ট মারহালা / বিভাগ",
+                salaryOrExperience = "আলোচনা সাপেক্ষে",
+                deadlineOrPreferredDistricts = noticeType,
+                description = description.trim(),
+                contactNumber = AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+                authorPhotoUrl = resolveActorPhotoUrl()
+            )
+            _isSubmitting.value = false
+            result.onSuccess { postId ->
+                if (isFeatured) {
+                    val createdPost = FeedPost(
+                        id = postId,
+                        authorId = currentUserId,
+                        authorName = adminName,
+                        title = title.trim(),
+                        designation = if (noticeType == "জরুরি") "জরুরি বিজ্ঞপ্তি" else "দ্বীনি খেদমত বিজ্ঞপ্তি",
+                        isVerifiedMadrasa = true,
+                        isBoosted = true
+                    )
+                    repository.adminTogglePostBoost(createdPost, true, adminName)
+                }
+                repository.adminRecordLiveChangeNotification(
+                    eventType = "ADMIN_ANNOUNCEMENT",
+                    title = "বিজ্ঞপ্তি প্রকাশ করা হয়েছে ($noticeType)",
+                    message = "শিরোনাম: ${title.trim()} | ধরন: $noticeType | বিবরণ: ${description.trim().take(200)}",
+                    adminName = adminName,
+                    referenceId = postId.ifBlank { "admin_notice" }
+                )
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, নতুন বিজ্ঞপ্তি প্রকাশিত হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+                onComplete()
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "বিজ্ঞপ্তি প্রকাশ করা যায়নি।"
             }
         }
     }
@@ -1123,3 +1288,4 @@ class QawmiViewModel(
         const val TAG = "QawmiViewModel"
     }
 }
+

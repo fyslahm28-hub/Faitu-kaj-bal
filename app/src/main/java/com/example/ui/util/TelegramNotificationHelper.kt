@@ -2,7 +2,6 @@ package com.example.ui.util
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import com.example.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -16,12 +15,20 @@ import java.util.TimeZone
 
 object TelegramNotificationHelper {
 
-    const val DEFAULT_TELEGRAM_CHANNEL = "@Q_kormosongsthan_Bangladesh"
     const val DEFAULT_ADMIN_CHAT_ID = "6255562134"
-    const val TELEGRAM_CHANNEL_URL = "https://t.me/Q_kormosongsthan_Bangladesh"
+    const val DEFAULT_ADMIN_BOT_ID = "8655012321"
 
     private const val PLACEHOLDER_TOKEN = "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE"
     private const val PLACEHOLDER_CHAT_ID = "TELEGRAM_CHAT_ID_DEFAULT_VALUE"
+
+    @Volatile
+    private var customChatIdOverride: String? = null
+
+    @Volatile
+    private var customBotIdOverride: String? = null
+
+    @Volatile
+    private var customBotTokenOverride: String? = null
 
     // Regex patterns to strictly redact any accidental secrets, tokens, OTPs, or reset links
     private val BOT_TOKEN_REGEX = Regex("""\b\d{8,12}:[A-Za-z0-9_-]{25,}\b""")
@@ -29,7 +36,26 @@ object TelegramNotificationHelper {
     private val RESET_LINK_REGEX = Regex("""https?://[^\s]*(oobCode|resetPassword|apiKey=)[^\s]*""", RegexOption.IGNORE_CASE)
     private val PASSWORD_KV_REGEX = Regex("""(?i)(password|পাসওয়ার্ড|পাসওয়ার্ড|otp|secret|token)\s*[:=]\s*\S+""")
 
+    fun updateRuntimeTelegramConfig(chatId: String, botIdOrToken: String) {
+        val cleanChatId = chatId.trim()
+        if (cleanChatId.isNotBlank()) {
+            customChatIdOverride = cleanChatId
+        }
+        val cleanBot = botIdOrToken.trim()
+        if (cleanBot.isNotBlank()) {
+            if (cleanBot.contains(":")) {
+                customBotTokenOverride = cleanBot
+                customBotIdOverride = cleanBot.substringBefore(":").trim()
+            } else {
+                customBotIdOverride = cleanBot
+            }
+        }
+    }
+
     fun resolveTargetChatId(): String {
+        val override = customChatIdOverride?.trim().orEmpty()
+        if (override.isNotBlank()) return override
+
         val configured = BuildConfig.TELEGRAM_CHAT_ID.trim()
         return if (configured.isNotBlank() && configured != PLACEHOLDER_CHAT_ID) {
             configured
@@ -38,8 +64,27 @@ object TelegramNotificationHelper {
         }
     }
 
+    fun resolveConfiguredBotId(): String {
+        val override = customBotIdOverride?.trim().orEmpty()
+        if (override.isNotBlank()) return override
+
+        val token = resolveActiveBotToken()
+        val extractedId = token.substringBefore(":").trim()
+        return if (extractedId.isNotBlank() && extractedId.all { it.isDigit() }) {
+            extractedId
+        } else {
+            DEFAULT_ADMIN_BOT_ID
+        }
+    }
+
+    private fun resolveActiveBotToken(): String {
+        val overrideToken = customBotTokenOverride?.trim().orEmpty()
+        if (overrideToken.isNotBlank()) return overrideToken
+        return BuildConfig.TELEGRAM_BOT_TOKEN.trim()
+    }
+
     fun isTelegramBotConfigured(): Boolean {
-        val token = BuildConfig.TELEGRAM_BOT_TOKEN.trim()
+        val token = resolveActiveBotToken()
         val chatId = resolveTargetChatId()
         return token.isNotBlank() &&
             token != PLACEHOLDER_TOKEN &&
@@ -96,7 +141,8 @@ object TelegramNotificationHelper {
 
         return buildString {
             appendLine("【কওমি কর্মসংস্থান • প্রধান অ্যাডমিন টেলিগ্রাম ইত্তেলা】")
-            appendLine("প্রধান অ্যাডমিন আইডি: $DEFAULT_TELEGRAM_CHANNEL")
+            appendLine("টেলিগ্রাম চ্যাট আইডি: ${resolveTargetChatId()}")
+            appendLine("টেলিগ্রাম বট আইডি: ${resolveConfiguredBotId()}")
             appendLine("সময়: $timestampText")
             appendLine("কার্যক্রমের ধরন: $eventBadge")
             appendLine("শিরোনাম: $safeTitle")
@@ -106,18 +152,9 @@ object TelegramNotificationHelper {
         }.trim()
     }
 
-    @Volatile
-    private var cachedPersonalChatId: String? = null
-
     /**
-     * Dispatches a real Telegram Bot API notification to `@Q_kormosongsthan_Bangladesh`
-     * (whether it is a personal Chief Admin Telegram account or a channel/group) when
-     * TELEGRAM_BOT_TOKEN is configured in BuildConfig via AI Studio Secrets Panel.
-     *
-     * Note on personal Telegram accounts: Telegram Bot API requires numeric chat_id for personal
-     * user DMs. If `chat_id = "@Q_kormosongsthan_Bangladesh"` returns 400 for a personal account,
-     * this helper automatically queries `getUpdates` to resolve the Chief Admin's numeric `chat.id`
-     * (once the Chief Admin has sent `/start` to the bot) and delivers the message directly.
+     * Dispatches a real Telegram Bot API notification using the configured Bot Token and
+     * Admin Chat ID (`6255562134`) from BuildConfig / runtime config.
      */
     suspend fun dispatchToTelegramBot(
         eventType: String,
@@ -129,8 +166,8 @@ object TelegramNotificationHelper {
         if (!isTelegramBotConfigured()) {
             return@withContext false
         }
-        val token = BuildConfig.TELEGRAM_BOT_TOKEN.trim()
-        val configuredTarget = cachedPersonalChatId ?: resolveTargetChatId()
+        val token = resolveActiveBotToken()
+        val configuredTarget = resolveTargetChatId()
         val formattedText = formatTelegramEventMessage(
             eventType = eventType,
             title = title,
@@ -139,22 +176,7 @@ object TelegramNotificationHelper {
             targetPhone = targetPhone
         )
 
-        if (sendTelegramMessageRequest(token, configuredTarget, formattedText)) {
-            return@withContext true
-        }
-
-        // If target is a personal @username (like @Q_kormosongsthan_Bangladesh), resolve numeric chat_id via getUpdates
-        if (configuredTarget.startsWith("@")) {
-            val resolvedNumericId = resolveNumericChatIdFromBotUpdates(
-                token = token,
-                targetUsername = configuredTarget.removePrefix("@")
-            )
-            if (!resolvedNumericId.isNullOrBlank()) {
-                cachedPersonalChatId = resolvedNumericId
-                return@withContext sendTelegramMessageRequest(token, resolvedNumericId, formattedText)
-            }
-        }
-        false
+        sendTelegramMessageRequest(token, configuredTarget, formattedText)
     }
 
     private fun sendTelegramMessageRequest(
@@ -188,99 +210,21 @@ object TelegramNotificationHelper {
         }
     }
 
-    private fun resolveNumericChatIdFromBotUpdates(
-        token: String,
-        targetUsername: String
-    ): String? {
-        return try {
-            val updatesUrl = URL("https://api.telegram.org/bot$token/getUpdates?limit=50")
-            val conn = (updatesUrl.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 5000
-                readTimeout = 5000
-            }
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                conn.disconnect()
-                return null
-            }
-            val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            conn.disconnect()
-
-            val root = JSONObject(body)
-            val results = root.optJSONArray("result") ?: return null
-            var fallbackFirstPrivateChatId: String? = null
-
-            for (i in results.length() - 1 downTo 0) {
-                val item = results.optJSONObject(i) ?: continue
-                val msg = item.optJSONObject("message")
-                    ?: item.optJSONObject("edited_message")
-                    ?: item.optJSONObject("my_chat_member")
-                    ?: continue
-                val chat = msg.optJSONObject("chat") ?: continue
-                val chatId = chat.optLong("id", 0L)
-                if (chatId == 0L) continue
-                val username = chat.optString("username", "")
-                if (username.equals(targetUsername, ignoreCase = true)) {
-                    return chatId.toString()
-                }
-                if (fallbackFirstPrivateChatId == null && chat.optString("type") == "private") {
-                    fallbackFirstPrivateChatId = chatId.toString()
-                }
-            }
-            fallbackFirstPrivateChatId
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    fun openTelegramChannel(context: Context) {
-        val cleanUsername = DEFAULT_TELEGRAM_CHANNEL.removePrefix("@")
-        try {
-            val tgDeepLink = Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve?domain=$cleanUsername")).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(tgDeepLink)
-        } catch (_: Exception) {
-            try {
-                val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse(TELEGRAM_CHANNEL_URL)).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(webIntent)
-            } catch (_: Exception) {
-                // Ignore if browser/Telegram unavailable
-            }
-        }
-    }
-
     fun shareAlertToTelegram(context: Context, formattedText: String) {
         val safeText = sanitizeSensitiveContent(formattedText)
-        val cleanUsername = DEFAULT_TELEGRAM_CHANNEL.removePrefix("@")
         try {
-            val encodedText = Uri.encode(safeText)
-            val directAdminUri = Uri.parse("tg://resolve?domain=$cleanUsername&text=$encodedText")
-            val intent = Intent(Intent.ACTION_VIEW, directAdminUri).apply {
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, safeText)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(intent)
+            context.startActivity(
+                Intent.createChooser(sendIntent, "প্রধান অ্যাডমিনের টেলিগ্রামে ইত্তেলা পাঠান").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
         } catch (_: Exception) {
-            try {
-                val encodedText = Uri.encode(safeText)
-                val tgUri = Uri.parse("https://t.me/share/url?url=${Uri.encode(TELEGRAM_CHANNEL_URL)}&text=$encodedText")
-                val intent = Intent(Intent.ACTION_VIEW, tgUri).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
-            } catch (_: Exception) {
-                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, safeText)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(Intent.createChooser(sendIntent, "প্রধান অ্যাডমিনের টেলিগ্রামে ইত্তেলা পাঠান").apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                })
-            }
+            // Ignore if chooser unavailable
         }
     }
 }

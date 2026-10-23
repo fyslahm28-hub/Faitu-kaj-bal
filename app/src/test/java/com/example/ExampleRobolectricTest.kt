@@ -869,7 +869,129 @@ class ExampleRobolectricTest {
         assertEquals("আব্দুল্লাহ রহমান", parsed?.replyToSenderName)
         assertEquals("আসসালামু আলাইকুম", parsed?.replyToSnippet)
     }
+
+    @Test
+    @Config(qualifiers = "w420dp-h840dp")
+    fun `Modernized AdminPanelScreen renders 12-screen layout, dispatches live Telegram notifications, and hides admin Gmail addresses`() {
+        val dispatchedTelegramEvents = mutableListOf<Pair<String, String>>()
+        var publishedNoticeTitle = ""
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(820.dp)) {
+                    com.example.ui.screens.AdminPanelScreen(
+                        isAdminUser = true,
+                        adminDisplayName = "অ্যাডমিন",
+                        usersState = UiState.Success(emptyList()),
+                        submissionsState = UiState.Success(emptyList()),
+                        madrasasState = UiState.Success(emptyList()),
+                        feedPostsState = UiState.Success(emptyList()),
+                        telegramNotificationsState = UiState.Success(emptyList()),
+                        onVerifyMadrasa = { _, _ -> },
+                        onVerifyPost = { _, _, _ -> },
+                        onToggleBoostPost = { _, _ -> },
+                        onPublishQuickNotice = { title, _, _ ->
+                            publishedNoticeTitle = title
+                        },
+                        onSendAnnouncement = { _, _ -> },
+                        onRecordLiveAdminAction = { eventType, title, _, _ ->
+                            dispatchedTelegramEvents.add(eventType to title)
+                        },
+                        onDeletePost = {}
+                    )
+                }
+            }
+        }
+
+        // Verify Dashboard (Screen 1) elements and that NO admin Gmail addresses are exposed
+        composeTestRule.onNodeWithText("এডমিন প্যানেল").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_stat_users").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_stat_applications").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_stat_notices").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_stat_visits").assertIsDisplayed()
+        composeTestRule.onNodeWithText("সাম্প্রতিক কার্যক্রম").assertIsDisplayed()
+        composeTestRule.onNodeWithText("foysalahamad102@gmail.com").assertDoesNotExist()
+        composeTestRule.onNodeWithText("foysalahamad204@gmail.com").assertDoesNotExist()
+        composeTestRule.onNodeWithText("fyslahm28@gmail.com").assertDoesNotExist()
+
+        // Navigate to Users Management (Screen 2)
+        composeTestRule.onNodeWithTag("admin_tab_users").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("ব্যবহারকারী ব্যবস্থাপনা").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_users_search_input").assertIsDisplayed()
+
+        // Navigate to Notices Management (Screen 3) & Add New Notice (Screen 7)
+        composeTestRule.onNodeWithTag("admin_tab_notices").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("বিজ্ঞপ্তি ব্যবস্থাপনা").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_add_new_notice_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("নতুন বিজ্ঞপ্তি যোগ করুন").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_announcement_title_input").performTextInput("নতুন শিক্ষক নিয়োগ")
+        composeTestRule.onNodeWithTag("admin_announcement_body_input").performTextInput("জামিয়া ইসলামিয়ায় দাওরায়ে হাদিস বিভাগে শিক্ষক আবশ্যক।")
+        composeTestRule.onNodeWithTag("admin_send_announcement_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("নতুন শিক্ষক নিয়োগ", publishedNoticeTitle)
+
+        // Navigate to Applications Management (Screen 4)
+        composeTestRule.onNodeWithTag("admin_tab_applications").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("আবেদন ব্যবস্থাপনা").assertIsDisplayed()
+
+        // Navigate to Settings & Logs Hub (Screen 6) -> Telegram Integration (Screen 11)
+        composeTestRule.onNodeWithTag("admin_tab_settings_hub").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("সেটিংস ও লগ").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_settings_row_5").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("টেলিগ্রাম ইন্টিগ্রেশন").assertIsDisplayed()
+        composeTestRule.onNodeWithText("@Q_kormosngsthan_Bangladesh").assertDoesNotExist()
+        composeTestRule.onNodeWithText("চ্যাট আইডি (Chat ID): 6255562134").assertIsDisplayed()
+        composeTestRule.onNodeWithText("বট আইডি (Bot ID): 8655012321").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_telegram_chat_id_input").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_telegram_bot_id_input").assertIsDisplayed()
+    }
+
+    @Test
+    fun `Non-duplicate Three-Line Drawer screens render App Settings, About App, and About Developer`() {
+        var feedbackShown = ""
+        var currentTab by mutableStateOf("SETTINGS")
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(820.dp)) {
+                    when (currentTab) {
+                        "SETTINGS" -> com.example.ui.screens.UserAppSettingsScreen(
+                            onShowFeedback = { feedbackShown = it }
+                        )
+                        "ABOUT_APP" -> com.example.ui.screens.AboutAppScreen()
+                        "ABOUT_DEV" -> com.example.ui.screens.AboutDeveloperScreen(
+                            onShowFeedback = { feedbackShown = it }
+                        )
+                    }
+                }
+            }
+        }
+
+        composeTestRule.onNodeWithTag("user_app_settings_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithText("অ্যাপ সেটিংস").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("user_app_settings_screen").performScrollToIndex(4)
+        composeTestRule.onNodeWithTag("save_user_app_settings_button").performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(feedbackShown.contains("সেটিংস সংরক্ষিত"))
+
+        currentTab = "ABOUT_APP"
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_app_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithText("আমাদের লক্ষ্য ও উদ্দেশ্য").assertIsDisplayed()
+
+        currentTab = "ABOUT_DEV"
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_developer_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithText("কওমি কর্মসংস্থান কারিগরি টিম").assertIsDisplayed()
+    }
 }
+
 
 
 

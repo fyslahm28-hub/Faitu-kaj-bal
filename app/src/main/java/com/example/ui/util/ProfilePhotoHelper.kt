@@ -54,20 +54,24 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Converts a picked chat attachment image [Uri] into a compressed JPEG Base64 data URL
-     * preserving aspect ratio so 1-5 images can be previewed and stored cleanly.
+     * Converts a picked chat attachment image [Uri] into a high-definition JPEG Base64 data URL
+     * preserving aspect ratio and fine typography clarity so text in documents, job circulars,
+     * and screenshots remains sharp and readable.
      */
     fun encodeChatAttachmentUriToDataUrl(
         context: Context,
         uri: Uri,
-        maxDimensionPx: Int = 480,
-        quality: Int = 66
+        maxDimensionPx: Int = 1800,
+        quality: Int = 92
     ): String? {
         return try {
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: return null
-            val original = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-            val scaled = scalePreservingAspectRatio(original, maxDimensionPx)
+            val options = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val original = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
+            val scaled = scalePreservingAspectRatioForTextClarity(original, maxDimensionPx)
             encodeBitmapToDataUrl(scaled, quality = quality)
         } catch (e: Exception) {
             null
@@ -85,16 +89,34 @@ object ProfilePhotoHelper {
     ): List<String> {
         val remainingSlots = (MAX_CHAT_IMAGES_PER_MESSAGE - existingImages.size).coerceAtLeast(0)
         if (remainingSlots == 0) return existingImages.take(MAX_CHAT_IMAGES_PER_MESSAGE)
+        val totalPlannedCount = (existingImages.size + min(uris.size, remainingSlots))
+            .coerceIn(1, MAX_CHAT_IMAGES_PER_MESSAGE)
+        val targetMaxDim = when (totalPlannedCount) {
+            1 -> 1800
+            2 -> 1600
+            else -> 1440
+        }
+        val targetQuality = when (totalPlannedCount) {
+            1 -> 92
+            2 -> 88
+            else -> 85
+        }
         val newlyEncoded = uris.take(remainingSlots).mapNotNull { uri ->
-            encodeChatAttachmentUriToDataUrl(context, uri)
+            encodeChatAttachmentUriToDataUrl(
+                context = context,
+                uri = uri,
+                maxDimensionPx = targetMaxDim,
+                quality = targetQuality
+            )
         }
         return (existingImages + newlyEncoded).take(MAX_CHAT_IMAGES_PER_MESSAGE)
     }
 
     /**
-     * Uploads up to 5 chat images to Firebase Storage and returns their URLs.
-     * Falls back seamlessly to the compact JPEG data URL if Firebase Storage bucket
-     * is offline or unprovisioned so images always render across personal & group chats.
+     * Uploads up to 5 chat images to Firebase Storage at full HD quality and returns their URLs.
+     * If Firebase Storage is unavailable, fits each image into the maximum safe Firestore document
+     * budget (~780 KB total Base64 across all images in the message) so single photos keep up to
+     * ~580 KB of crisp HD detail and text on circulars/screenshots stays completely legible.
      */
     suspend fun uploadChatImagesToFirebaseStorage(
         imageItems: List<String>,
@@ -102,11 +124,13 @@ object ProfilePhotoHelper {
     ): List<String> {
         val capped = imageItems.map { it.trim() }.filter { it.isNotBlank() }.take(MAX_CHAT_IMAGES_PER_MESSAGE)
         if (capped.isEmpty()) return emptyList()
+        val maxBase64CharsPerImage = (780_000 / capped.size.coerceAtLeast(1)).coerceAtLeast(140_000)
+
         return capped.mapIndexed { index, item ->
             if (!item.startsWith("data:image")) {
                 item
             } else {
-                val uploadedUrl = withTimeoutOrNull(2200L) {
+                val uploadedUrl = withTimeoutOrNull(6000L) {
                     try {
                         val commaIdx = item.indexOf(',')
                         if (commaIdx == -1) return@withTimeoutOrNull null
@@ -119,7 +143,8 @@ object ProfilePhotoHelper {
                         null
                     }
                 }
-                uploadedUrl?.takeIf { it.isNotBlank() } ?: item
+                uploadedUrl?.takeIf { it.isNotBlank() }
+                    ?: ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
             }
         }
     }
@@ -189,22 +214,74 @@ object ProfilePhotoHelper {
             if (commaIndex == -1) return null
             val base64Part = photoUrl.substring(commaIndex + 1)
             val bytes = Base64.decode(base64Part, Base64.DEFAULT)
-            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val options = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
             bitmap.asImageBitmap()
         } catch (e: Exception) {
             null
         }
     }
 
-    private fun scalePreservingAspectRatio(src: Bitmap, maxDimPx: Int): Bitmap {
+    /**
+     * Scales an image while preserving aspect ratio. For tall screenshots or circular notices
+     * (aspect ratio > 1.5), allows a larger long-edge ceiling up to 2200px so the shorter edge
+     * (text width) remains wide and small Bangla/Arabic letters stay sharp.
+     */
+    private fun scalePreservingAspectRatioForTextClarity(src: Bitmap, maxDimPx: Int): Bitmap {
         val width = src.width
         val height = src.height
         val longest = max(width, height)
-        if (longest <= maxDimPx || longest <= 0) return src
-        val ratio = maxDimPx.toFloat() / longest.toFloat()
+        val shortest = min(width, height).coerceAtLeast(1)
+        val aspect = longest.toFloat() / shortest.toFloat()
+        val effectiveMaxDim = if (aspect >= 1.55f) {
+            max(maxDimPx, 2200)
+        } else {
+            maxDimPx
+        }
+        if (longest <= effectiveMaxDim || longest <= 0) return src
+        val ratio = effectiveMaxDim.toFloat() / longest.toFloat()
         val targetW = (width * ratio).roundToInt().coerceAtLeast(1)
         val targetH = (height * ratio).roundToInt().coerceAtLeast(1)
         return Bitmap.createScaledBitmap(src, targetW, targetH, true)
+    }
+
+    /**
+     * Ensures a Data-URI image fits within [maxBase64Chars] (for Firestore fallback) while
+     * preserving the highest possible resolution and JPEG quality so text on photos never blurs.
+     */
+    private fun ensureDataUrlFitsBudget(dataUrl: String, maxBase64Chars: Int): String {
+        if (dataUrl.length <= maxBase64Chars) return dataUrl
+        return try {
+            val commaIdx = dataUrl.indexOf(',')
+            if (commaIdx == -1) return dataUrl
+            val bytes = Base64.decode(dataUrl.substring(commaIdx + 1), Base64.DEFAULT)
+            val options = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return dataUrl
+
+            // Try high-resolution steps first before reducing pixel dimensions
+            val attempts = listOf(
+                1600 to 86,
+                1480 to 82,
+                1320 to 80,
+                1180 to 78,
+                1024 to 75
+            )
+            for ((dim, qual) in attempts) {
+                val scaled = scalePreservingAspectRatioForTextClarity(bmp, dim)
+                val candidate = encodeBitmapToDataUrl(scaled, quality = qual)
+                if (candidate.length <= maxBase64Chars) {
+                    return candidate
+                }
+            }
+            val fallbackBmp = scalePreservingAspectRatioForTextClarity(bmp, 920)
+            encodeBitmapToDataUrl(fallbackBmp, quality = 72)
+        } catch (_: Exception) {
+            dataUrl
+        }
     }
 
     private fun centerCropAndScale(src: Bitmap, sizePx: Int): Bitmap {
@@ -221,3 +298,4 @@ object ProfilePhotoHelper {
         }
     }
 }
+

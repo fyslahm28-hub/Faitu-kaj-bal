@@ -67,8 +67,9 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun telegramNotificationHelper_formatsChannelAndRedactsSensitiveSecrets() {
-        assertEquals("@Q_kormosongsthan_Bangladesh", TelegramNotificationHelper.DEFAULT_TELEGRAM_CHANNEL)
+    fun telegramNotificationHelper_formatsChatAndBotIdAndRedactsSensitiveSecrets() {
+        assertEquals("6255562134", TelegramNotificationHelper.resolveTargetChatId())
+        assertEquals("8655012321", TelegramNotificationHelper.resolveConfiguredBotId())
 
         val message = TelegramNotificationHelper.formatTelegramEventMessage(
             eventType = "ADMIN_LOGIN",
@@ -78,7 +79,10 @@ class ExampleUnitTest {
             targetPhone = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
         )
 
-        assertTrue(message.contains("@Q_kormosongsthan_Bangladesh"))
+        assertTrue(message.contains("6255562134"))
+        assertTrue(message.contains("8655012321"))
+        assertFalse(message.contains("Q_kormosngsthan_Bangladesh"))
+        assertFalse(message.contains("Q_kormosongsthan_Bangladesh"))
         assertTrue(message.contains("সময়:"))
         assertTrue(message.contains("কার্যক্রমের ধরন:"))
         assertTrue(message.contains("সংশ্লিষ্ট পরিচয়: fyslahm28@gmail.com"))
@@ -102,7 +106,9 @@ class ExampleUnitTest {
     @Test
     fun telegramNotificationHelper_resolvesConfiguredChatIdAndDispatchesSafely() = kotlinx.coroutines.runBlocking {
         val targetChatId = TelegramNotificationHelper.resolveTargetChatId()
+        val configuredBotId = TelegramNotificationHelper.resolveConfiguredBotId()
         assertEquals("6255562134", targetChatId)
+        assertEquals("8655012321", configuredBotId)
         // Attempt dispatch using BuildConfig credentials (gracefully returns Boolean without throwing)
         val dispatched = TelegramNotificationHelper.dispatchToTelegramBot(
             eventType = "ADMIN_SECURITY",
@@ -110,6 +116,6 @@ class ExampleUnitTest {
             message = "কওমি কর্মসংস্থান অ্যাপ থেকে টেলিগ্রাম নোটিফিকেশন সিস্টেম সফলভাবে সচল রয়েছে।",
             actorName = "fyslahm28@gmail.com"
         )
-        println("Telegram dispatch result in test environment: $dispatched (chatId=$targetChatId)")
+        println("Telegram dispatch result in test environment: $dispatched (chatId=$targetChatId, botId=$configuredBotId)")
     }
 }

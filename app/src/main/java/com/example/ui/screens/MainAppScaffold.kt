@@ -30,22 +30,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Assignment
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Article
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DomainAdd
-import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MailOutline
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.VerifiedUser
-import androidx.compose.material.icons.filled.Work
+import androidx.compose.material.icons.filled.Policy
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -174,6 +171,8 @@ fun MainAppScaffold(
     val notificationsState by viewModel.notificationsState.collectAsStateWithLifecycle()
     val isAdminState by viewModel.isAdminState.collectAsStateWithLifecycle()
     val telegramNotificationsState by viewModel.telegramNotificationsState.collectAsStateWithLifecycle()
+    val adminUsersState by viewModel.adminUsersState.collectAsStateWithLifecycle()
+    val adminSubmissionsState by viewModel.adminSubmissionsState.collectAsStateWithLifecycle()
 
     val selectedPostForApply by viewModel.selectedPostForApply.collectAsStateWithLifecycle()
     val selectedPostForDetail by viewModel.selectedPostForDetail.collectAsStateWithLifecycle()
@@ -308,52 +307,6 @@ fun MainAppScaffold(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     DrawerMenuItem(
-                        label = "খেদমত (নিয়োগ বিজ্ঞপ্তি)",
-                        icon = Icons.Default.Work,
-                        selected = currentDestination == MainDestination.KHEDMOT,
-                        testTag = "drawer_item_khedmot"
-                    ) {
-                        scope.launch { drawerState.close() }
-                        viewModel.setFeedFilter(FeedFilterTab.JOB_CIRCULAR)
-                        viewModel.navigateTo(MainDestination.KHEDMOT)
-                    }
-                    DrawerMenuItem(
-                        label = "মাদরাসা ডিরেক্টরি",
-                        icon = Icons.Default.AccountBalance,
-                        selected = currentDestination == MainDestination.MADRASA,
-                        testTag = "drawer_item_madrasa"
-                    ) {
-                        scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.MADRASA)
-                    }
-                    DrawerMenuItem(
-                        label = "যাচাইকৃত মাদরাসা",
-                        icon = Icons.Default.VerifiedUser,
-                        selected = currentDestination == MainDestination.VERIFIED_MADRASAS,
-                        testTag = "drawer_item_verified_madrasas"
-                    ) {
-                        scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.VERIFIED_MADRASAS)
-                    }
-                    DrawerMenuItem(
-                        label = "নিয়োগ বিজ্ঞপ্তি দিন",
-                        icon = Icons.Default.Campaign,
-                        selected = currentDestination == MainDestination.PUBLISH_CIRCULAR,
-                        testTag = "drawer_item_publish_circular"
-                    ) {
-                        scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.PUBLISH_CIRCULAR)
-                    }
-                    DrawerMenuItem(
-                        label = "আবেদন প্রকাশ করুন",
-                        icon = Icons.Default.EditNote,
-                        selected = currentDestination == MainDestination.PUBLISH_APPLICATION,
-                        testTag = "drawer_item_publish_application"
-                    ) {
-                        scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.PUBLISH_APPLICATION)
-                    }
-                    DrawerMenuItem(
                         label = "মাদরাসা নিবন্ধন করুন",
                         icon = Icons.Default.DomainAdd,
                         selected = currentDestination == MainDestination.REGISTER_MADRASA,
@@ -363,35 +316,49 @@ fun MainAppScaffold(
                         viewModel.navigateTo(MainDestination.REGISTER_MADRASA)
                     }
                     DrawerMenuItem(
-                        label = "পছন্দের খেদমত (সংরক্ষিত)",
-                        icon = Icons.Default.Bookmark,
-                        selected = currentDestination == MainDestination.BOOKMARKS,
-                        testTag = "drawer_item_bookmarks"
+                        label = "অ্যাপ সেটিংস",
+                        icon = Icons.Default.Settings,
+                        selected = currentDestination == MainDestination.APP_SETTINGS,
+                        testTag = "drawer_item_app_settings"
                     ) {
                         scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.BOOKMARKS)
+                        viewModel.navigateTo(MainDestination.APP_SETTINGS)
                     }
                     DrawerMenuItem(
-                        label = "নামাজের সময়সূচী",
-                        icon = Icons.Default.Schedule,
-                        selected = currentDestination == MainDestination.PRAYER_SCHEDULE,
-                        testTag = "drawer_item_prayer_schedule"
+                        label = "অ্যাপ সম্পর্কে",
+                        icon = Icons.Default.Info,
+                        selected = currentDestination == MainDestination.ABOUT_APP,
+                        testTag = "drawer_item_about_app"
                     ) {
                         scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.PRAYER_SCHEDULE)
+                        viewModel.navigateTo(MainDestination.ABOUT_APP)
                     }
                     DrawerMenuItem(
-                        label = if (unreadNotificationsCount > 0) {
-                            "নোটিফিকেশন (${IslamicDateAndPrayerHelper.toBanglaDigits(unreadNotificationsCount.toString())})"
-                        } else {
-                            "নোটিফিকেশন"
-                        },
-                        icon = Icons.Default.Notifications,
-                        selected = currentDestination == MainDestination.NOTIFICATIONS,
-                        testTag = "drawer_item_notifications"
+                        label = "ডেভেলপার সম্পর্কে",
+                        icon = Icons.Default.Code,
+                        selected = currentDestination == MainDestination.ABOUT_DEVELOPER,
+                        testTag = "drawer_item_about_developer"
                     ) {
                         scope.launch { drawerState.close() }
-                        viewModel.navigateTo(MainDestination.NOTIFICATIONS)
+                        viewModel.navigateTo(MainDestination.ABOUT_DEVELOPER)
+                    }
+                    DrawerMenuItem(
+                        label = "ব্যবহারের নীতিমালা ও গোপনীয়তা",
+                        icon = Icons.Default.Policy,
+                        selected = currentDestination == MainDestination.PRIVACY_AND_TERMS,
+                        testTag = "drawer_item_privacy_terms"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.PRIVACY_AND_TERMS)
+                    }
+                    DrawerMenuItem(
+                        label = "সহায়তা ও যোগাযোগ",
+                        icon = Icons.AutoMirrored.Filled.HelpOutline,
+                        selected = currentDestination == MainDestination.HELP_AND_SUPPORT,
+                        testTag = "drawer_item_help_support"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.HELP_AND_SUPPORT)
                     }
                     if (isAdminState) {
                         DrawerMenuItem(
@@ -447,6 +414,11 @@ fun MainAppScaffold(
             MainDestination.NOTIFICATIONS -> "নোটিফিকেশন"
             MainDestination.ADMIN_PANEL -> "অ্যাডমিন প্যানেল"
             MainDestination.PRAYER_SCHEDULE -> "নামাজের সময়সূচী"
+            MainDestination.APP_SETTINGS -> "অ্যাপ সেটিংস"
+            MainDestination.ABOUT_APP -> "অ্যাপ সম্পর্কে"
+            MainDestination.ABOUT_DEVELOPER -> "ডেভেলপার সম্পর্কে"
+            MainDestination.PRIVACY_AND_TERMS -> "ব্যবহারের নীতিমালা ও গোপনীয়তা"
+            MainDestination.HELP_AND_SUPPORT -> "সহায়তা ও যোগাযোগ"
         }
 
         val isRootTab = currentDestination in setOf(
@@ -820,17 +792,31 @@ fun MainAppScaffold(
                         }
 
                         MainDestination.ADMIN_PANEL -> {
+                            val currentUserProf = (userProfileState as? UiState.Success)?.data
                             AdminPanelScreen(
                                 isAdminUser = isAdminState,
                                 adminEmail = viewModel.currentUserEmail,
+                                adminDisplayName = currentUserProf?.fullName?.takeIf { it.isNotBlank() }
+                                    ?: viewModel.currentUserDisplayName.ifBlank { "অ্যাডমিন" },
+                                adminPhotoUrl = currentUserProf?.photoUrl.orEmpty(),
+                                usersState = adminUsersState,
+                                submissionsState = adminSubmissionsState,
                                 madrasasState = madrasasState,
                                 feedPostsState = feedPostsState,
                                 telegramNotificationsState = telegramNotificationsState,
                                 isSubmitting = isSubmitting,
+                                onVerifyUser = { user, ver -> viewModel.adminUpdateUserVerification(user, ver) },
+                                onUpdateSubmissionStatus = { sub, status -> viewModel.adminUpdateSubmissionStatus(sub, status) },
                                 onVerifyMadrasa = { madrasa, ver -> viewModel.adminVerifyMadrasa(madrasa, ver) },
                                 onVerifyPost = { post, ver, status -> viewModel.adminVerifyPost(post, ver, status) },
                                 onToggleBoostPost = { post, boost -> viewModel.adminToggleBoostPost(post, boost) },
+                                onPublishQuickNotice = { title, desc, type ->
+                                    viewModel.adminPublishQuickNotice(title, desc, type)
+                                },
                                 onSendAnnouncement = { title, msg -> viewModel.publishAdminAnnouncement(title, msg) },
+                                onRecordLiveAdminAction = { eventType, title, msg, refId ->
+                                    viewModel.adminRecordChangeNotification(eventType, title, msg, refId)
+                                },
                                 onRequestPasswordReset = { email -> viewModel.requestAdminPasswordReset(email) },
                                 onSendTestTelegramAlert = { customMsg -> viewModel.sendTestTelegramNotification(customMsg) },
                                 onDeletePost = { id -> viewModel.deletePost(id) }
@@ -839,6 +825,33 @@ fun MainAppScaffold(
 
                         MainDestination.PRAYER_SCHEDULE -> {
                             FullPrayerScheduleScreen()
+                        }
+
+                        MainDestination.APP_SETTINGS -> {
+                            val currentUserProf = (userProfileState as? UiState.Success)?.data
+                            UserAppSettingsScreen(
+                                isOnlineVisible = currentUserProf?.isOnline ?: true,
+                                onToggleOnlineStatus = { online -> viewModel.setUserOnlineStatus(online) },
+                                onShowFeedback = { msg -> viewModel.showFeedbackMessage(msg) }
+                            )
+                        }
+
+                        MainDestination.ABOUT_APP -> {
+                            AboutAppScreen()
+                        }
+
+                        MainDestination.ABOUT_DEVELOPER -> {
+                            AboutDeveloperScreen(
+                                onShowFeedback = { msg -> viewModel.showFeedbackMessage(msg) }
+                            )
+                        }
+
+                        MainDestination.PRIVACY_AND_TERMS -> {
+                            PrivacyAndTermsScreen()
+                        }
+
+                        MainDestination.HELP_AND_SUPPORT -> {
+                            HelpAndSupportScreen()
                         }
                     }
                 }
