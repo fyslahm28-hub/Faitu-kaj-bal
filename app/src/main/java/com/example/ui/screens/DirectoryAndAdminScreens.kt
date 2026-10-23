@@ -1241,11 +1241,21 @@ fun MessagesScreen(
         resolvedPartnerProfile?.blockedUserIds?.contains(currentUserId) == true
 
     val chatListState = rememberLazyListState()
+    var lastOpenedConversationId by remember { mutableStateOf("") }
 
-    // Automatically scroll to the latest message when opening a conversation or receiving/sending a new message
-    LaunchedEffect(receiverId, activeConversationMessages.size, isPartnerTyping) {
+    // Smart auto-scroll: scroll to bottom when opening a conversation, when sending a message,
+    // or when already near the bottom of the list (do not yank user while reading older messages)
+    LaunchedEffect(receiverId, activeConversationMessages.size) {
         if (receiverId.isNotBlank() && activeConversationMessages.isNotEmpty()) {
-            chatListState.scrollToItem(activeConversationMessages.lastIndex)
+            val isOpeningConversation = lastOpenedConversationId != receiverId
+            val latestMsg = activeConversationMessages.lastOrNull()
+            val isLatestSentByMe = latestMsg?.senderId == currentUserId
+            val lastVisibleIdx = chatListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val isNearBottom = lastVisibleIdx >= (activeConversationMessages.lastIndex - 3).coerceAtLeast(0)
+            if (isOpeningConversation || isLatestSentByMe || isNearBottom || activeConversationMessages.size <= 3) {
+                chatListState.scrollToItem(activeConversationMessages.lastIndex)
+                lastOpenedConversationId = receiverId
+            }
         }
     }
 
@@ -3027,6 +3037,31 @@ fun MessagesScreen(
                                 },
                                 onClose = { showEmojiPicker = false }
                             )
+                        }
+
+                        // Upload / Sending Progress Indicator
+                        if (isSubmitting) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(QawmiMintSurface)
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    .testTag("message_sending_progress_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = QawmiDeepGreen,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "পয়গাম ও ছবি প্রেরিত হচ্ছে…",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiDeepGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
 
                         // Selected Images Preview Strip (1-5 photos) with individual Remove button before sending

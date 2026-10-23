@@ -218,8 +218,11 @@ class QawmiViewModel(
             }
             .distinctBy { it.id }
             .map { msg ->
-                if (!msg.isRead && locallyReadIds.contains(msg.id)) {
-                    msg.copy(isRead = true)
+                if (locallyReadIds.contains(msg.id)) {
+                    msg.copy(
+                        isRead = true,
+                        readByUserIds = (msg.readByUserIds + currentUserId).distinct()
+                    )
                 } else {
                     msg
                 }
@@ -836,8 +839,18 @@ class QawmiViewModel(
     fun markConversationRead(otherUserId: String) {
         if (otherUserId.isBlank() || otherUserId == currentUserId) return
         val currentMessages = (messagesState.value as? UiState.Success)?.data ?: emptyList()
+        val isGroupKey = otherUserId.startsWith("GROUP:", ignoreCase = true)
+        val groupId = if (isGroupKey) otherUserId.substringAfter(":") else ""
         val matchingUnreadIds = currentMessages
-            .filter { it.senderId == otherUserId && it.receiverId == currentUserId && !it.isRead && it.id.isNotBlank() }
+            .filter { msg ->
+                msg.id.isNotBlank() && msg.isUnreadForUser(currentUserId) && (
+                    if (isGroupKey) {
+                        msg.groupId == groupId || msg.receiverId.equals("GROUP:$groupId", ignoreCase = true)
+                    } else {
+                        msg.groupId.isBlank() && msg.senderId == otherUserId && msg.receiverId == currentUserId
+                    }
+                )
+            }
             .map { it.id }
             .toSet()
         if (matchingUnreadIds.isNotEmpty()) {

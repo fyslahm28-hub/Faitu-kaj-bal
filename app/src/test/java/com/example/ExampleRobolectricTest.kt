@@ -806,7 +806,71 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("group_management_dialog").assertIsDisplayed()
     }
+
+    @Test
+    fun `Distinct unread conversation badge counts 1 per sender or group and excludes MESSAGE from Bell notifications`() {
+        val myUid = "user_me"
+        // Same sender ("sender_A") sends 50 unread messages -> should count as 1 unread conversation
+        val fiftyFromSenderA = (1..50).map { idx ->
+            DirectMessage(
+                id = "m_a_$idx",
+                senderId = "sender_A",
+                senderName = "আব্দুল্লাহ রহমান",
+                receiverId = myUid,
+                body = "পয়গাম $idx",
+                isRead = false
+            )
+        }
+        // Group ("grp_1") has 10 unread messages from 3 different members -> should count as 1 unread group conversation
+        val tenFromGroup1 = (1..10).map { idx ->
+            DirectMessage(
+                id = "m_g_$idx",
+                senderId = "member_${idx % 3}",
+                senderName = "সদস্য $idx",
+                receiverId = "GROUP:grp_1",
+                groupId = "grp_1",
+                groupName = "কওমি কর্মসংস্থান গ্রুপ",
+                body = "গ্রুপ পয়গাম $idx",
+                isRead = false,
+                readByUserIds = emptyList()
+            )
+        }
+        // Another sender ("sender_B") sends 1 message that is already read -> 0 unread
+        val readFromSenderB = DirectMessage(
+            id = "m_b_1",
+            senderId = "sender_B",
+            receiverId = myUid,
+            body = "পঠিত পয়গাম",
+            isRead = true,
+            readByUserIds = listOf("sender_B", myUid)
+        )
+
+        val allMessages = fiftyFromSenderA + tenFromGroup1 + readFromSenderB
+        val distinctUnreadConversations = allMessages
+            .filter { msg -> msg.isVisibleForUser(myUid) && msg.isUnreadForUser(myUid) }
+            .map { msg -> msg.resolvedConversationKey(myUid) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .size
+
+        // 50 unread from sender_A (1) + 10 unread in grp_1 (1) + read from sender_B (0) = 2 distinct unread conversations
+        assertEquals(2, distinctUnreadConversations)
+        assertEquals("২", com.example.ui.util.IslamicDateAndPrayerHelper.toBanglaDigits(distinctUnreadConversations.toString()))
+
+        // Verify ReplyQuoteInfo encoding & decoding
+        val encodedSubject = com.example.data.model.ReplyQuoteInfo.encodeSubject(
+            replyToMessageId = "m_a_1",
+            replyToSenderName = "আব্দুল্লাহ রহমান",
+            replyToSnippet = "আসসালামু আলাইকুম"
+        )
+        val parsed = com.example.data.model.ReplyQuoteInfo.fromSubject(encodedSubject)
+        assertTrue(parsed != null)
+        assertEquals("m_a_1", parsed?.replyToMessageId)
+        assertEquals("আব্দুল্লাহ রহমান", parsed?.replyToSenderName)
+        assertEquals("আসসালামু আলাইকুম", parsed?.replyToSnippet)
+    }
 }
+
 
 
 
