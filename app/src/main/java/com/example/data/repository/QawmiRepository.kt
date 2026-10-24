@@ -1921,7 +1921,9 @@ class QawmiRepository(
         message: String,
         actorName: String,
         referenceId: String,
-        customTargetPhone: String = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
+        customTargetPhone: String = AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+        requireTelegramDeliverySuccess: Boolean = false,
+        bypassDedup: Boolean = false
     ): Result<String> {
         val currentUser = auth.currentUser
         val uid = currentUser?.uid
@@ -1937,25 +1939,45 @@ class QawmiRepository(
             .take(250)
         val resolvedMessage = TelegramNotificationHelper.sanitizeSensitiveContent(message)
             .ifBlank { resolvedTitle }
-            .take(2000)
+            .take(1700)
         val resolvedTargetPhone = TelegramNotificationHelper.sanitizeSensitiveContent(customTargetPhone)
             .ifBlank { AdminSecurityHelper.ADMIN_MOBILE_NUMBER }
             .take(30)
 
-        // Immediately dispatch automatic message to the built-in Telegram Bot (Chat ID: 6255562134)
-        val delivered = TelegramNotificationHelper.dispatchToTelegramBot(
+        val eventKey = "${eventType}_${referenceId}_${resolvedTitle.hashCode()}_${resolvedMessage.hashCode()}"
+
+        // Verify bot via getMe and dispatch to Telegram Bot API (Chat ID: 6255562134), checking real "ok": true + message_id
+        val dispatchDiag = TelegramNotificationHelper.dispatchToTelegramBotVerified(
             eventType = eventType,
             title = resolvedTitle,
             message = resolvedMessage,
             actorName = resolvedActor,
-            targetPhone = resolvedTargetPhone
+            targetPhone = resolvedTargetPhone,
+            eventKey = eventKey,
+            bypassDedup = bypassDedup
         )
+
+        val delivered = dispatchDiag.sendMessageOk && (dispatchDiag.deliveredMessageId ?: 0L) > 0L
+        val trueStatus = if (delivered) "DELIVERED" else "FAILED"
+        val resolvedRefId = if (delivered && dispatchDiag.deliveredMessageId != null) {
+            "${referenceId.take(100)}#msg_${dispatchDiag.deliveredMessageId}"
+        } else {
+            referenceId.take(128)
+        }
+        val persistedMessage = if (delivered) {
+            resolvedMessage
+        } else {
+            val safeReason = TelegramNotificationHelper.sanitizeSensitiveContent(
+                dispatchDiag.sanitizedErrorDescription.ifBlank { dispatchDiag.diagnosticMessageBangla }
+            ).take(220)
+            "$resolvedMessage [টেলিগ্রাম ডেলিভারি ব্যর্থ: $safeReason]".take(2000)
+        }
 
         if (uid == null) {
             return if (delivered) {
-                Result.success("telegram_direct_dispatched")
+                Result.success(dispatchDiag.diagnosticMessageBangla)
             } else {
-                Result.failure(IllegalStateException("Unauthenticated"))
+                Result.failure(IllegalStateException(dispatchDiag.diagnosticMessageBangla.ifBlank { "Unauthenticated" }))
             }
         }
 
@@ -1964,32 +1986,46 @@ class QawmiRepository(
             val payload = mapOf(
                 "eventType" to eventType,
                 "title" to resolvedTitle,
-                "message" to resolvedMessage,
+                "message" to persistedMessage,
                 "actorId" to uid,
                 "actorName" to resolvedActor,
                 "targetPhone" to resolvedTargetPhone,
-                "referenceId" to referenceId.take(128),
-                "deliveryStatus" to if (delivered) "DELIVERED" else "QUEUED",
+                "referenceId" to resolvedRefId,
+                "deliveryStatus" to trueStatus,
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             docRef.set(payload).await()
-            Result.success(docRef.id)
+            if (requireTelegramDeliverySuccess && !delivered) {
+                Result.failure(IllegalStateException(dispatchDiag.diagnosticMessageBangla))
+            } else if (delivered) {
+                Result.success(dispatchDiag.diagnosticMessageBangla)
+            } else {
+                // Firestore log saved with FAILED status, but Telegram API did not return ok:true
+                Result.success("FIRESTORE_SAVED_TELEGRAM_FAILED::${dispatchDiag.diagnosticMessageBangla}")
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
             if (delivered) {
-                Result.success("telegram_direct_dispatched")
+                Result.success(dispatchDiag.diagnosticMessageBangla)
             } else {
-                Result.failure(e)
+                Result.failure(
+                    IllegalStateException(
+                        dispatchDiag.diagnosticMessageBangla.ifBlank {
+                            e.localizedMessage ?: "টেলিগ্রাম ও সার্ভার সংযোগে ত্রুটি হয়েছে।"
+                        }
+                    )
+                )
             }
         }
     }
 
     /**
      * Saves a user's support request, complaint, technical issue, or suggestion to Firebase Firestore
-     * so it is visible in the Admin Panel AND automatically dispatches it to the existing Telegram Bot.
+     * so it is visible in the Admin Panel AND attempts verified dispatch to the existing Telegram Bot.
+     * Never claims Telegram delivery succeeded unless Telegram API returned `"ok": true`.
      */
     suspend fun submitSupportOrComplaintMessage(
         category: String,
@@ -2018,10 +2054,17 @@ class QawmiRepository(
             message = formattedMessage,
             actorName = cleanSender,
             referenceId = "SUPPORT_TICKET:$cleanCategory",
-            customTargetPhone = cleanPhone
+            customTargetPhone = cleanPhone,
+            requireTelegramDeliverySuccess = false,
+            bypassDedup = false
         )
     }
 
+    /**
+     * Sends a live test alert to the configured Telegram Bot and Chat ID (`6255562134`).
+     * Strictly requires Telegram Bot API (`getMe` + `sendMessage`) to return `"ok": true`
+     * and a valid `message_id` — otherwise returns `Result.failure` with the exact diagnostic reason.
+     */
     suspend fun sendAdminTestTelegramNotification(
         adminName: String,
         customAlertText: String = ""
@@ -2034,8 +2077,14 @@ class QawmiRepository(
             title = "অ্যাডমিন টেলিগ্রাম অটো-বট সিস্টেম যাচাই",
             message = msg,
             actorName = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" },
-            referenceId = "telegram_test_alert"
+            referenceId = "telegram_test_alert",
+            requireTelegramDeliverySuccess = true,
+            bypassDedup = true
         )
+    }
+
+    suspend fun verifyAdminTelegramBotConnection(): TelegramNotificationHelper.TelegramBotDiagnosticResult {
+        return TelegramNotificationHelper.verifyBotConnectionWithGetMe()
     }
 
     // --- 9. ADMIN PANEL MANAGEMENT (ব্যবহারকারী, আবেদন, সেটিংস ও লাইভ টেলিগ্রাম ইত্তেলা) ---

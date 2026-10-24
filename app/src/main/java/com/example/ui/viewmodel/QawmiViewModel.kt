@@ -1217,12 +1217,10 @@ class QawmiViewModel(
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val result = repository.sendAdminTestTelegramNotification(adminName, customMessage)
             _isSubmitting.value = false
-            result.onSuccess {
-                val chatId = com.example.ui.util.TelegramNotificationHelper.resolveTargetChatId()
-                val botId = com.example.ui.util.TelegramNotificationHelper.resolveConfiguredBotId()
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, টেলিগ্রাম বট (Bot ID: $botId, Chat ID: $chatId) ও অডিট লগে ইত্তেলা সফলভাবে পাঠানো হয়েছে।"
+            result.onSuccess { verifiedMessage ->
+                _feedbackBanner.value = verifiedMessage
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "টেলিগ্রাম নোটিফিকেশন পাঠাতে সমস্যা হয়েছে।"
+                _errorBanner.value = err.localizedMessage ?: "টেলিগ্রাম বটে মেসেজ পাঠানো যায়নি। বট টোকেন ও সংযোগ যাচাই করুন।"
             }
         }
     }
@@ -1242,10 +1240,12 @@ class QawmiViewModel(
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val result = repository.adminUpdateUserVerification(user, verified, adminName)
             result.onSuccess {
+                val tgConfigured = com.example.ui.util.TelegramNotificationHelper.isTelegramBotConfigured()
+                val tgSuffix = if (tgConfigured) " এবং টেলিগ্রাম অডিট লগ হালনাগাদ হয়েছে।" else " (অ্যাডমিন লগে সংরক্ষিত হয়েছে)।"
                 _feedbackBanner.value = if (verified) {
-                    "ব্যবহারকারীকে সক্রিয় করা হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+                    "ব্যবহারকারীকে সক্রিয় করা হয়েছে$tgSuffix"
                 } else {
-                    "ব্যবহারকারী ব্লক / নিষ্ক্রিয় করা হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+                    "ব্যবহারকারী ব্লক / নিষ্ক্রিয় করা হয়েছে$tgSuffix"
                 }
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "ব্যবহারকারীর অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
@@ -1263,7 +1263,7 @@ class QawmiViewModel(
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val result = repository.adminUpdateSubmissionStatus(submission, newStatus, adminName)
             result.onSuccess {
-                _feedbackBanner.value = "আবেদনের অবস্থা হালনাগাদ হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+                _feedbackBanner.value = "আবেদনের অবস্থা হালনাগাদ হয়েছে এবং অ্যাডমিন অডিট লগে সংরক্ষিত হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "আবেদনের অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
             }
@@ -1287,8 +1287,15 @@ class QawmiViewModel(
                 adminName = adminName,
                 referenceId = referenceId
             )
-            result.onSuccess {
-                _feedbackBanner.value = "$title — টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+            result.onSuccess { dispatchSummary ->
+                if (dispatchSummary.startsWith("FIRESTORE_SAVED_TELEGRAM_FAILED::")) {
+                    val reason = dispatchSummary.removePrefix("FIRESTORE_SAVED_TELEGRAM_FAILED::")
+                    _feedbackBanner.value = "$title — অ্যাডমিন লগে সংরক্ষিত হয়েছে (টেলিগ্রাম ডেলিভারি ব্যর্থ: $reason)"
+                } else {
+                    _feedbackBanner.value = "$title — টেলিগ্রাম বটে সফলভাবে পাঠানো হয়েছে।"
+                }
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "টেলিগ্রাম বটে ইত্তেলা পাঠানো যায়নি।"
             }
         }
     }
@@ -1340,14 +1347,19 @@ class QawmiViewModel(
                     )
                     repository.adminTogglePostBoost(createdPost, true, adminName)
                 }
-                repository.adminRecordLiveChangeNotification(
+                val tgRes = repository.adminRecordLiveChangeNotification(
                     eventType = "ADMIN_ANNOUNCEMENT",
                     title = "বিজ্ঞপ্তি প্রকাশ করা হয়েছে ($noticeType)",
                     message = "শিরোনাম: ${title.trim()} | ধরন: $noticeType | বিবরণ: ${description.trim().take(200)}",
                     adminName = adminName,
                     referenceId = postId.ifBlank { "admin_notice" }
                 )
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, নতুন বিজ্ঞপ্তি প্রকাশিত হয়েছে এবং টেলিগ্রাম বটে লাইভ নোটিফিকেশন পাঠানো হয়েছে।"
+                val tgSuccess = tgRes.getOrNull()?.startsWith("FIRESTORE_SAVED_TELEGRAM_FAILED::") == false
+                _feedbackBanner.value = if (tgSuccess) {
+                    "আলহামদুলিল্লাহ, নতুন বিজ্ঞপ্তি প্রকাশিত হয়েছে এবং টেলিগ্রাম বটে সফলভাবে পাঠানো হয়েছে।"
+                } else {
+                    "আলহামদুলিল্লাহ, নতুন বিজ্ঞপ্তি প্রকাশিত ও অ্যাডমিন লগে সংরক্ষিত হয়েছে (টেলিগ্রাম ডেলিভারি স্ট্যাটাস: ব্যর্থ/টোকেন যাচাই প্রয়োজন)।"
+                }
                 onComplete()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "বিজ্ঞপ্তি প্রকাশ করা যায়নি।"
@@ -1384,8 +1396,13 @@ class QawmiViewModel(
                 senderName = senderName
             )
             _isSubmitting.value = false
-            result.onSuccess {
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার বার্তা সার্ভারে সংরক্ষিত হয়েছে, অ্যাডমিন প্যানেলে যুক্ত হয়েছে এবং টেলিগ্রাম বটে পাঠানো হয়েছে।"
+            result.onSuccess { dispatchSummary ->
+                if (dispatchSummary.startsWith("FIRESTORE_SAVED_TELEGRAM_FAILED::")) {
+                    val reason = dispatchSummary.removePrefix("FIRESTORE_SAVED_TELEGRAM_FAILED::")
+                    _feedbackBanner.value = "আপনার বার্তা সার্ভারে ও অ্যাডমিন প্যানেলে সংরক্ষিত হয়েছে। (টেলিগ্রাম বট ডেলিভারি স্ট্যাটাস: ব্যর্থ — $reason)"
+                } else {
+                    _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার বার্তা সার্ভারে সংরক্ষিত হয়েছে, অ্যাডমিন প্যানেলে যুক্ত হয়েছে এবং টেলিগ্রাম বটে সফলভাবে পাঠানো হয়েছে।"
+                }
                 onSuccessReset()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "বার্তা পাঠানো যায়নি। অনুগ্রহ করে ইন্টারনেট সংযোগ যাচাই করে পুনরায় চেষ্টা করুন।"

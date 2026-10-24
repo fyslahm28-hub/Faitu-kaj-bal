@@ -120,6 +120,68 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun telegramNotificationHelper_verifiesRealApiJsonResponsesAndBlocksFalsePositives() = kotlinx.coroutines.runBlocking {
+        // 1. Real ok:true response with valid message_id -> DELIVERED
+        val okResponse = """{"ok":true,"result":{"message_id":445566,"from":{"id":8917160878,"is_bot":true,"first_name":"Qawmi Kormo Bot","username":"qawmi_kormo_bot"},"chat":{"id":6255562134,"type":"private"}}}"""
+        val okDiag = TelegramNotificationHelper.parseTelegramSendMessageJson(
+            httpCode = 200,
+            rawResponseBody = okResponse,
+            isTokenConfigured = true
+        )
+        assertTrue(okDiag.sendMessageOk)
+        assertEquals(445566L, okDiag.deliveredMessageId)
+        assertEquals("DELIVERED", okDiag.deliveryStatus)
+        assertTrue(okDiag.diagnosticMessageBangla.contains("সফলভাবে পাঠানো হয়েছে"))
+        assertTrue(okDiag.diagnosticMessageBangla.contains("#445566"))
+
+        // 2. HTTP 200 WITHOUT ok:true or without message_id -> must NOT report DELIVERED
+        val fake200 = """{"ok":true,"result":{}}"""
+        val fakeDiag = TelegramNotificationHelper.parseTelegramSendMessageJson(
+            httpCode = 200,
+            rawResponseBody = fake200,
+            isTokenConfigured = true
+        )
+        assertFalse(fakeDiag.sendMessageOk)
+        assertEquals("FAILED", fakeDiag.deliveryStatus)
+        assertFalse(fakeDiag.diagnosticMessageBangla.contains("সফলভাবে পাঠানো হয়েছে"))
+
+        // 3. HTTP 401 Unauthorized (Revoked/Invalid Bot Token) -> FAILED with 401 diagnostic
+        val err401 = """{"ok":false,"error_code":401,"description":"Unauthorized"}"""
+        val diag401 = TelegramNotificationHelper.parseTelegramSendMessageJson(
+            httpCode = 401,
+            rawResponseBody = err401,
+            isTokenConfigured = true
+        )
+        assertFalse(diag401.sendMessageOk)
+        assertEquals("FAILED", diag401.deliveryStatus)
+        assertTrue(diag401.diagnosticMessageBangla.contains("401 (Unauthorized)"))
+        assertFalse(diag401.diagnosticMessageBangla.contains("সফলভাবে পাঠানো হয়েছে"))
+
+        // 4. HTTP 400 Bad Request: chat not found (/start not sent) -> FAILED with 400 diagnostic
+        val err400 = """{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"""
+        val diag400 = TelegramNotificationHelper.parseTelegramSendMessageJson(
+            httpCode = 400,
+            rawResponseBody = err400,
+            isTokenConfigured = true
+        )
+        assertFalse(diag400.sendMessageOk)
+        assertEquals("FAILED", diag400.deliveryStatus)
+        assertTrue(diag400.diagnosticMessageBangla.contains("chat not found"))
+        assertTrue(diag400.diagnosticMessageBangla.contains("/start"))
+
+        // 5. HTTP 403 Forbidden: bot was blocked by the user -> FAILED with 403 diagnostic
+        val err403 = """{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}"""
+        val diag403 = TelegramNotificationHelper.parseTelegramSendMessageJson(
+            httpCode = 403,
+            rawResponseBody = err403,
+            isTokenConfigured = true
+        )
+        assertFalse(diag403.sendMessageOk)
+        assertEquals("FAILED", diag403.deliveryStatus)
+        assertTrue(diag403.diagnosticMessageBangla.contains("403 (Forbidden)"))
+    }
+
+    @Test
     fun hanafiPrayerSchedule_calculatesAccurateStartAndEndTimesAndDistrictDifferences() {
         val helper = com.example.ui.util.IslamicDateAndPrayerHelper
         // Verify all 64 districts of Bangladesh are configured

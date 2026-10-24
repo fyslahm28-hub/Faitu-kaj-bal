@@ -1,20 +1,157 @@
 /**
- * Firebase Cloud Functions (v2) + Cloud Scheduler for "আজকের স্মরণ" (Daily Islamic Reminder)
- *
- * Features:
- * 1. Runs automatically every day at the scheduled Bangladesh time (Asia/Dhaka) via Cloud Scheduler.
- * 2. Assigns a personalized, non-repeating Islamic reminder per user based on userId + dateKey
- *    and checks each user's previously delivered history (`smoron_hist_*`) in Firebase Firestore.
- * 3. Strictly enforces at most 1 push notification per user per day (`smoron_push_<dateKey>`).
- * 4. Sends an OS-level Android Push Notification via Firebase Cloud Messaging (FCM) with
- *    deep-link extras (`EXTRA_OPEN_AJKER_SMORON = "true"`, `EXTRA_AJKER_SMORON_ID = <id>`)
- *    so tapping the notification opens the "আজকের স্মরণ" screen directly.
+ * Firebase Cloud Functions (v2) for Qawmi Kormosongsthan Bangladesh:
+ * 1. "আজকের স্মরণ" (Daily Islamic Reminder) via Cloud Scheduler (`sendDailyAjkerSmoronPush`)
+ * 2. Real-time Server-Side Telegram Bot Dispatch (`dispatchTelegramNotificationOnCreated`)
+ *    with `getMe` + `sendMessage` verification, Secret Manager protection, idempotency,
+ *    and truthful `QUEUED` -> `DELIVERED` / `FAILED` status tracking.
  */
 
 const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 
 admin.initializeApp();
+
+// Secure server-side secret managed via Firebase Secret Manager / Google Cloud Secret Manager
+const telegramBotTokenSecret = defineSecret("TELEGRAM_BOT_TOKEN");
+const DEFAULT_ADMIN_CHAT_ID = "6255562134";
+const DEFAULT_ADMIN_BOT_ID = "8917160878";
+
+function sanitizeSecrets(rawText) {
+  if (!rawText) return "";
+  return String(rawText)
+    .replace(/\b\d{8,12}:[A-Za-z0-9_-]{25,}\b/g, "[REDACTED_BOT_TOKEN]")
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED_FIREBASE_SECRET]")
+    .replace(/https?:\/\/[^\s]*(oobCode|resetPassword|apiKey=)[^\s]*/gi, "[REDACTED_RESET_LINK]")
+    .replace(/(password|পাসওয়ার্ড|পাসওয়ার্ড|otp|secret|token)\s*[:=]\s*\S+/gi, "$1: [REDACTED]")
+    .trim();
+}
+
+function formatServerTelegramMessage(data) {
+  const chatId = process.env.TELEGRAM_CHAT_ID || DEFAULT_ADMIN_CHAT_ID;
+  const nowBangla = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Dhaka",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }).format(new Date());
+
+  return [
+    "【কওমি কর্মসংস্থান • স্বয়ংক্রিয় অ্যাডমিন বট অ্যালার্ট】",
+    `টেলিগ্রাম চ্যাট আইডি: ${chatId}`,
+    `টেলিগ্রাম বট আইডি: ${DEFAULT_ADMIN_BOT_ID}`,
+    `সময়: ${nowBangla} (BDT)`,
+    `কার্যক্রমের ধরন: ${sanitizeSecrets(data.eventType || "ADMIN_SECURITY")}`,
+    `শিরোনাম: ${sanitizeSecrets(data.title || "কওমি কর্মসংস্থান ইত্তেলা")}`,
+    `বিস্তারিত পরিবর্তন/কার্যকলাপ: ${sanitizeSecrets(data.message || "")}`,
+    `সম্পাদনকারী অ্যাডমিন/পরিচয়: ${sanitizeSecrets(data.actorName || "কওমি কর্মসংস্থান")}`,
+    `অ্যাডমিন হটলাইন: ${sanitizeSecrets(data.targetPhone || "01300448147")}`,
+  ].join("\n");
+}
+
+/**
+ * Firestore Trigger: Automatically processes newly created documents in `telegram_notifications/{logId}`
+ * when `deliveryStatus` is `"QUEUED"` (or `"FAILED"` prior to server retry).
+ * Strictly verifies `getMe` and `sendMessage` (`"ok": true` + `result.message_id`) before marking `"DELIVERED"`.
+ */
+exports.dispatchTelegramNotificationOnCreated = onDocumentCreated(
+  {
+    document: "telegram_notifications/{logId}",
+    region: "asia-south1",
+    secrets: [telegramBotTokenSecret],
+  },
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    const data = snap.data() || {};
+    // Idempotency guard: never re-send if already delivered by client or prior trigger execution
+    if (data.deliveryStatus === "DELIVERED") {
+      return;
+    }
+
+    const token = (
+      telegramBotTokenSecret.value() ||
+      process.env.TELEGRAM_BOT_TOKEN ||
+      ""
+    ).trim();
+    const chatId = (process.env.TELEGRAM_CHAT_ID || DEFAULT_ADMIN_CHAT_ID).trim();
+
+    if (!token || token === "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE" || !token.includes(":")) {
+      const configErr =
+        "সার্ভার ত্রুটি: TELEGRAM_BOT_TOKEN কনফিগার করা নেই (Secret Manager-এ বট ৮৯১৭১৬০৮৭৮-এর সক্রিয় টোকেন সেট করুন)।";
+      await snap.ref.update({
+        deliveryStatus: "FAILED",
+        message: `${sanitizeSecrets(data.message || "")} [ডেলিভারি ত্রুটি: ${configErr}]`.slice(0, 1950),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return;
+    }
+
+    try {
+      // 1. Verify Bot Token via Telegram getMe API
+      const getMeRes = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      });
+      const getMeJson = await getMeRes.json();
+
+      if (!getMeRes.ok || getMeJson.ok !== true) {
+        const desc = sanitizeSecrets(getMeJson.description || `HTTP ${getMeRes.status}`);
+        const errBangla =
+          getMeRes.status === 401
+            ? `Telegram API 401 (Unauthorized): বট টোকেনটি বৈধ নয় বা @BotFather-এ বাতিল হয়েছে (${desc})।`
+            : `Telegram getMe ব্যর্থ (HTTP ${getMeRes.status}): ${desc}`;
+        await snap.ref.update({
+          deliveryStatus: "FAILED",
+          message: `${sanitizeSecrets(data.message || "")} [ডেলিভারি ত্রুটি: ${errBangla}]`.slice(0, 1950),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return;
+      }
+
+      // 2. Dispatch message via Telegram sendMessage API and verify "ok": true + message_id
+      const formattedText = formatServerTelegramMessage(data);
+      const sendRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=UTF-8" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: formattedText,
+          disable_web_page_preview: true,
+        }),
+      });
+      const sendJson = await sendRes.json();
+
+      if (sendRes.ok && sendJson.ok === true && sendJson.result && sendJson.result.message_id) {
+        await snap.ref.update({
+          deliveryStatus: "DELIVERED",
+          referenceId: `${data.referenceId || "tg"}#msg_${sendJson.result.message_id}`.slice(0, 128),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } else {
+        const desc = sanitizeSecrets(sendJson.description || `HTTP ${sendRes.status}`);
+        await snap.ref.update({
+          deliveryStatus: "FAILED",
+          message: `${sanitizeSecrets(data.message || "")} [Telegram API ত্রুটি (${sendRes.status}): ${desc}]`.slice(0, 1950),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (err) {
+      const safeNetErr = sanitizeSecrets(err && err.message ? err.message : "Network error");
+      await snap.ref.update({
+        deliveryStatus: "FAILED",
+        message: `${sanitizeSecrets(data.message || "")} [নেটওয়ার্ক ত্রুটি: ${safeNetErr}]`.slice(0, 1950),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  }
+);
 
 const AJKER_SMORON_CATALOG = [
   {

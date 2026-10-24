@@ -83,8 +83,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -542,6 +544,7 @@ fun ModernAdminPanelRoot(
                         tgImportantUpdate = tgImportantUpdate,
                         tgSecurityAlert = tgSecurityAlert,
                         isSubmitting = isSubmitting,
+                        telegramLogs = realTelegramLogs,
                         onToggleAdminNotif = { enabled ->
                             tgAdminNotif = enabled
                             onRecordLiveAdminAction(
@@ -3484,6 +3487,7 @@ private fun AdminTelegramIntegrationView(
     tgImportantUpdate: Boolean,
     tgSecurityAlert: Boolean,
     isSubmitting: Boolean,
+    telegramLogs: List<TelegramNotificationLog> = emptyList(),
     onToggleAdminNotif: (Boolean) -> Unit,
     onToggleNewAppNotif: (Boolean) -> Unit,
     onToggleImportantUpdate: (Boolean) -> Unit,
@@ -3493,6 +3497,17 @@ private fun AdminTelegramIntegrationView(
 ) {
     val fittedChatId = TelegramNotificationHelper.resolveTargetChatId()
     val fittedBotId = TelegramNotificationHelper.resolveConfiguredBotId()
+    val isTokenConfigured = remember { TelegramNotificationHelper.isTelegramBotConfigured() }
+    val coroutineScope = rememberCoroutineScope()
+
+    var isCheckingGetMe by remember { mutableStateOf(false) }
+    var getMeDiagResult by remember {
+        mutableStateOf<TelegramNotificationHelper.TelegramBotDiagnosticResult?>(null)
+    }
+
+    val deliveredCount = remember(telegramLogs) { telegramLogs.count { it.deliveryStatus == "DELIVERED" } }
+    val queuedCount = remember(telegramLogs) { telegramLogs.count { it.deliveryStatus == "QUEUED" } }
+    val failedCount = remember(telegramLogs) { telegramLogs.count { it.deliveryStatus == "FAILED" } }
 
     Column(modifier = Modifier.fillMaxSize()) {
         AdminTopHeaderBar(
@@ -3570,6 +3585,182 @@ private fun AdminTelegramIntegrationView(
                                 fontWeight = FontWeight.Bold
                             )
                         }
+                    }
+                }
+            }
+
+            // Live Telegram API Diagnostic & Real Delivery Status Card
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        1.dp,
+                        if (getMeDiagResult?.getMeVerified == true) AdminBadgeActiveGreen
+                        else if (getMeDiagResult != null || !isTokenConfigured) AdminBadgeReviewAmber
+                        else AdminCardBorder,
+                        RoundedCornerShape(16.dp)
+                    )
+                    .testTag("admin_telegram_diagnostic_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "বাস্তব API সংযোগ ও ডেলিভারি ডায়াগনস্টিক",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = AdminHeaderDarkGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = when {
+                                getMeDiagResult?.getMeVerified == true -> AdminBadgeActiveGreen
+                                !isTokenConfigured || getMeDiagResult?.getMeVerified == false -> AdminBadgeInactiveRed
+                                else -> AdminBadgeReviewAmber
+                            }
+                        ) {
+                            Text(
+                                text = when {
+                                    getMeDiagResult?.getMeVerified == true -> "getMe: OK (200)"
+                                    !isTokenConfigured -> "টোকেন কনফিগার নেই"
+                                    getMeDiagResult != null -> "HTTP ${getMeDiagResult?.getMeHttpCode ?: 401} ত্রুটি"
+                                    else -> "যাচাই প্রস্তুত"
+                                },
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    // Real-time Delivery Counts Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = QawmiMintSurface,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(vertical = 6.dp, horizontal = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = IslamicDateAndPrayerHelper.toBanglaDigits(deliveredCount.toString()),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = AdminBadgeActiveGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "সফল (DELIVERED)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiTextDark
+                                )
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFFFFF8E7),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(vertical = 6.dp, horizontal = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = IslamicDateAndPrayerHelper.toBanglaDigits(queuedCount.toString()),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = AdminBadgeReviewAmber,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "পেন্ডিং (QUEUED)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiTextDark
+                                )
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFFFDECEC),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(vertical = 6.dp, horizontal = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = IslamicDateAndPrayerHelper.toBanglaDigits(failedCount.toString()),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = AdminBadgeInactiveRed,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "ব্যর্থ (FAILED)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiTextDark
+                                )
+                            }
+                        }
+                    }
+
+                    val statusExplanation = getMeDiagResult?.diagnosticMessageBangla
+                        ?: if (!isTokenConfigured) {
+                            "সতর্কতা: অ্যাপের পরিবেশে TELEGRAM_BOT_TOKEN কনফিগার করা নেই (অথবা বট ৮৯১৭১৬০৮৭৮-এর আগের টোকেনটি @BotFather-এ বাতিল/401 Unauthorized হয়েছে)। AI Studio-এর Secrets প্যানেলে বট ৮৯১৭১৬০৮৭৮-এর সক্রিয় টোকেন সেট করুন।"
+                        } else {
+                            "বট টোকেন কনফিগার করা আছে। নিচের 'বট সংযোগ যাচাই করুন (getMe API)' বাটনে ট্যাপ করে টেলিগ্রাম সার্ভারের সরাসরি রেসপন্স পরীক্ষা করুন।"
+                        }
+
+                    Text(
+                        text = statusExplanation,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (getMeDiagResult?.getMeVerified == true) AdminHeaderDarkGreen else QawmiTextDark,
+                        modifier = Modifier.testTag("admin_telegram_diagnostic_message")
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            if (!isCheckingGetMe) {
+                                isCheckingGetMe = true
+                                coroutineScope.launch {
+                                    getMeDiagResult = TelegramNotificationHelper.verifyBotConnectionWithGetMe()
+                                    isCheckingGetMe = false
+                                }
+                            }
+                        },
+                        enabled = !isCheckingGetMe && !isSubmitting,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_verify_telegram_getme_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = null,
+                            tint = AdminHeaderDarkGreen,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isCheckingGetMe) "Telegram getMe যাচাই হচ্ছে..." else "বট সংযোগ যাচাই করুন (getMe API)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = AdminHeaderDarkGreen,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -3695,6 +3886,7 @@ private data class DisplayActivityLog(
     val subtitle: String,
     val timeText: String,
     val category: String, // ব্যবহারকারী | বিজ্ঞপ্তি | আবেদন | সব
+    val deliveryStatus: String, // DELIVERED | QUEUED | FAILED
     val icon: ImageVector
 )
 
@@ -3731,6 +3923,7 @@ private fun AdminActivityLogView(
                 subtitle = subText,
                 timeText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(log.createdAt),
                 category = cat,
+                deliveryStatus = log.deliveryStatus.ifBlank { "QUEUED" },
                 icon = ic
             )
         }
@@ -3839,18 +4032,43 @@ private fun AdminActivityLogView(
                                 }
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = logItem.title,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = QawmiTextDark,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = logItem.title,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = QawmiTextDark,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        val (statusText, statusColor) = when (logItem.deliveryStatus) {
+                                            "DELIVERED" -> "DELIVERED ✓" to AdminBadgeActiveGreen
+                                            "FAILED" -> "FAILED ✕" to AdminBadgeInactiveRed
+                                            else -> "PENDING ⏳" to AdminBadgeReviewAmber
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = statusColor
+                                        ) {
+                                            Text(
+                                                text = statusText,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = logItem.subtitle,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = QawmiTextSecondary,
-                                        maxLines = 2,
+                                        maxLines = 3,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))

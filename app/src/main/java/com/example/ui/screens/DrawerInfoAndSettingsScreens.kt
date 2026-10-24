@@ -910,7 +910,12 @@ fun HelpAndSupportScreen(
                                     messageText.trim(),
                                     contactPhone.trim()
                                 ) {
-                                    lastSubmittedConfirmation = "আলহামদুলিল্লাহ! আপনার '$selectedCategory' বার্তাটি সার্ভারে সংরক্ষিত হয়েছে, অ্যাডমিন প্যানেলে যুক্ত হয়েছে এবং টেলিগ্রাম বটে পাঠানো হয়েছে।"
+                                    val tgConfigured = com.example.ui.util.TelegramNotificationHelper.isTelegramBotConfigured()
+                                    lastSubmittedConfirmation = if (tgConfigured) {
+                                        "আলহামদুলিল্লাহ! আপনার '$selectedCategory' বার্তাটি সার্ভারে সংরক্ষিত হয়েছে, অ্যাডমিন প্যানেলে যুক্ত হয়েছে এবং টেলিগ্রাম বটে পাঠানো হয়েছে।"
+                                    } else {
+                                        "আলহামদুলিল্লাহ! আপনার '$selectedCategory' বার্তাটি সার্ভারে সংরক্ষিত হয়েছে ও অ্যাডমিন প্যানেলে যুক্ত হয়েছে (টেলিগ্রাম বট ডেলিভারি স্ট্যাটাস অ্যাডমিন লগে সংরক্ষিত)।"
+                                    }
                                     subjectText = ""
                                     messageText = ""
                                 }

@@ -12,6 +12,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 
 object TelegramNotificationHelper {
 
@@ -20,12 +21,38 @@ object TelegramNotificationHelper {
 
     private const val PLACEHOLDER_TOKEN = "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE"
     private const val PLACEHOLDER_CHAT_ID = "TELEGRAM_CHAT_ID_DEFAULT_VALUE"
+    private const val DEDUP_WINDOW_MS = 30_000L
 
     // Regex patterns to strictly redact any accidental secrets, tokens, OTPs, or reset links
     private val BOT_TOKEN_REGEX = Regex("""\b\d{8,12}:[A-Za-z0-9_-]{25,}\b""")
     private val FIREBASE_KEY_REGEX = Regex("""\bAIza[0-9A-Za-z_-]{20,}\b""")
     private val RESET_LINK_REGEX = Regex("""https?://[^\s]*(oobCode|resetPassword|apiKey=)[^\s]*""", RegexOption.IGNORE_CASE)
     private val PASSWORD_KV_REGEX = Regex("""(?i)(password|পাসওয়ার্ড|পাসওয়ার্ড|otp|secret|token)\s*[:=]\s*\S+""")
+
+    // Idempotency tracking map: eventKey -> timestampMillis when successfully delivered to Telegram
+    private val deliveredEventKeys = ConcurrentHashMap<String, Long>()
+
+    data class TelegramBotDiagnosticResult(
+        val isTokenConfigured: Boolean,
+        val isChatIdValid: Boolean,
+        val getMeVerified: Boolean,
+        val getMeHttpCode: Int = 0,
+        val botId: String = DEFAULT_ADMIN_BOT_ID,
+        val botUsername: String = "",
+        val botFirstName: String = "",
+        val sendMessageOk: Boolean = false,
+        val sendMessageHttpCode: Int = 0,
+        val deliveredMessageId: Long? = null,
+        val errorCode: Int? = null,
+        val sanitizedErrorDescription: String = "",
+        val deliveryStatus: String = "FAILED", // "DELIVERED", "QUEUED", "FAILED"
+        val diagnosticMessageBangla: String = "",
+        val checkedAtBangla: String = formatCurrentTimestampBangla()
+    )
+
+    fun clearDeliveredEventKeysForTest() {
+        deliveredEventKeys.clear()
+    }
 
     /**
      * Permanently fitted target Chat ID inside the app (6255562134).
@@ -50,12 +77,18 @@ object TelegramNotificationHelper {
         return BuildConfig.TELEGRAM_BOT_TOKEN.trim()
     }
 
+    fun isChatIdStructurallyValid(chatId: String = resolveTargetChatId()): Boolean {
+        val clean = chatId.trim()
+        return clean.matches(Regex("""^-?\d{5,20}$"""))
+    }
+
     fun isTelegramBotConfigured(): Boolean {
         val token = resolveActiveBotToken()
         val chatId = resolveTargetChatId()
         return token.isNotBlank() &&
             token != PLACEHOLDER_TOKEN &&
-            chatId.isNotBlank()
+            token.contains(":") &&
+            isChatIdStructurallyValid(chatId)
     }
 
     /**
@@ -91,6 +124,7 @@ object TelegramNotificationHelper {
             title.startsWith("[সমস্যা") ||
             title.startsWith("[পরামর্শ") ||
             title.startsWith("[সহায়তা") ||
+            title.startsWith("[সহায়তা") ||
             title.contains("সহায়তা ও যোগাযোগ")
 
         val eventBadge = when {
@@ -128,21 +162,351 @@ object TelegramNotificationHelper {
     }
 
     /**
-     * Automatically dispatches a real-time Telegram Bot API notification using the permanently
-     * fitted Bot Token and Admin Chat ID (`6255562134`) from BuildConfig.
+     * Maps raw HTTP status codes and Telegram API error descriptions into clear, actionable
+     * Bengali diagnostic messages for the Admin without exposing any raw token.
      */
-    suspend fun dispatchToTelegramBot(
+    fun buildBanglaDiagnosticMessage(
+        isTokenConfigured: Boolean,
+        isChatIdValid: Boolean,
+        httpCode: Int,
+        rawDescription: String,
+        chatId: String = resolveTargetChatId(),
+        botId: String = resolveConfiguredBotId(),
+        messageId: Long? = null
+    ): String {
+        val safeDesc = sanitizeSensitiveContent(rawDescription)
+        if (!isChatIdValid) {
+            return "ত্রুটি: কনফিগার করা টেলিগ্রাম চ্যাট আইডি ($chatId) সঠিক সংখ্যার ফরম্যাটে নেই।"
+        }
+        if (!isTokenConfigured) {
+            return "ত্রুটি: অ্যাপের পরিবেশে TELEGRAM_BOT_TOKEN কনফিগার করা নেই (ডিফল্ট প্লেসহোল্ডার সক্রিয়)। অনুগ্রহ করে AI Studio Secrets প্যানেলে অথবা Firebase Cloud Functions Secret-এ বট ($botId)-এর সক্রিয় টোকেন যুক্ত করুন।"
+        }
+        if (httpCode in 200..299 && messageId != null && messageId > 0L) {
+            return "আলহামদুলিল্লাহ, টেলিগ্রাম বট (Bot ID: $botId) থেকে চ্যাট আইডি ($chatId)-তে মেসেজ সফলভাবে পাঠানো হয়েছে (Telegram Message ID: #$messageId)।"
+        }
+        val lower = safeDesc.lowercase(Locale.ROOT)
+        return when {
+            httpCode == 401 || lower.contains("unauthorized") -> {
+                "Telegram API 401 (Unauthorized): বট টোকেনটি বৈধ নয় অথবা @BotFather থেকে বাতিল/পরিবর্তিত (Revoked) হয়েছে। অনুগ্রহ করে @BotFather থেকে বট ($botId)-এর সক্রিয় টোকেন নিয়ে AI Studio Secrets প্যানেলে TELEGRAM_BOT_TOKEN হালনাগাদ করুন।"
+            }
+            httpCode == 400 && lower.contains("chat not found") -> {
+                "Telegram API 400 (chat not found): চ্যাট আইডি ($chatId) খুঁজে পাওয়া যায়নি অথবা ঐ টেলিগ্রাম অ্যাকাউন্ট থেকে এখনো বটটিতে মেসেজ (/start) পাঠানো হয়নি।"
+            }
+            httpCode == 403 && (lower.contains("blocked") || lower.contains("forbidden")) -> {
+                "Telegram API 403 (Forbidden): চ্যাট আইডি ($chatId) থেকে বটটিকে ব্লক করা হয়েছে অথবা বটের মেসেজ পাঠানোর অনুমতি নেই। বট আনব্লক করে /start পাঠান।"
+            }
+            httpCode == 404 -> {
+                "Telegram API 404 (Not Found): বট এন্ডপয়েন্ট বা টোকেন ফরম্যাট সঠিক নয়।"
+            }
+            httpCode == 429 -> {
+                "Telegram API 429 (Too Many Requests): অতিরিক্ত রিকোয়েস্টের কারণে সাময়িক বিরতি চলছে। কিছুক্ষণ পর আবার চেষ্টা করুন।"
+            }
+            httpCode <= 0 -> {
+                "নেটওয়ার্ক ত্রুটি: Telegram Bot API সার্ভারে সংযোগ করা যায়নি (${safeDesc.ifBlank { "Connection failed" }})।"
+            }
+            else -> {
+                "Telegram API ত্রুটি (HTTP $httpCode): ${safeDesc.ifBlank { "অজ্ঞাত সার্ভার রেসপন্স" }}"
+            }
+        }
+    }
+
+    private val OK_TRUE_REGEX = Regex(""""ok"\s*:\s*true\b""")
+    private val MSG_ID_REGEX = Regex(""""message_id"\s*:\s*(\d+)""")
+    private val ERR_CODE_REGEX = Regex(""""error_code"\s*:\s*(\d+)""")
+    private val DESC_REGEX = Regex(""""description"\s*:\s*"([^"]*)"""")
+    private val USERNAME_REGEX = Regex(""""username"\s*:\s*"([^"]*)"""")
+    private val FIRST_NAME_REGEX = Regex(""""first_name"\s*:\s*"([^"]*)"""")
+    private val BOT_ID_FIELD_REGEX = Regex(""""id"\s*:\s*(\d+)""")
+
+    /**
+     * Parses a raw JSON response from Telegram Bot API (`getMe` or `sendMessage`) and verifies
+     * whether `"ok": true` is explicitly present.
+     */
+    fun parseTelegramSendMessageJson(
+        httpCode: Int,
+        rawResponseBody: String,
+        isTokenConfigured: Boolean = true,
+        chatId: String = resolveTargetChatId(),
+        botId: String = resolveConfiguredBotId()
+    ): TelegramBotDiagnosticResult {
+        val validChat = isChatIdStructurallyValid(chatId)
+        val body = rawResponseBody.trim()
+        return try {
+            val isOk = OK_TRUE_REGEX.containsMatchIn(body)
+            if (httpCode in 200..299 && isOk) {
+                val msgId = MSG_ID_REGEX.find(body)?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0L }
+                val username = USERNAME_REGEX.find(body)?.groupValues?.getOrNull(1).orEmpty()
+                val firstName = FIRST_NAME_REGEX.find(body)?.groupValues?.getOrNull(1).orEmpty()
+                if (msgId != null) {
+                    TelegramBotDiagnosticResult(
+                        isTokenConfigured = isTokenConfigured,
+                        isChatIdValid = validChat,
+                        getMeVerified = true,
+                        getMeHttpCode = 200,
+                        botId = botId,
+                        botUsername = username,
+                        botFirstName = firstName,
+                        sendMessageOk = true,
+                        sendMessageHttpCode = httpCode,
+                        deliveredMessageId = msgId,
+                        errorCode = null,
+                        sanitizedErrorDescription = "",
+                        deliveryStatus = "DELIVERED",
+                        diagnosticMessageBangla = buildBanglaDiagnosticMessage(
+                            isTokenConfigured = isTokenConfigured,
+                            isChatIdValid = validChat,
+                            httpCode = httpCode,
+                            rawDescription = "",
+                            chatId = chatId,
+                            botId = botId,
+                            messageId = msgId
+                        )
+                    )
+                } else {
+                    val errDesc = "Telegram API ok:true রেসপন্সে বৈধ message_id পাওয়া যায়নি।"
+                    TelegramBotDiagnosticResult(
+                        isTokenConfigured = isTokenConfigured,
+                        isChatIdValid = validChat,
+                        getMeVerified = false,
+                        sendMessageOk = false,
+                        sendMessageHttpCode = httpCode,
+                        errorCode = httpCode,
+                        sanitizedErrorDescription = errDesc,
+                        deliveryStatus = "FAILED",
+                        diagnosticMessageBangla = errDesc
+                    )
+                }
+            } else {
+                val errCode = ERR_CODE_REGEX.find(body)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: httpCode
+                val extractedDesc = DESC_REGEX.find(body)?.groupValues?.getOrNull(1) ?: body.take(200)
+                val desc = sanitizeSensitiveContent(extractedDesc)
+                TelegramBotDiagnosticResult(
+                    isTokenConfigured = isTokenConfigured,
+                    isChatIdValid = validChat,
+                    getMeVerified = false,
+                    sendMessageOk = false,
+                    sendMessageHttpCode = httpCode,
+                    errorCode = errCode,
+                    sanitizedErrorDescription = desc,
+                    deliveryStatus = "FAILED",
+                    diagnosticMessageBangla = buildBanglaDiagnosticMessage(
+                        isTokenConfigured = isTokenConfigured,
+                        isChatIdValid = validChat,
+                        httpCode = errCode.takeIf { it > 0 } ?: httpCode,
+                        rawDescription = desc,
+                        chatId = chatId,
+                        botId = botId
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            val safeErr = sanitizeSensitiveContent(e.localizedMessage ?: "Invalid JSON response")
+            TelegramBotDiagnosticResult(
+                isTokenConfigured = isTokenConfigured,
+                isChatIdValid = validChat,
+                getMeVerified = false,
+                sendMessageOk = false,
+                sendMessageHttpCode = httpCode,
+                errorCode = httpCode,
+                sanitizedErrorDescription = safeErr,
+                deliveryStatus = "FAILED",
+                diagnosticMessageBangla = buildBanglaDiagnosticMessage(
+                    isTokenConfigured = isTokenConfigured,
+                    isChatIdValid = validChat,
+                    httpCode = httpCode,
+                    rawDescription = safeErr,
+                    chatId = chatId,
+                    botId = botId
+                )
+            )
+        }
+    }
+
+    /**
+     * Verifies the configured Telegram Bot Token by calling Telegram's official `getMe` endpoint
+     * and inspecting the real JSON response (`"ok": true` and `result.id` / `result.username`).
+     */
+    suspend fun verifyBotConnectionWithGetMe(): TelegramBotDiagnosticResult = withContext(Dispatchers.IO) {
+        val chatId = resolveTargetChatId()
+        val botId = resolveConfiguredBotId()
+        val validChat = isChatIdStructurallyValid(chatId)
+        val tokenConfigured = isTelegramBotConfigured()
+
+        if (!tokenConfigured) {
+            val msg = buildBanglaDiagnosticMessage(
+                isTokenConfigured = false,
+                isChatIdValid = validChat,
+                httpCode = 0,
+                rawDescription = "TELEGRAM_BOT_TOKEN_NOT_CONFIGURED",
+                chatId = chatId,
+                botId = botId
+            )
+            return@withContext TelegramBotDiagnosticResult(
+                isTokenConfigured = false,
+                isChatIdValid = validChat,
+                getMeVerified = false,
+                getMeHttpCode = 0,
+                botId = botId,
+                sendMessageOk = false,
+                sanitizedErrorDescription = "TELEGRAM_BOT_TOKEN is not configured in BuildConfig/.env",
+                deliveryStatus = "FAILED",
+                diagnosticMessageBangla = msg
+            )
+        }
+
+        val token = resolveActiveBotToken()
+        var conn: HttpURLConnection? = null
+        try {
+            val apiUrl = URL("https://api.telegram.org/bot$token/getMe")
+            conn = (apiUrl.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("Accept", "application/json")
+            }
+            val code = conn.responseCode
+            val rawBody = readHttpBodySafely(conn, code).trim()
+            val isOk = OK_TRUE_REGEX.containsMatchIn(rawBody)
+            if (code in 200..299 && isOk) {
+                val returnedId = BOT_ID_FIELD_REGEX.find(rawBody)?.groupValues?.getOrNull(1).orEmpty()
+                val username = USERNAME_REGEX.find(rawBody)?.groupValues?.getOrNull(1).orEmpty()
+                val firstName = FIRST_NAME_REGEX.find(rawBody)?.groupValues?.getOrNull(1).orEmpty()
+                TelegramBotDiagnosticResult(
+                    isTokenConfigured = true,
+                    isChatIdValid = validChat,
+                    getMeVerified = true,
+                    getMeHttpCode = code,
+                    botId = returnedId.ifBlank { botId },
+                    botUsername = username,
+                    botFirstName = firstName,
+                    sendMessageOk = false,
+                    deliveryStatus = "QUEUED",
+                    diagnosticMessageBangla = "আলহামদুলিল্লাহ, Telegram getMe যাচাই সফল! বট সচল রয়েছে (${if (username.isNotBlank()) "@$username" else firstName}, Bot ID: ${returnedId.ifBlank { botId }}, Chat ID: $chatId)।"
+                )
+            } else {
+                val errCode = ERR_CODE_REGEX.find(rawBody)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: code
+                val extractedDesc = DESC_REGEX.find(rawBody)?.groupValues?.getOrNull(1) ?: rawBody.take(200)
+                val desc = sanitizeSensitiveContent(extractedDesc)
+                TelegramBotDiagnosticResult(
+                    isTokenConfigured = true,
+                    isChatIdValid = validChat,
+                    getMeVerified = false,
+                    getMeHttpCode = code,
+                    botId = botId,
+                    sendMessageOk = false,
+                    errorCode = errCode,
+                    sanitizedErrorDescription = desc,
+                    deliveryStatus = "FAILED",
+                    diagnosticMessageBangla = buildBanglaDiagnosticMessage(
+                        isTokenConfigured = true,
+                        isChatIdValid = validChat,
+                        httpCode = errCode.takeIf { it > 0 } ?: code,
+                        rawDescription = desc,
+                        chatId = chatId,
+                        botId = botId
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            val safeErr = sanitizeSensitiveContent(e.localizedMessage ?: "Network exception")
+            TelegramBotDiagnosticResult(
+                isTokenConfigured = true,
+                isChatIdValid = validChat,
+                getMeVerified = false,
+                getMeHttpCode = 0,
+                botId = botId,
+                sendMessageOk = false,
+                errorCode = -1,
+                sanitizedErrorDescription = safeErr,
+                deliveryStatus = "FAILED",
+                diagnosticMessageBangla = buildBanglaDiagnosticMessage(
+                    isTokenConfigured = true,
+                    isChatIdValid = validChat,
+                    httpCode = 0,
+                    rawDescription = safeErr,
+                    chatId = chatId,
+                    botId = botId
+                )
+            )
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /**
+     * Performs end-to-end verified Telegram Bot dispatch:
+     * 1. Enforces idempotency via `eventKey` so duplicate messages are not dispatched for the same event.
+     * 2. Verifies bot configuration and `getMe` status.
+     * 3. Dispatches `sendMessage` to Chat ID `6255562134` and parses the JSON response (`"ok": true` + `result.message_id`).
+     */
+    suspend fun dispatchToTelegramBotVerified(
         eventType: String,
         title: String,
         message: String,
         actorName: String,
-        targetPhone: String = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
-    ): Boolean = withContext(Dispatchers.IO) {
-        if (!isTelegramBotConfigured()) {
-            return@withContext false
+        targetPhone: String = AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+        eventKey: String = "",
+        bypassDedup: Boolean = false
+    ): TelegramBotDiagnosticResult = withContext(Dispatchers.IO) {
+        val chatId = resolveTargetChatId()
+        val botId = resolveConfiguredBotId()
+        val validChat = isChatIdStructurallyValid(chatId)
+        val tokenConfigured = isTelegramBotConfigured()
+
+        val resolvedEventKey = eventKey.trim().ifBlank {
+            "${eventType}_${title.hashCode()}_${message.hashCode()}"
         }
+        val now = System.currentTimeMillis()
+        if (!bypassDedup) {
+            val previousSentAt = deliveredEventKeys[resolvedEventKey]
+            if (previousSentAt != null && (now - previousSentAt) < DEDUP_WINDOW_MS) {
+                return@withContext TelegramBotDiagnosticResult(
+                    isTokenConfigured = tokenConfigured,
+                    isChatIdValid = validChat,
+                    getMeVerified = true,
+                    getMeHttpCode = 200,
+                    botId = botId,
+                    sendMessageOk = true,
+                    sendMessageHttpCode = 200,
+                    deliveredMessageId = 1L,
+                    deliveryStatus = "DELIVERED",
+                    diagnosticMessageBangla = "এই ইভেন্টের টেলিগ্রাম বার্তা ইতোমধ্যে পাঠানো হয়েছে (ডুপ্লিকেট প্রেরণ রোধ করা হয়েছে)।"
+                )
+            }
+        }
+
+        if (!tokenConfigured) {
+            val msg = buildBanglaDiagnosticMessage(
+                isTokenConfigured = false,
+                isChatIdValid = validChat,
+                httpCode = 0,
+                rawDescription = "TELEGRAM_BOT_TOKEN_NOT_CONFIGURED",
+                chatId = chatId,
+                botId = botId
+            )
+            return@withContext TelegramBotDiagnosticResult(
+                isTokenConfigured = false,
+                isChatIdValid = validChat,
+                getMeVerified = false,
+                botId = botId,
+                sendMessageOk = false,
+                sanitizedErrorDescription = "TELEGRAM_BOT_TOKEN not configured",
+                deliveryStatus = "FAILED",
+                diagnosticMessageBangla = msg
+            )
+        }
+
+        // Step 1: Verify bot token via getMe before sending
+        val getMeResult = verifyBotConnectionWithGetMe()
+        if (!getMeResult.getMeVerified) {
+            return@withContext getMeResult.copy(
+                sendMessageOk = false,
+                deliveryStatus = "FAILED"
+            )
+        }
+
+        // Step 2: Send message via sendMessage and verify "ok": true + result.message_id
         val token = resolveActiveBotToken()
-        val configuredTarget = resolveTargetChatId()
         val formattedText = formatTelegramEventMessage(
             eventType = eventType,
             title = title,
@@ -151,14 +515,54 @@ object TelegramNotificationHelper {
             targetPhone = targetPhone
         )
 
-        sendTelegramMessageRequest(token, configuredTarget, formattedText)
+        val sendResult = executeSendMessageHttpCall(
+            token = token,
+            chatId = chatId,
+            botId = getMeResult.botId.ifBlank { botId },
+            formattedText = formattedText
+        )
+
+        if (sendResult.sendMessageOk) {
+            deliveredEventKeys[resolvedEventKey] = System.currentTimeMillis()
+        }
+
+        sendResult.copy(
+            getMeVerified = true,
+            getMeHttpCode = getMeResult.getMeHttpCode,
+            botUsername = getMeResult.botUsername.ifBlank { sendResult.botUsername },
+            botFirstName = getMeResult.botFirstName.ifBlank { sendResult.botFirstName }
+        )
     }
 
-    private fun sendTelegramMessageRequest(
+    /**
+     * Backward-compatible Boolean wrapper that returns `true` ONLY if Telegram Bot API
+     * explicitly returns `"ok": true` and a valid `message_id`.
+     */
+    suspend fun dispatchToTelegramBot(
+        eventType: String,
+        title: String,
+        message: String,
+        actorName: String,
+        targetPhone: String = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
+    ): Boolean {
+        val result = dispatchToTelegramBotVerified(
+            eventType = eventType,
+            title = title,
+            message = message,
+            actorName = actorName,
+            targetPhone = targetPhone,
+            bypassDedup = true
+        )
+        return result.sendMessageOk
+    }
+
+    private fun executeSendMessageHttpCall(
         token: String,
         chatId: String,
+        botId: String,
         formattedText: String
-    ): Boolean {
+    ): TelegramBotDiagnosticResult {
+        var conn: HttpURLConnection? = null
         return try {
             val apiUrl = URL("https://api.telegram.org/bot$token/sendMessage")
             val payload = JSONObject().apply {
@@ -167,21 +571,62 @@ object TelegramNotificationHelper {
                 put("disable_web_page_preview", true)
             }.toString()
 
-            val conn = (apiUrl.openConnection() as HttpURLConnection).apply {
+            conn = (apiUrl.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
-                connectTimeout = 5000
-                readTimeout = 5000
+                connectTimeout = 6000
+                readTimeout = 6000
                 setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("Accept", "application/json")
             }
             conn.outputStream.use { out ->
                 out.write(payload.toByteArray(Charsets.UTF_8))
             }
             val code = conn.responseCode
-            conn.disconnect()
-            code in 200..299
+            val rawBody = readHttpBodySafely(conn, code)
+            parseTelegramSendMessageJson(
+                httpCode = code,
+                rawResponseBody = rawBody,
+                isTokenConfigured = true,
+                chatId = chatId,
+                botId = botId
+            )
+        } catch (e: Exception) {
+            val safeErr = sanitizeSensitiveContent(e.localizedMessage ?: "Network exception")
+            TelegramBotDiagnosticResult(
+                isTokenConfigured = true,
+                isChatIdValid = isChatIdStructurallyValid(chatId),
+                getMeVerified = false,
+                botId = botId,
+                sendMessageOk = false,
+                sendMessageHttpCode = 0,
+                errorCode = -1,
+                sanitizedErrorDescription = safeErr,
+                deliveryStatus = "FAILED",
+                diagnosticMessageBangla = buildBanglaDiagnosticMessage(
+                    isTokenConfigured = true,
+                    isChatIdValid = isChatIdStructurallyValid(chatId),
+                    httpCode = 0,
+                    rawDescription = safeErr,
+                    chatId = chatId,
+                    botId = botId
+                )
+            )
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun readHttpBodySafely(conn: HttpURLConnection, responseCode: Int): String {
+        return try {
+            val stream = if (responseCode in 200..299) {
+                conn.inputStream
+            } else {
+                conn.errorStream ?: conn.inputStream
+            }
+            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
         } catch (_: Exception) {
-            false
+            ""
         }
     }
 
