@@ -1920,7 +1920,8 @@ class QawmiRepository(
         title: String,
         message: String,
         actorName: String,
-        referenceId: String
+        referenceId: String,
+        customTargetPhone: String = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
     ): Result<String> {
         val currentUser = auth.currentUser
         val uid = currentUser?.uid
@@ -1929,7 +1930,7 @@ class QawmiRepository(
         }.orEmpty()
 
         val resolvedActor = TelegramNotificationHelper.sanitizeSensitiveContent(
-            (actorName.ifBlank { "কওমি কর্মসংস্থান অ্যাডমিন" } + adminEmailSuffix).trim()
+            (actorName.ifBlank { "কওমি কর্মসংস্থান ব্যবহারকারী/অ্যাডমিন" } + adminEmailSuffix).trim()
         ).take(200)
         val resolvedTitle = TelegramNotificationHelper.sanitizeSensitiveContent(title)
             .ifBlank { "কওমি কর্মসংস্থান ইত্তেলা" }
@@ -1937,6 +1938,9 @@ class QawmiRepository(
         val resolvedMessage = TelegramNotificationHelper.sanitizeSensitiveContent(message)
             .ifBlank { resolvedTitle }
             .take(2000)
+        val resolvedTargetPhone = TelegramNotificationHelper.sanitizeSensitiveContent(customTargetPhone)
+            .ifBlank { AdminSecurityHelper.ADMIN_MOBILE_NUMBER }
+            .take(30)
 
         // Immediately dispatch automatic message to the built-in Telegram Bot (Chat ID: 6255562134)
         val delivered = TelegramNotificationHelper.dispatchToTelegramBot(
@@ -1944,7 +1948,7 @@ class QawmiRepository(
             title = resolvedTitle,
             message = resolvedMessage,
             actorName = resolvedActor,
-            targetPhone = AdminSecurityHelper.ADMIN_MOBILE_NUMBER
+            targetPhone = resolvedTargetPhone
         )
 
         if (uid == null) {
@@ -1963,7 +1967,7 @@ class QawmiRepository(
                 "message" to resolvedMessage,
                 "actorId" to uid,
                 "actorName" to resolvedActor,
-                "targetPhone" to AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+                "targetPhone" to resolvedTargetPhone,
                 "referenceId" to referenceId.take(128),
                 "deliveryStatus" to if (delivered) "DELIVERED" else "QUEUED",
                 "createdAt" to FieldValue.serverTimestamp(),
@@ -1981,6 +1985,41 @@ class QawmiRepository(
                 Result.failure(e)
             }
         }
+    }
+
+    /**
+     * Saves a user's support request, complaint, technical issue, or suggestion to Firebase Firestore
+     * so it is visible in the Admin Panel AND automatically dispatches it to the existing Telegram Bot.
+     */
+    suspend fun submitSupportOrComplaintMessage(
+        category: String,
+        subject: String,
+        message: String,
+        contactPhone: String,
+        senderName: String
+    ): Result<String> {
+        val cleanCategory = category.trim().ifBlank { "সহায়তা ও যোগাযোগ" }
+        val cleanSubject = subject.trim().ifBlank { "ব্যবহারকারীর বার্তা" }
+        val cleanBody = message.trim()
+        if (cleanBody.isBlank()) {
+            return Result.failure(IllegalArgumentException("অনুগ্রহ করে আপনার বার্তা বা অভিযোগের বিস্তারিত লিখুন।"))
+        }
+        val cleanPhone = contactPhone.trim().ifBlank { AdminSecurityHelper.ADMIN_MOBILE_NUMBER }
+        val cleanSender = senderName.trim().ifBlank {
+            auth.currentUser?.displayName?.takeIf { it.isNotBlank() } ?: "ব্যবহারকারী"
+        }
+
+        val formattedTitle = "[$cleanCategory] $cleanSubject"
+        val formattedMessage = "প্রেরক: $cleanSender | যোগাযোগ: ${contactPhone.trim().ifBlank { "উল্লেখ নেই" }} | বিস্তারিত: $cleanBody"
+
+        return enqueueAndDispatchTelegramNotification(
+            eventType = "KHEDMOT_SUBMISSION",
+            title = formattedTitle,
+            message = formattedMessage,
+            actorName = cleanSender,
+            referenceId = "SUPPORT_TICKET:$cleanCategory",
+            customTargetPhone = cleanPhone
+        )
     }
 
     suspend fun sendAdminTestTelegramNotification(
@@ -2011,7 +2050,7 @@ class QawmiRepository(
             }
             .catch { error ->
                 if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                emit(emptyList())
+                throw error
             }
     }
 
@@ -2025,7 +2064,21 @@ class QawmiRepository(
             }
             .catch { error ->
                 if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                emit(emptyList())
+                throw error
+            }
+    }
+
+    fun observeAllAdminsForAdmin(): Flow<List<AdminRegistryEntry>> {
+        val path = "admins"
+        return db.collection(path)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toObjects(AdminRegistryEntry::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .sortedByDescending { it.updatedAt ?: Timestamp(0, 0) }
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                throw error
             }
     }
 
@@ -2116,5 +2169,123 @@ class QawmiRepository(
             referenceId = referenceId
         )
     }
+
+    // --- 10. AJKER SMORON (আজকের স্মরণ — সার্ভার-ভিত্তিক ইতিহাস, বরাদ্দ ও নোটিফিকেশন সিঙ্ক) ---
+
+    fun observeSmoronServerReceipts(userId: String): Flow<Map<String, Long>> {
+        if (userId.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyMap())
+        val readsPath = "users/$userId/notification_reads"
+        return db.collection("users")
+            .document(userId)
+            .collection("notification_reads")
+            .whereEqualTo("userId", userId)
+            .snapshots()
+            .map { snapshot ->
+                val result = mutableMapOf<String, Long>()
+                snapshot.toObjects(
+                    NotificationReadReceipt::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                ).forEach { receipt ->
+                    val key = receipt.notificationId.ifBlank { receipt.id }
+                    if (key.startsWith("smoron_")) {
+                        val tsMillis = receipt.readAt?.toDate()?.time ?: System.currentTimeMillis()
+                        result[key] = tsMillis
+                    }
+                }
+                result.toMap()
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, readsPath)
+                emit(emptyMap())
+            }
+    }
+
+    suspend fun recordSmoronAssignmentInServer(
+        dateKey: String,
+        reminderId: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        if (dateKey.isBlank() || reminderId.isBlank()) return Result.success(Unit)
+        val readsCol = db.collection("users").document(uid).collection("notification_reads")
+        val dayDocId = "smoron_day_${dateKey}__$reminderId"
+        val histDocId = "smoron_hist_$reminderId"
+        return try {
+            val batch = db.batch()
+            listOf(dayDocId, histDocId).forEach { docId ->
+                batch.set(
+                    readsCol.document(docId),
+                    mapOf(
+                        "userId" to uid,
+                        "notificationId" to docId,
+                        "readAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, "users/$uid/notification_reads")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun recordSmoronPushSentInServer(
+        dateKey: String,
+        reminderId: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        if (dateKey.isBlank() || reminderId.isBlank()) return Result.success(Unit)
+        val readsCol = db.collection("users").document(uid).collection("notification_reads")
+        val pushDocId = "smoron_push_${dateKey}__$reminderId"
+        val histDocId = "smoron_hist_$reminderId"
+        return try {
+            val batch = db.batch()
+            listOf(pushDocId, histDocId).forEach { docId ->
+                batch.set(
+                    readsCol.document(docId),
+                    mapOf(
+                        "userId" to uid,
+                        "notificationId" to docId,
+                        "readAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, "users/$uid/notification_reads")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun recordSmoronAmolCompletedInServer(dateKey: String): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        if (dateKey.isBlank()) return Result.success(Unit)
+        val docId = "smoron_amol_$dateKey"
+        val docRef = db.collection("users")
+            .document(uid)
+            .collection("notification_reads")
+            .document(docId)
+        return try {
+            docRef.set(
+                mapOf(
+                    "userId" to uid,
+                    "notificationId" to docId,
+                    "readAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
 }
+
 

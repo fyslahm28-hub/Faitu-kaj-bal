@@ -991,9 +991,327 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("about_developer_screen").assertIsDisplayed()
         composeTestRule.onNodeWithText("কওমি কর্মসংস্থান কারিগরি টিম").assertIsDisplayed()
     }
+
+    @Test
+    fun `PrayerSchedule displays Hanafi start and end times and persists pinned district selection`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.ui.util.IslamicDateAndPrayerHelper.pinDistrict(context, "ঢাকা")
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(860.dp)) {
+                    com.example.ui.screens.FullPrayerScheduleScreen()
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("full_prayer_schedule_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithText("জেলা/বিভাগ: ঢাকা").assertIsDisplayed()
+
+        // Open 64-district picker dialog, search for "সিলেট", and pin "সিলেট"
+        composeTestRule.onNodeWithTag("full_schedule_change_district_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("prayer_district_picker_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("prayer_district_search_input").performTextInput("সিলেট")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("pin_btn_সিলেট").performClick()
+        composeTestRule.waitForIdle()
+
+        // Verify "সিলেট" is now both selected and pinned in IslamicDateAndPrayerHelper
+        assertEquals("সিলেট", com.example.ui.util.IslamicDateAndPrayerHelper.pinnedDistrictFlow.value)
+        assertEquals("সিলেট", com.example.ui.util.IslamicDateAndPrayerHelper.selectedDistrictFlow.value)
+        composeTestRule.onNodeWithText("জেলা/বিভাগ: সিলেট").assertIsDisplayed()
+    }
+
+    @Test
+    @Config(qualifiers = "w420dp-h860dp")
+    fun `AdminPanelScreen shows real server data, shows Kono Totho Nei when empty without fake demo data, and supports server retry on error`() {
+        var usersState by mutableStateOf<UiState<List<UserProfile>>>(UiState.Success(emptyList()))
+        var submissionsState by mutableStateOf<UiState<List<com.example.data.model.KhedmotSubmission>>>(UiState.Success(emptyList()))
+        var postsState by mutableStateOf<UiState<List<com.example.data.model.FeedPost>>>(UiState.Success(emptyList()))
+        var logsState by mutableStateOf<UiState<List<com.example.data.model.TelegramNotificationLog>>>(UiState.Success(emptyList()))
+        var retryCount = 0
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(840.dp)) {
+                    com.example.ui.screens.AdminPanelScreen(
+                        isAdminUser = true,
+                        adminDisplayName = "প্রধান অ্যাডমিন",
+                        usersState = usersState,
+                        submissionsState = submissionsState,
+                        madrasasState = UiState.Success(emptyList()),
+                        feedPostsState = postsState,
+                        telegramNotificationsState = logsState,
+                        adminsState = UiState.Success(emptyList()),
+                        onRetryServerLoad = { retryCount++ },
+                        onVerifyMadrasa = { _, _ -> },
+                        onVerifyPost = { _, _, _ -> },
+                        onToggleBoostPost = { _, _ -> },
+                        onSendAnnouncement = { _, _ -> },
+                        onDeletePost = {}
+                    )
+                }
+            }
+        }
+
+        // 1. When server collections are empty, NO fake/seed data exists and "কোনো তথ্য নেই" is shown
+        composeTestRule.onNodeWithText("১,২৫০").assertDoesNotExist()
+        composeTestRule.onNodeWithText("৩২০").assertDoesNotExist()
+        composeTestRule.onNodeWithText("হাফেজ সাইফুল ইসলাম").assertDoesNotExist()
+
+        // Navigate to Users tab -> shows "সব (০)" and "কোনো তথ্য নেই"
+        composeTestRule.onNodeWithTag("admin_tab_users").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("সব (০)").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_empty_state_card").assertIsDisplayed()
+        composeTestRule.onNodeWithText("কোনো তথ্য নেই").assertIsDisplayed()
+
+        // 2. When real server data arrives from Firebase, it renders immediately
+        usersState = UiState.Success(
+            listOf(
+                UserProfile(
+                    id = "real_u1",
+                    fullName = "মাওলানা কারীমুল্লাহ",
+                    contactInfo = "01711223344",
+                    isOnline = true,
+                    isVerified = true
+                )
+            )
+        )
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("সব (১)").assertIsDisplayed()
+        composeTestRule.onNodeWithText("মাওলানা কারীমুল্লাহ").assertIsDisplayed()
+
+        // 3. When a server error occurs, error banner and retry button are displayed
+        postsState = UiState.Error("সার্ভার সংযোগ বিচ্ছিন্ন হয়েছে")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("admin_server_error_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("admin_retry_server_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(1, retryCount)
+    }
+
+    @Test
+    @Config(qualifiers = "w420dp-h960dp")
+    fun `HelpAndSupportScreen submits user complaint to Firebase, formats Telegram Bot alert, and displays in AdminPanelScreen`() {
+        var logsList by mutableStateOf<List<com.example.data.model.TelegramNotificationLog>>(emptyList())
+        var formattedTelegramHtml = ""
+        var showAdmin by mutableStateOf(false)
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(940.dp)) {
+                    if (!showAdmin) {
+                        com.example.ui.screens.HelpAndSupportScreen(
+                            defaultSenderPhone = "01812345678",
+                            isSubmitting = false,
+                            onSubmitSupportMessage = { category, subject, message, contactPhone, onSuccessReset ->
+                                val title = "[$category] $subject"
+                                formattedTelegramHtml = com.example.ui.util.TelegramNotificationHelper.formatTelegramEventMessage(
+                                    eventType = "KHEDMOT_SUBMISSION",
+                                    title = title,
+                                    message = message,
+                                    actorName = "মাওলানা সাদিক",
+                                    targetPhone = contactPhone
+                                )
+                                logsList = logsList + com.example.data.model.TelegramNotificationLog(
+                                    id = "support_log_1",
+                                    eventType = "KHEDMOT_SUBMISSION",
+                                    title = title,
+                                    message = message,
+                                    actorId = "u_sadik",
+                                    actorName = "মাওলানা সাদিক",
+                                    targetPhone = contactPhone,
+                                    referenceId = "SUPPORT_TICKET:$category",
+                                    deliveryStatus = "DELIVERED"
+                                )
+                                onSuccessReset()
+                            }
+                        )
+                    } else {
+                        com.example.ui.screens.AdminPanelScreen(
+                            isAdminUser = true,
+                            adminDisplayName = "অ্যাডমিন",
+                            usersState = UiState.Success(emptyList()),
+                            submissionsState = UiState.Success(emptyList()),
+                            madrasasState = UiState.Success(emptyList()),
+                            feedPostsState = UiState.Success(emptyList()),
+                            telegramNotificationsState = UiState.Success(logsList),
+                            adminsState = UiState.Success(emptyList()),
+                            onVerifyMadrasa = { _, _ -> },
+                            onVerifyPost = { _, _, _ -> },
+                            onToggleBoostPost = { _, _ -> },
+                            onSendAnnouncement = { _, _ -> },
+                            onDeletePost = {}
+                        )
+                    }
+                }
+            }
+        }
+
+        // Fill out complaint in HelpAndSupportScreen and submit
+        composeTestRule.onNodeWithTag("help_support_subject_input").performTextInput("বিজ্ঞপ্তি প্রকাশে সমস্যা")
+        composeTestRule.onNodeWithTag("help_support_message_input").performTextInput("নতুন নিয়োগ বিজ্ঞপ্তি প্রকাশ করার সময় ছবি যুক্ত হচ্ছে না।")
+        composeTestRule.onNodeWithTag("help_support_submit_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Verify confirmation banner and Telegram Bot payload formatting
+        composeTestRule.onNodeWithTag("help_support_confirmation_banner").assertIsDisplayed()
+        assertEquals(1, logsList.size)
+        assertTrue(formattedTelegramHtml.contains("ব্যবহারকারীর সহায়তা, অভিযোগ ও পরামর্শ বার্তা"))
+        assertTrue(formattedTelegramHtml.contains("বিজ্ঞপ্তি প্রকাশে সমস্যা"))
+        assertEquals("6255562134", com.example.ui.util.TelegramNotificationHelper.resolveTargetChatId())
+
+        // Switch to AdminPanelScreen -> open Settings & Logs Hub -> Activity Log (Screen 12) -> filter by "অভিযোগ/সহায়তা"
+        showAdmin = true
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("admin_tab_settings_hub").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("admin_settings_row_6").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("অভিযোগ/সহায়তা").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("telegram_log_item_support_log_1").assertIsDisplayed()
+        composeTestRule.onNodeWithText("[অভিযোগ] বিজ্ঞপ্তি প্রকাশে সমস্যা").assertIsDisplayed()
+    }
+
+    @Test
+    fun `AjkerSmoronHelper assigns user-specific reminders, avoids repeats across 36 days, and enforces authentic citations and durood honorific`() {
+        val allReminders = com.example.ui.util.AjkerSmoronHelper.allReminders
+        assertTrue("Catalog must contain at least 30 authentic reminders", allReminders.size >= 30)
+
+        // 1. Verify exact user-requested prompt examples are present in catalog
+        assertTrue(
+            allReminders.any {
+                it.messageBangla.contains("আপনি কি আজ প্রিয় নবী হযরত মুহাম্মদ ﷺ-এর ওপর দরুদ শরিফ পাঠ করেছেন?")
+            }
+        )
+        assertTrue(
+            allReminders.any {
+                it.messageBangla.contains("আজ কি আপনি আল্লাহ তাআলার জিকির করেছেন?")
+            }
+        )
+        assertTrue(
+            allReminders.any {
+                it.messageBangla.contains("আজ কি আপনি কারো উপকার করেছেন বা একটি ভালো কাজ করেছেন?")
+            }
+        )
+
+        // 2. Verify every single item has a non-blank authentic source citation and proper honorific when Prophet Muhammad ﷺ is mentioned
+        allReminders.forEach { item ->
+            assertTrue("Source reference must not be blank for ${item.id}", item.sourceReferenceBangla.isNotBlank())
+            assertTrue("Quote or translation must not be blank for ${item.id}", item.quoteBangla.isNotBlank())
+            val combinedText = "${item.messageBangla} ${item.quoteBangla} ${item.dailyAmolBangla}"
+            if (combinedText.contains("মুহাম্মদ") || combinedText.contains("রাসূলুল্লাহ") || combinedText.contains("নবী করীম")) {
+                assertTrue(
+                    "Prophet mention in ${item.id} must include ﷺ or সাল্লাল্লাহু আলাইহি ওয়া সাল্লাম",
+                    combinedText.contains("ﷺ") || combinedText.contains("সাল্লাল্লাহু আলাইহি ওয়া সাল্লাম")
+                )
+            }
+        }
+
+        // 3. Verify different users on the same day receive personalized reminders (not all identical)
+        val sameDaySelections = (1..12).map { idx ->
+            com.example.ui.util.AjkerSmoronHelper.selectPersonalizedReminderForUser(
+                userId = "qawmi_user_$idx",
+                dateKey = "2026_10_24",
+                deliveredHistoryMap = emptyMap()
+            ).id
+        }.toSet()
+        assertTrue("Different users on the same day should receive varied reminders", sameDaySelections.size > 1)
+
+        // 4. Verify a single user does not see ANY repeated reminder across a full 36-day cycle
+        val deliveredHistory = mutableMapOf<String, Long>()
+        for (day in 1..allReminders.size) {
+            val dateKey = "2026_11_${day.toString().padStart(2, '0')}"
+            val chosen = com.example.ui.util.AjkerSmoronHelper.selectPersonalizedReminderForUser(
+                userId = "maulana_abdullah_01",
+                dateKey = dateKey,
+                deliveredHistoryMap = deliveredHistory
+            )
+            assertTrue("Reminder ${chosen.id} should not repeat before full catalog cycle", !deliveredHistory.containsKey(chosen.id))
+            deliveredHistory[chosen.id] = day.toLong() * 1000L
+        }
+        assertEquals(allReminders.size, deliveredHistory.size)
+    }
+
+    @Test
+    @Config(qualifiers = "w420dp-h920dp")
+    fun `AjkerSmoron Push Notification enforces once-per-day deduplication, builds deep-link intent, and renders AjkerSmoronScreen`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        org.robolectric.Shadows.shadowOf(context as android.app.Application)
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        val dateKey = com.example.ui.util.AjkerSmoronHelper.currentBangladeshDateKey()
+        val userId = "test_smoron_user"
+
+        // Sync clean state
+        com.example.ui.util.AjkerSmoronHelper.syncFromServerReceipts(context, userId, emptyMap())
+        assertTrue(!com.example.ui.util.AjkerSmoronHelper.hasPushBeenSentForDate(context, userId, dateKey))
+
+        // Deliver daily push notification (1st call succeeds and records delivery)
+        val reminder = com.example.ui.util.AjkerSmoronHelper.getOrAssignTodayReminder(context, userId, dateKey)
+        val delivered = com.example.ui.util.QawmiNotificationHelper.deliverDailyAjkerSmoronPushNotification(
+            context = context,
+            userId = userId,
+            reminder = reminder,
+            dateKey = dateKey
+        )
+        assertTrue("OS Push notification should be posted on first delivery today", delivered)
+        assertTrue("Push deduplication flag must be set for today", com.example.ui.util.AjkerSmoronHelper.hasPushBeenSentForDate(context, userId, dateKey))
+
+        // 2nd call on the same day for the same user must be blocked (strict 1 push per day)
+        val duplicateAttempt = com.example.ui.util.QawmiNotificationHelper.deliverDailyAjkerSmoronPushNotification(
+            context = context,
+            userId = userId,
+            reminder = reminder,
+            dateKey = dateKey
+        )
+        assertTrue("Second push notification on the same day must be blocked", !duplicateAttempt)
+
+        // Verify deep-link intent targets MainActivity and opens Ajker Smoron directly
+        val deepLinkIntent = com.example.ui.util.QawmiNotificationHelper.buildAjkerSmoronDeepLinkIntent(
+            context = context,
+            reminderId = reminder.id
+        )
+        assertTrue(deepLinkIntent.getBooleanExtra(com.example.ui.util.QawmiNotificationHelper.EXTRA_OPEN_AJKER_SMORON, false))
+        assertEquals(reminder.id, deepLinkIntent.getStringExtra(com.example.ui.util.QawmiNotificationHelper.EXTRA_AJKER_SMORON_ID))
+
+        // Render AjkerSmoronScreen and verify UI interactions
+        var syncedReminderId = ""
+        var amolDoneDate = ""
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(900.dp)) {
+                    com.example.ui.screens.AjkerSmoronScreen(
+                        currentUserId = userId,
+                        serverReceiptsMap = mapOf(
+                            "smoron_hist_${reminder.id}" to 1700000000000L
+                        ),
+                        focusedReminderId = reminder.id,
+                        onSyncAssignmentToServer = { dKey, rId -> syncedReminderId = "$dKey:$rId" },
+                        onSyncAmolCompletedToServer = { dKey -> amolDoneDate = dKey }
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("ajker_smoron_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("ajker_smoron_hero_card").assertIsDisplayed()
+        composeTestRule.onNodeWithText("আজকের স্মরণ").assertIsDisplayed()
+
+        // Mark today's practical Amol completed
+        composeTestRule.onNodeWithTag("ajker_smoron_amol_done_btn").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(dateKey, amolDoneDate)
+
+        // Rotate to next non-repeating reminder
+        composeTestRule.onNodeWithTag("ajker_smoron_next_button").performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(syncedReminderId.startsWith("$dateKey:"))
+    }
 }
-
-
-
 
 

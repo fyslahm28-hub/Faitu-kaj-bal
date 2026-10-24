@@ -50,6 +50,7 @@ enum class MainDestination {
     NOTIFICATIONS,
     ADMIN_PANEL,
     PRAYER_SCHEDULE,
+    AJKER_SMORON,
     APP_SETTINGS,
     ABOUT_APP,
     ABOUT_DEVELOPER,
@@ -109,6 +110,13 @@ class QawmiViewModel(
     private val _inspectedUserTarget = MutableStateFlow<Pair<String, String>?>(null)
     val inspectedUserTarget: StateFlow<Pair<String, String>?> = _inspectedUserTarget.asStateFlow()
 
+    // Focused "আজকের স্মরণ" reminder ID when opened via push notification deep-link
+    private val _focusedSmoronId = MutableStateFlow<String?>(null)
+    val focusedSmoronId: StateFlow<String?> = _focusedSmoronId.asStateFlow()
+
+    val smoronServerReceiptsState: StateFlow<Map<String, Long>> = repository.observeSmoronServerReceipts(currentUserId)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
     // Server-side Admin Registry & Token Claim state
     private val _serverTokenVerifiedAdmin = MutableStateFlow(
         AdminSecurityHelper.isAuthorizedAdminEmail(currentUserEmail)
@@ -159,11 +167,16 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val feedPostsState: StateFlow<UiState<List<FeedPost>>> = repository.observePublicFeedPosts()
-        .map<List<FeedPost>, UiState<List<FeedPost>>> { UiState.Success(it) }
-        .catch { e ->
-            Log.w(TAG, "Error observing feed posts", e)
-            emit(UiState.Error(e.localizedMessage ?: "ফিড লোড করা যায়নি"))
+    private val _adminDataRefreshToken = MutableStateFlow(0)
+
+    val feedPostsState: StateFlow<UiState<List<FeedPost>>> = _adminDataRefreshToken
+        .flatMapLatest {
+            repository.observePublicFeedPosts()
+                .map<List<FeedPost>, UiState<List<FeedPost>>> { UiState.Success(it) }
+                .catch { e ->
+                    Log.w(TAG, "Error observing feed posts", e)
+                    emit(UiState.Error(e.localizedMessage ?: "ফিড লোড করা যায়নি"))
+                }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
@@ -175,11 +188,14 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val madrasasState: StateFlow<UiState<List<MadrasaProfile>>> = repository.observePublicMadrasas()
-        .map<List<MadrasaProfile>, UiState<List<MadrasaProfile>>> { UiState.Success(it) }
-        .catch { e ->
-            Log.w(TAG, "Error observing madrasas", e)
-            emit(UiState.Error(e.localizedMessage ?: "মাদরাসার তালিকা লোড করা যায়নি"))
+    val madrasasState: StateFlow<UiState<List<MadrasaProfile>>> = _adminDataRefreshToken
+        .flatMapLatest {
+            repository.observePublicMadrasas()
+                .map<List<MadrasaProfile>, UiState<List<MadrasaProfile>>> { UiState.Success(it) }
+                .catch { e ->
+                    Log.w(TAG, "Error observing madrasas", e)
+                    emit(UiState.Error(e.localizedMessage ?: "মাদরাসার তালিকা লোড করা যায়নি"))
+                }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
@@ -294,8 +310,11 @@ class QawmiViewModel(
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     // Real-time Telegram notifications queue (strictly observed ONLY when verified Admin is logged in)
-    val telegramNotificationsState: StateFlow<UiState<List<TelegramNotificationLog>>> = isAdminState
-        .flatMapLatest { isAdmin ->
+    val telegramNotificationsState: StateFlow<UiState<List<TelegramNotificationLog>>> = combine(
+        isAdminState,
+        _adminDataRefreshToken
+    ) { isAdmin, token -> isAdmin to token }
+        .flatMapLatest { (isAdmin, _) ->
             if (!isAdmin) {
                 flowOf(UiState.Success(emptyList()))
             } else {
@@ -309,8 +328,11 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val adminUsersState: StateFlow<UiState<List<UserProfile>>> = isAdminState
-        .flatMapLatest { isAdmin ->
+    val adminUsersState: StateFlow<UiState<List<UserProfile>>> = combine(
+        isAdminState,
+        _adminDataRefreshToken
+    ) { isAdmin, token -> isAdmin to token }
+        .flatMapLatest { (isAdmin, _) ->
             if (!isAdmin) {
                 flowOf(UiState.Success(emptyList()))
             } else {
@@ -324,8 +346,11 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val adminSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = isAdminState
-        .flatMapLatest { isAdmin ->
+    val adminSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
+        isAdminState,
+        _adminDataRefreshToken
+    ) { isAdmin, token -> isAdmin to token }
+        .flatMapLatest { (isAdmin, _) ->
             if (!isAdmin) {
                 flowOf(UiState.Success(emptyList()))
             } else {
@@ -334,6 +359,24 @@ class QawmiViewModel(
                     .catch { e ->
                         Log.w(TAG, "Error observing admin submissions", e)
                         emit(UiState.Error(e.localizedMessage ?: "আবেদনের তালিকা লোড করা যায়নি"))
+                    }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    val adminRegistryListState: StateFlow<UiState<List<AdminRegistryEntry>>> = combine(
+        isAdminState,
+        _adminDataRefreshToken
+    ) { isAdmin, token -> isAdmin to token }
+        .flatMapLatest { (isAdmin, _) ->
+            if (!isAdmin) {
+                flowOf(UiState.Success(emptyList()))
+            } else {
+                repository.observeAllAdminsForAdmin()
+                    .map<List<AdminRegistryEntry>, UiState<List<AdminRegistryEntry>>> { UiState.Success(it) }
+                    .catch { e ->
+                        Log.w(TAG, "Error observing admin registry list", e)
+                        emit(UiState.Error(e.localizedMessage ?: "অ্যাডমিন তালিকা লোড করা যায়নি"))
                     }
             }
         }
@@ -1021,8 +1064,42 @@ class QawmiViewModel(
                 }
             }
             "ANNOUNCEMENT" -> {
-                // Remains on Notifications after marking read
+                if (notification.referenceId.startsWith("ajker_smoron", ignoreCase = true) ||
+                    notification.title.contains("আজকের স্মরণ")
+                ) {
+                    val remId = notification.referenceId.removePrefix("ajker_smoron:")
+                    openAjkerSmoronFromNotification(remId)
+                }
             }
+        }
+    }
+
+    fun openAjkerSmoronFromNotification(reminderId: String = "") {
+        if (reminderId.isNotBlank()) {
+            _focusedSmoronId.value = reminderId.trim()
+        }
+        navigateTo(MainDestination.AJKER_SMORON)
+    }
+
+    fun clearFocusedSmoronId() {
+        _focusedSmoronId.value = null
+    }
+
+    fun syncSmoronAssignmentToServer(dateKey: String, reminderId: String) {
+        viewModelScope.launch {
+            repository.recordSmoronAssignmentInServer(dateKey, reminderId)
+        }
+    }
+
+    fun syncSmoronPushSentToServer(dateKey: String, reminderId: String) {
+        viewModelScope.launch {
+            repository.recordSmoronPushSentInServer(dateKey, reminderId)
+        }
+    }
+
+    fun syncSmoronAmolCompletedToServer(dateKey: String) {
+        viewModelScope.launch {
+            repository.recordSmoronAmolCompletedInServer(dateKey)
         }
     }
 
@@ -1274,6 +1351,44 @@ class QawmiViewModel(
                 onComplete()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "বিজ্ঞপ্তি প্রকাশ করা যায়নি।"
+            }
+        }
+    }
+
+    fun retryAdminServerStreams() {
+        clearBanners()
+        _adminDataRefreshToken.value += 1
+        verifyAndSyncAdminIdentity()
+    }
+
+    fun submitUserSupportMessage(
+        category: String,
+        subject: String,
+        message: String,
+        contactPhone: String,
+        onSuccessReset: () -> Unit = {}
+    ) {
+        if (message.isBlank()) {
+            _errorBanner.value = "অনুগ্রহ করে আপনার বার্তা, অভিযোগ, সমস্যা বা পরামর্শ বিস্তারিত লিখুন।"
+            return
+        }
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val senderName = resolveActorDisplayName("ব্যবহারকারী")
+            val result = repository.submitSupportOrComplaintMessage(
+                category = category,
+                subject = subject,
+                message = message,
+                contactPhone = contactPhone,
+                senderName = senderName
+            )
+            _isSubmitting.value = false
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার বার্তা সার্ভারে সংরক্ষিত হয়েছে, অ্যাডমিন প্যানেলে যুক্ত হয়েছে এবং টেলিগ্রাম বটে পাঠানো হয়েছে।"
+                onSuccessReset()
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "বার্তা পাঠানো যায়নি। অনুগ্রহ করে ইন্টারনেট সংযোগ যাচাই করে পুনরায় চেষ্টা করুন।"
             }
         }
     }

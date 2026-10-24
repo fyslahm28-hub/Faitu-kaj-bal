@@ -34,6 +34,8 @@ import kotlinx.coroutines.flow.callbackFlow
 
 data class MainNotificationDeepLink(
     val openNotifications: Boolean = false,
+    val openAjkerSmoron: Boolean = false,
+    val ajkerSmoronId: String = "",
     val chatPartnerId: String = "",
     val chatPartnerName: String = "",
     val triggerTimestamp: Long = System.currentTimeMillis()
@@ -71,9 +73,13 @@ class MainActivity : ComponentActivity() {
         val partnerId = intent.getStringExtra(QawmiNotificationHelper.EXTRA_OPEN_CHAT_PARTNER_ID).orEmpty().trim()
         val partnerName = intent.getStringExtra(QawmiNotificationHelper.EXTRA_OPEN_CHAT_PARTNER_NAME).orEmpty().trim()
         val openNotifs = intent.getBooleanExtra(QawmiNotificationHelper.EXTRA_OPEN_NOTIFICATIONS, false)
-        if (partnerId.isNotBlank() || openNotifs) {
+        val openSmoron = intent.getBooleanExtra(QawmiNotificationHelper.EXTRA_OPEN_AJKER_SMORON, false)
+        val smoronId = intent.getStringExtra(QawmiNotificationHelper.EXTRA_AJKER_SMORON_ID).orEmpty().trim()
+        if (partnerId.isNotBlank() || openNotifs || openSmoron) {
             _deepLinkState.value = MainNotificationDeepLink(
                 openNotifications = openNotifs,
+                openAjkerSmoron = openSmoron,
+                ajkerSmoronId = smoronId,
                 chatPartnerId = partnerId,
                 chatPartnerName = partnerName.ifBlank { "সম্মানিত দ্বীনি ভাই" },
                 triggerTimestamp = System.currentTimeMillis()
@@ -81,6 +87,8 @@ class MainActivity : ComponentActivity() {
             intent.removeExtra(QawmiNotificationHelper.EXTRA_OPEN_CHAT_PARTNER_ID)
             intent.removeExtra(QawmiNotificationHelper.EXTRA_OPEN_CHAT_PARTNER_NAME)
             intent.removeExtra(QawmiNotificationHelper.EXTRA_OPEN_NOTIFICATIONS)
+            intent.removeExtra(QawmiNotificationHelper.EXTRA_OPEN_AJKER_SMORON)
+            intent.removeExtra(QawmiNotificationHelper.EXTRA_AJKER_SMORON_ID)
         }
     }
 }
@@ -142,7 +150,10 @@ fun AppNavigation(
 
         LaunchedEffect(deepLink, currentUserId) {
             val target = deepLink ?: return@LaunchedEffect
-            if (target.chatPartnerId.isNotBlank()) {
+            if (target.openAjkerSmoron) {
+                qawmiViewModel.openAjkerSmoronFromNotification(target.ajkerSmoronId)
+                onDeepLinkConsumed()
+            } else if (target.chatPartnerId.isNotBlank()) {
                 qawmiViewModel.openDirectMessageTo(
                     userId = target.chatPartnerId,
                     userName = target.chatPartnerName

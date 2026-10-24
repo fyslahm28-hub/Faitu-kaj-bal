@@ -86,19 +86,27 @@ object TelegramNotificationHelper {
         targetPhone: String = AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
         timestampText: String = formatCurrentTimestampBangla()
     ): String {
-        val eventBadge = when (eventType) {
-            "ADMIN_LOGIN" -> "🔑 অ্যাডমিন লগইন"
-            "ADMIN_LOGOUT" -> "🚪 অ্যাডমিন লগআউট"
-            "ADMIN_SETTINGS_CHANGE" -> "⚙️ অ্যাডমিন নিয়ম-নীতি ও সেটিংস পরিবর্তন"
-            "FAILED_AUTH_ATTEMPT" -> "🚨 ব্যর্থ লগইন / অননুমোদিত বা সন্দেহজনক প্রচেষ্টা"
-            "ADMIN_SECURITY" -> "🔐 অ্যাডমিন নিরাপত্তা ও দায়িত্ব পরিবর্তন ইত্তেলা"
-            "ADMIN_VERIFICATION" -> "✅ অ্যাডমিন যাচাইকরণ, ব্লক ও Boost নিয়ন্ত্রণ"
-            "CONTENT_MODERATION" -> "🛡️ কনটেন্ট অপসারণ ও মডারেশন অ্যাকশন"
-            "ADMIN_ANNOUNCEMENT" -> "📣 অ্যাডমিন জরুরি ঘোষণা ও বিজ্ঞপ্তি প্রকাশ"
-            "NEW_CIRCULAR" -> "📢 নতুন নিয়োগ বিজ্ঞপ্তি"
-            "NEW_APPLICATION" -> "📝 নতুন খেদমত আবেদন"
-            "KHEDMOT_SUBMISSION" -> "📨 বিজ্ঞপ্তিতে আবেদন পর্যালোচনা ও সিদ্ধান্ত"
-            "NEW_MADRASA" -> "🕌 নতুন মাদরাসা নিবন্ধন"
+        val isSupportTicket = eventType == "USER_SUPPORT_TICKET" ||
+            title.startsWith("[অভিযোগ") ||
+            title.startsWith("[সমস্যা") ||
+            title.startsWith("[পরামর্শ") ||
+            title.startsWith("[সহায়তা") ||
+            title.contains("সহায়তা ও যোগাযোগ")
+
+        val eventBadge = when {
+            isSupportTicket -> "🆘 ব্যবহারকারীর সহায়তা, অভিযোগ ও পরামর্শ বার্তা"
+            eventType == "ADMIN_LOGIN" -> "🔑 অ্যাডমিন লগইন"
+            eventType == "ADMIN_LOGOUT" -> "🚪 অ্যাডমিন লগআউট"
+            eventType == "ADMIN_SETTINGS_CHANGE" -> "⚙️ অ্যাডমিন নিয়ম-নীতি ও সেটিংস পরিবর্তন"
+            eventType == "FAILED_AUTH_ATTEMPT" -> "🚨 ব্যর্থ লগইন / অননুমোদিত বা সন্দেহজনক প্রচেষ্টা"
+            eventType == "ADMIN_SECURITY" -> "🔐 অ্যাডমিন নিরাপত্তা ও দায়িত্ব পরিবর্তন ইত্তেলা"
+            eventType == "ADMIN_VERIFICATION" -> "✅ অ্যাডমিন যাচাইকরণ, ব্লক ও Boost নিয়ন্ত্রণ"
+            eventType == "CONTENT_MODERATION" -> "🛡️ কনটেন্ট অপসারণ ও মডারেশন অ্যাকশন"
+            eventType == "ADMIN_ANNOUNCEMENT" -> "📣 অ্যাডমিন জরুরি ঘোষণা ও বিজ্ঞপ্তি প্রকাশ"
+            eventType == "NEW_CIRCULAR" -> "📢 নতুন নিয়োগ বিজ্ঞপ্তি"
+            eventType == "NEW_APPLICATION" -> "📝 নতুন খেদমত আবেদন"
+            eventType == "KHEDMOT_SUBMISSION" -> "📨 বিজ্ঞপ্তিতে আবেদন পর্যালোচনা ও সিদ্ধান্ত"
+            eventType == "NEW_MADRASA" -> "🕌 নতুন মাদরাসা নিবন্ধন"
             else -> "🔔 কওমি কর্মসংস্থান অটো অ্যাক্টিভিটি অ্যালার্ট"
         }
 

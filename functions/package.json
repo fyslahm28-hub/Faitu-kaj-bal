@@ -1,0 +1,13 @@
+{
+  "name": "qawmi-kormosangsthan-functions",
+  "version": "1.0.0",
+  "description": "Firebase Cloud Functions & Cloud Scheduler for Daily Ajker Smoron Push Notifications",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.1.0",
+    "firebase-functions": "^5.0.0"
+  }
+}

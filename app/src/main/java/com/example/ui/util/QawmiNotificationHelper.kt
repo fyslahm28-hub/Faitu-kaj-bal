@@ -27,9 +27,16 @@ object QawmiNotificationHelper {
     private const val MESSAGE_CHANNEL_NAME = "পয়গাম ও ইনবক্স বার্তা"
     private const val MESSAGE_CHANNEL_DESC = "ব্যক্তিগত ও গ্রুপ চ্যাটের নতুন মেসেজের তাৎক্ষণিক মোবাইল নোটিফিকেশন"
 
+    const val SMORON_CHANNEL_ID = "qawmi_ajker_smoron_channel"
+    private const val SMORON_CHANNEL_NAME = "আজকের স্মরণ (দৈনিক ইসলামিক নসিহত)"
+    private const val SMORON_CHANNEL_DESC = "প্রতিদিনের দরুদ, জিকির, ইস্তিগফার, কুরআন-হাদিস ও নেক আমলের স্মরণবার্তা"
+    const val SMORON_NOTIFICATION_ID = 786_500
+
     const val EXTRA_OPEN_NOTIFICATIONS = "open_notifications"
     const val EXTRA_OPEN_CHAT_PARTNER_ID = "open_chat_partner_id"
     const val EXTRA_OPEN_CHAT_PARTNER_NAME = "open_chat_partner_name"
+    const val EXTRA_OPEN_AJKER_SMORON = "open_ajker_smoron"
+    const val EXTRA_AJKER_SMORON_ID = "ajker_smoron_id"
 
     private const val PREFS_PREFIX = "qawmi_push_delivered_"
     private const val MSG_PREFS_PREFIX = "qawmi_msg_push_delivered_"
@@ -55,8 +62,17 @@ object QawmiNotificationHelper {
                 description = MESSAGE_CHANNEL_DESC
                 enableVibration(true)
             }
+            val smoronChannel = NotificationChannel(
+                SMORON_CHANNEL_ID,
+                SMORON_CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = SMORON_CHANNEL_DESC
+                enableVibration(true)
+            }
             manager.createNotificationChannel(generalChannel)
             manager.createNotificationChannel(messageChannel)
+            manager.createNotificationChannel(smoronChannel)
         }
     }
 
@@ -365,9 +381,19 @@ object QawmiNotificationHelper {
     private fun showSystemNotification(context: Context, notification: AppNotification) {
         if (!hasNotificationPermission(context)) return
 
+        val isSmoronNotif = notification.referenceId.startsWith("ajker_smoron", ignoreCase = true) ||
+            notification.title.contains("আজকের স্মরণ")
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(EXTRA_OPEN_NOTIFICATIONS, true)
+            if (isSmoronNotif) {
+                putExtra(EXTRA_OPEN_AJKER_SMORON, true)
+                putExtra(
+                    EXTRA_AJKER_SMORON_ID,
+                    notification.referenceId.removePrefix("ajker_smoron:")
+                )
+            } else {
+                putExtra(EXTRA_OPEN_NOTIFICATIONS, true)
+            }
         }
         val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -381,7 +407,7 @@ object QawmiNotificationHelper {
             pendingIntentFlags
         )
 
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, if (isSmoronNotif) SMORON_CHANNEL_ID else CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(notification.title)
             .setContentText(notification.message)
@@ -394,6 +420,89 @@ object QawmiNotificationHelper {
             NotificationManagerCompat.from(context).notify(notification.id.hashCode(), builder.build())
         } catch (_: SecurityException) {
             // Permission may have been revoked at runtime
+        }
+    }
+
+    /**
+     * Posts the daily automated "আজকের স্মরণ" OS Push Notification (max 1 per day per user).
+     * Tapping the notification opens [MainActivity] directly to the "আজকের স্মরণ" screen.
+     */
+    fun deliverDailyAjkerSmoronPushNotification(
+        context: Context,
+        userId: String,
+        reminder: IslamicReminderItem,
+        dateKey: String = AjkerSmoronHelper.currentBangladeshDateKey()
+    ): Boolean {
+        if (!AjkerSmoronHelper.isNotificationEnabled(context)) return false
+        if (!hasNotificationPermission(context)) return false
+        val effectiveUser = userId.trim().ifBlank { "default_user" }
+        if (AjkerSmoronHelper.hasPushBeenSentForDate(context, effectiveUser, dateKey)) {
+            return false
+        }
+
+        ensureChannelCreated(context)
+
+        val intent = buildAjkerSmoronDeepLinkIntent(context, reminder.id)
+        val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            SMORON_NOTIFICATION_ID,
+            intent,
+            pendingIntentFlags
+        )
+
+        val title = "আজকের স্মরণ • ${reminder.categoryBangla}"
+        val expandedText = buildString {
+            append(reminder.messageBangla)
+            if (reminder.quoteBangla.isNotBlank()) {
+                append("\n\n")
+                append(reminder.quoteBangla)
+                if (reminder.sourceReferenceBangla.isNotBlank()) {
+                    append(" — (")
+                    append(reminder.sourceReferenceBangla)
+                    append(")")
+                }
+            }
+        }
+
+        val builder = NotificationCompat.Builder(context, SMORON_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(reminder.messageBangla)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+
+        return try {
+            NotificationManagerCompat.from(context).notify(SMORON_NOTIFICATION_ID, builder.build())
+            AjkerSmoronHelper.recordPushSentForDate(
+                context = context,
+                userId = effectiveUser,
+                dateKey = dateKey,
+                reminderId = reminder.id
+            )
+            true
+        } catch (_: SecurityException) {
+            false
+        }
+    }
+
+    fun buildAjkerSmoronDeepLinkIntent(
+        context: Context,
+        reminderId: String = ""
+    ): Intent {
+        return Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_AJKER_SMORON, true)
+            if (reminderId.isNotBlank()) {
+                putExtra(EXTRA_AJKER_SMORON_ID, reminderId.trim())
+            }
         }
     }
 

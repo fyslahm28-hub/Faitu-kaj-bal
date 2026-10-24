@@ -58,6 +58,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -80,6 +81,7 @@ import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextMuted
 import com.example.ui.theme.QawmiTextSecondary
 import com.example.ui.util.AdminSecurityHelper
+import com.example.ui.util.AjkerSmoronHelper
 
 @Composable
 fun UserAppSettingsScreen(
@@ -87,9 +89,13 @@ fun UserAppSettingsScreen(
     onToggleOnlineStatus: (Boolean) -> Unit = {},
     onShowFeedback: (String) -> Unit = {}
 ) {
+    val context = LocalContext.current
     var jobCircularNotifications by rememberSaveable { mutableStateOf(true) }
     var paygamSoundNotifications by rememberSaveable { mutableStateOf(true) }
     var prayerWaqtReminder by rememberSaveable { mutableStateOf(true) }
+    var ajkerSmoronNotification by rememberSaveable {
+        mutableStateOf(AjkerSmoronHelper.isNotificationEnabled(context))
+    }
     var onlineStatusSwitch by rememberSaveable { mutableStateOf(isOnlineVisible) }
     var showContactOnPosts by rememberSaveable { mutableStateOf(true) }
     var selectedFontScale by rememberSaveable { mutableStateOf("স্বাভাবিক") }
@@ -148,6 +154,17 @@ fun UserAppSettingsScreen(
                         subtitle = "দৈনিক ৫ ওয়াক্ত নামাজের সময়সূচী সতর্কতা",
                         checked = prayerWaqtReminder,
                         onCheckedChange = { prayerWaqtReminder = it }
+                    )
+                    HorizontalDivider(color = QawmiMintSurface, modifier = Modifier.padding(horizontal = 14.dp))
+                    SettingsToggleRow(
+                        icon = Icons.Default.NotificationsActive,
+                        title = "আজকের স্মরণ নোটিফিকেশন",
+                        subtitle = "প্রতিদিন নির্ধারিত সময়ে সর্বোচ্চ ১টি ইসলামিক স্মরণবার্তা (Push Notification)",
+                        checked = ajkerSmoronNotification,
+                        onCheckedChange = { enabled ->
+                            ajkerSmoronNotification = enabled
+                            AjkerSmoronHelper.setNotificationEnabled(context, enabled)
+                        }
                     )
                 }
             }
@@ -421,7 +438,7 @@ fun AboutAppScreen() {
                     FeatureBulletRow("খেদমতপ্রার্থী উস্তাদগণের যোগ্যতা ও অভিজ্ঞতাসহ আবেদন প্রকাশ")
                     FeatureBulletRow("আধুনিক ও নিরাপদ পয়গাম (ইনবক্স ও গ্রুপ মেসেজিং) এবং এইচডি ছবি আদান-প্রদান")
                     FeatureBulletRow("যাচাইকৃত কওমি মাদরাসা ডিরেক্টরি ও প্রোফাইল")
-                    FeatureBulletRow("বিভাগওয়ারী ৫ ওয়াক্ত নামাজের সময়সূচী, হিজরি তারিখ ও দৈনিক হাদিস")
+                    FeatureBulletRow("বিভাগওয়ারী ৫ ওয়াক্ত নামাজের সময়সূচী, হিজরি তারিখ ও আজকের স্মরণ")
                 }
             }
         }
@@ -459,9 +476,21 @@ fun AboutAppScreen() {
 
 @Composable
 fun AboutDeveloperScreen(
-    onShowFeedback: (String) -> Unit = {}
+    isSubmitting: Boolean = false,
+    onShowFeedback: (String) -> Unit = {},
+    onSubmitDeveloperFeedback: (
+        category: String,
+        subject: String,
+        message: String,
+        contactPhone: String,
+        onReset: () -> Unit
+    ) -> Unit = { _, _, msg, _, onReset ->
+        onReset()
+        onShowFeedback("জাযাকাল্লাহু খাইরান! আপনার মূল্যবান পরামর্শ ডেভেলপার টিমের কাছে পাঠানো হয়েছে: $msg")
+    }
 ) {
     var feedbackText by rememberSaveable { mutableStateOf("") }
+    var contactPhone by rememberSaveable { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier
@@ -577,23 +606,48 @@ fun AboutDeveloperScreen(
                         fontWeight = FontWeight.Bold
                     )
                     OutlinedTextField(
+                        value = contactPhone,
+                        onValueChange = { contactPhone = it },
+                        placeholder = { Text("যোগাযোগের মোবাইল নম্বর (ঐচ্ছিক)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("developer_feedback_phone_input")
+                    )
+                    OutlinedTextField(
                         value = feedbackText,
                         onValueChange = { feedbackText = it },
                         placeholder = { Text("অ্যাপের মানোন্নয়নে আপনার মূল্যবান পরামর্শ লিখুন...") },
                         minLines = 3,
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("developer_feedback_message_input")
                     )
                     Button(
                         onClick = {
                             if (feedbackText.isNotBlank()) {
-                                feedbackText = ""
-                                onShowFeedback("জাযাকাল্লাহু খাইরান! আপনার মূল্যবান পরামর্শ ডেভেলপার টিমের কাছে পাঠানো হয়েছে।")
+                                onSubmitDeveloperFeedback(
+                                    "পরামর্শ",
+                                    "ডেভেলপার টিমের প্রতি পরামর্শ",
+                                    feedbackText.trim(),
+                                    contactPhone.trim()
+                                ) {
+                                    feedbackText = ""
+                                    contactPhone = ""
+                                }
+                            } else {
+                                onShowFeedback("অনুগ্রহ করে আপনার পরামর্শ বা মতামত লিখুন।")
                             }
                         },
+                        enabled = !isSubmitting,
                         colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth().height(46.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                            .testTag("developer_feedback_submit_button")
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Send,
@@ -602,7 +656,11 @@ fun AboutDeveloperScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("পরামর্শ পাঠান", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (isSubmitting) "পাঠানো হচ্ছে..." else "পরামর্শ পাঠান",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -680,8 +738,30 @@ fun PrivacyAndTermsScreen() {
 }
 
 @Composable
-fun HelpAndSupportScreen() {
+fun HelpAndSupportScreen(
+    defaultSenderPhone: String = "",
+    isSubmitting: Boolean = false,
+    onShowFeedback: (String) -> Unit = {},
+    onSubmitSupportMessage: (
+        category: String,
+        subject: String,
+        message: String,
+        contactPhone: String,
+        onReset: () -> Unit
+    ) -> Unit = { category, subject, msg, _, onReset ->
+        onReset()
+        onShowFeedback("আলহামদুলিল্লাহ, আপনার $category ($subject) সার্ভারে সংরক্ষিত হয়েছে ও টেলিগ্রাম বটে পাঠানো হয়েছে: $msg")
+    }
+) {
     val context = LocalContext.current
+    val supportCategories = remember {
+        listOf("অভিযোগ", "সমস্যা", "পরামর্শ", "সহায়তা")
+    }
+    var selectedCategory by rememberSaveable { mutableStateOf("অভিযোগ") }
+    var subjectText by rememberSaveable { mutableStateOf("") }
+    var contactPhone by rememberSaveable(defaultSenderPhone) { mutableStateOf(defaultSenderPhone) }
+    var messageText by rememberSaveable { mutableStateOf("") }
+    var lastSubmittedConfirmation by rememberSaveable { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier
@@ -694,8 +774,171 @@ fun HelpAndSupportScreen() {
             DrawerSectionHeaderCard(
                 icon = Icons.AutoMirrored.Filled.HelpOutline,
                 title = "সহায়তা ও যোগাযোগ",
-                subtitle = "সচরাচর জিজ্ঞাসিত প্রশ্নোত্তর (FAQ) এবং সরাসরি সাপোর্ট হেল্পলাইন"
+                subtitle = "বক্তব্য, অভিযোগ, কারিগরি সমস্যা ও পরামর্শ প্রেরণ এবং সরাসরি সাপোর্ট হেল্পলাইন"
             )
+        }
+
+        // ১. সহায়তা, অভিযোগ, সমস্যা বা পরামর্শ পাঠানোর ফর্ম (Firebase + Admin Panel + Telegram Bot)
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(16.dp))
+                    .testTag("help_support_submission_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "বক্তব্য, অভিযোগ, সমস্যা বা পরামর্শ পাঠান",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "আপনার বার্তা সরাসরি সার্ভারে সংরক্ষিত হবে, অ্যাডমিন প্যানেলে প্রদর্শিত হবে এবং তাৎক্ষণিকভাবে অ্যাডমিন টেলিগ্রাম বটে পৌঁছে যাবে।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = QawmiTextSecondary,
+                        lineHeight = 18.sp
+                    )
+
+                    // Category selector chips
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        supportCategories.forEach { cat ->
+                            val isSelected = selectedCategory == cat
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { selectedCategory = cat }
+                                    .border(
+                                        width = 1.dp,
+                                        color = if (isSelected) QawmiDeepGreen else QawmiMintBorder,
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .testTag("help_support_category_$cat"),
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) QawmiDeepGreen else QawmiMintSurface
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = cat,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isSelected) Color.White else QawmiTextDark,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = subjectText,
+                        onValueChange = { subjectText = it },
+                        label = { Text("বিষয় / শিরোনাম") },
+                        placeholder = { Text("সংক্ষেপে বিষয় লিখুন (যেমন: বিজ্ঞপ্তি বা অ্যাকাউন্ট সংক্রান্ত)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("help_support_subject_input")
+                    )
+
+                    OutlinedTextField(
+                        value = contactPhone,
+                        onValueChange = { contactPhone = it },
+                        label = { Text("যোগাযোগের মোবাইল নম্বর") },
+                        placeholder = { Text("০১৭XXXXXXXX") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("help_support_phone_input")
+                    )
+
+                    OutlinedTextField(
+                        value = messageText,
+                        onValueChange = { messageText = it },
+                        label = { Text("আপনার বক্তব্য / অভিযোগ / পরামর্শ বিস্তারিত *") },
+                        placeholder = { Text("এখানে বিস্তারিত লিখুন...") },
+                        minLines = 4,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("help_support_message_input")
+                    )
+
+                    if (lastSubmittedConfirmation.isNotBlank()) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
+                                .testTag("help_support_confirmation_banner"),
+                            shape = RoundedCornerShape(10.dp),
+                            color = QawmiMintSurface
+                        ) {
+                            Text(
+                                text = lastSubmittedConfirmation,
+                                modifier = Modifier.padding(10.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            if (messageText.trim().isBlank()) {
+                                onShowFeedback("অনুগ্রহ করে আপনার বক্তব্য, অভিযোগ, সমস্যা বা পরামর্শ বিস্তারিত লিখুন।")
+                            } else {
+                                val resolvedSubject = subjectText.trim().ifBlank { "$selectedCategory সংক্রান্ত বার্তা" }
+                                onSubmitSupportMessage(
+                                    selectedCategory,
+                                    resolvedSubject,
+                                    messageText.trim(),
+                                    contactPhone.trim()
+                                ) {
+                                    lastSubmittedConfirmation = "আলহামদুলিল্লাহ! আপনার '$selectedCategory' বার্তাটি সার্ভারে সংরক্ষিত হয়েছে, অ্যাডমিন প্যানেলে যুক্ত হয়েছে এবং টেলিগ্রাম বটে পাঠানো হয়েছে।"
+                                    subjectText = ""
+                                    messageText = ""
+                                }
+                            }
+                        },
+                        enabled = !isSubmitting,
+                        colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                            .testTag("help_support_submit_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isSubmitting) "পাঠানো হচ্ছে..." else "বার্তা পাঠান",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
         }
 
         item {

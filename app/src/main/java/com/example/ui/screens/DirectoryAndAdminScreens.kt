@@ -75,9 +75,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -3994,7 +3996,9 @@ fun AdminPanelScreen(
     madrasasState: UiState<List<MadrasaProfile>>,
     feedPostsState: UiState<List<FeedPost>>,
     telegramNotificationsState: UiState<List<TelegramNotificationLog>> = UiState.Success(emptyList()),
+    adminsState: UiState<List<com.example.data.model.AdminRegistryEntry>> = UiState.Success(emptyList()),
     isSubmitting: Boolean = false,
+    onRetryServerLoad: () -> Unit = {},
     onVerifyUser: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onUpdateSubmissionStatus: (KhedmotSubmission, String) -> Unit = { _, _ -> },
     onVerifyMadrasa: (MadrasaProfile, Boolean) -> Unit,
@@ -4018,7 +4022,9 @@ fun AdminPanelScreen(
         madrasasState = madrasasState,
         feedPostsState = feedPostsState,
         telegramNotificationsState = telegramNotificationsState,
+        adminsState = adminsState,
         isSubmitting = isSubmitting,
+        onRetryServerLoad = onRetryServerLoad,
         onVerifyUser = onVerifyUser,
         onUpdateSubmissionStatus = onUpdateSubmissionStatus,
         onVerifyMadrasa = onVerifyMadrasa,
@@ -4035,6 +4041,27 @@ fun AdminPanelScreen(
 
 @Composable
 fun FullPrayerScheduleScreen() {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        IslamicDateAndPrayerHelper.initWithContext(context)
+    }
+
+    val selectedDistrict by IslamicDateAndPrayerHelper.selectedDistrictFlow.collectAsState()
+    val pinnedDistrict by IslamicDateAndPrayerHelper.pinnedDistrictFlow.collectAsState()
+    val favoriteDistricts by IslamicDateAndPrayerHelper.favoriteDistrictsFlow.collectAsState()
+    var showDistrictPicker by rememberSaveable { mutableStateOf(false) }
+
+    val selectedSchedule = remember(selectedDistrict) {
+        IslamicDateAndPrayerHelper.getScheduleForDistrict(selectedDistrict)
+    }
+    val divisionsAndFavorites = remember(selectedDistrict, pinnedDistrict, favoriteDistricts) {
+        val orderedNames = (listOf(selectedDistrict, pinnedDistrict) +
+            favoriteDistricts +
+            listOf("ঢাকা", "চট্টগ্রাম", "সিলেট", "রাজশাহী", "খুলনা", "বরিশাল", "রংপুর", "ময়মনসিংহ"))
+            .distinct()
+        orderedNames.map { IslamicDateAndPrayerHelper.getScheduleForDistrict(it) }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -4043,31 +4070,212 @@ fun FullPrayerScheduleScreen() {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Text(
-                text = "বাংলাদেশের বিভাগওয়ারী নামাজের চিরস্থায়ী সময়সূচী",
-                style = MaterialTheme.typography.titleMedium,
-                color = QawmiTextDark,
-                fontWeight = FontWeight.Bold
-            )
-        }
-        items(IslamicDateAndPrayerHelper.divisionsSchedule) { divSchedule ->
-            Card(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = QawmiDarkGreen)
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.AccessTime, contentDescription = null, tint = QawmiGold, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "বাংলাদেশের জেলা ও বিভাগওয়ারী নামাজের সময়সূচী",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = QawmiTextDark,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "হানাফি মাজহাব অনুযায়ী প্রতিটি ওয়াক্তের শুরু ও শেষ সময় • পিন করা জেলা: $pinnedDistrict",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = QawmiTextSecondary
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { showDistrictPicker = true }
+                        .testTag("full_schedule_change_district_button"),
+                    shape = RoundedCornerShape(10.dp),
+                    color = QawmiDeepGreen
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = QawmiGold,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "বিভাগ: ${divSchedule.divisionBangla}",
-                            style = MaterialTheme.typography.titleSmall,
+                            text = "জেলা নির্বাচন (৬৪)",
+                            style = MaterialTheme.typography.labelSmall,
                             color = Color.White,
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+            }
+        }
+
+        // Quick-switch chips for Pinned & Favorite Districts
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                favoriteDistricts.forEach { dist ->
+                    val isSelected = dist == selectedDistrict
+                    val isPinned = dist == pinnedDistrict
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable { IslamicDateAndPrayerHelper.selectDistrict(context, dist) }
+                            .border(
+                                width = 1.dp,
+                                color = if (isSelected) QawmiDeepGreen else QawmiMintBorder,
+                                shape = RoundedCornerShape(50)
+                            )
+                            .testTag("schedule_fav_chip_$dist"),
+                        shape = RoundedCornerShape(50),
+                        color = if (isSelected) QawmiDeepGreen else QawmiMintSurface
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isPinned) "📌 $dist" else dist,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isSelected) Color.White else QawmiTextDark,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        items(divisionsAndFavorites, key = { it.divisionBangla }) { divSchedule ->
+            val isPinned = divSchedule.divisionBangla == pinnedDistrict
+            val isSelected = divSchedule.divisionBangla == selectedDistrict
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = if (isSelected) 1.5.dp else 0.dp,
+                        color = if (isSelected) QawmiGold else Color.Transparent,
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                    .clickable {
+                        IslamicDateAndPrayerHelper.selectDistrict(context, divSchedule.divisionBangla)
+                    },
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = QawmiDarkGreen)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.AccessTime,
+                                contentDescription = null,
+                                tint = QawmiGold,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "জেলা/বিভাগ: ${divSchedule.divisionBangla}",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable {
+                                    IslamicDateAndPrayerHelper.pinDistrict(context, divSchedule.divisionBangla)
+                                }
+                                .testTag("schedule_pin_btn_${divSchedule.divisionBangla}"),
+                            shape = RoundedCornerShape(50),
+                            color = if (isPinned) QawmiGold else Color(0xFF165B48)
+                        ) {
+                            Text(
+                                text = if (isPinned) "📌 পিন করা জেলা" else "📌 পিন করুন",
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isPinned) QawmiTextDark else Color(0xFFDDF3EC),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.5.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Current Waqt, Next Prayer, Sunrise & Sunset row
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Color(0xFF1D6E57), RoundedCornerShape(10.dp)),
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF0A4B39)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "${divSchedule.currentWaqtNameBangla} (${divSchedule.currentWaqtRangeBangla})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiGold,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                                Text(
+                                    text = "সূর্যোদয়: ${divSchedule.sunriseBangla}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFDDF3EC),
+                                    fontSize = 10.5.sp
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "${divSchedule.nextWaqtNameBangla} • শুরু: ${divSchedule.nextWaqtStartBangla}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    fontSize = 11.sp
+                                )
+                                Text(
+                                    text = "সূর্যাস্ত: ${divSchedule.sunsetBangla}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFB5DCD0),
+                                    fontSize = 10.5.sp
+                                )
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(10.dp))
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -4076,17 +4284,44 @@ fun FullPrayerScheduleScreen() {
                             Surface(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .border(1.dp, Color(0xFF1D6E57), RoundedCornerShape(10.dp)),
+                                    .border(
+                                        width = if (waqt.isCurrentWaqt) 1.5.dp else 1.dp,
+                                        color = if (waqt.isCurrentWaqt) QawmiGold else Color(0xFF1D6E57),
+                                        shape = RoundedCornerShape(10.dp)
+                                    ),
                                 shape = RoundedCornerShape(10.dp),
-                                color = Color(0xFF0A4B39)
+                                color = if (waqt.isCurrentWaqt) Color(0xFF125A45) else Color(0xFF0A4B39)
                             ) {
                                 Column(
                                     modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp),
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    Text(waqt.nameBangla, style = MaterialTheme.typography.labelSmall, color = Color(0xFFDDF3EC))
-                                    Text(waqt.timeBangla, style = MaterialTheme.typography.titleSmall, color = Color.White, fontWeight = FontWeight.Bold)
-                                    Text(waqt.period, style = MaterialTheme.typography.labelSmall, color = Color(0xFFB5DCD0), fontSize = 10.sp)
+                                    Text(
+                                        text = waqt.nameBangla,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (waqt.isCurrentWaqt) QawmiGold else Color(0xFFDDF3EC),
+                                        fontWeight = if (waqt.isCurrentWaqt) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "শুরু ${waqt.timeBangla}",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp
+                                    )
+                                    Text(
+                                        text = "শেষ ${waqt.endTimeBangla}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFDDF3EC),
+                                        fontSize = 10.sp
+                                    )
+                                    Text(
+                                        text = waqt.period,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFB5DCD0),
+                                        fontSize = 9.5.sp
+                                    )
                                 }
                             }
                         }
@@ -4094,5 +4329,23 @@ fun FullPrayerScheduleScreen() {
                 }
             }
         }
+    }
+
+    if (showDistrictPicker) {
+        PrayerDistrictSelectionDialog(
+            selectedDistrict = selectedDistrict,
+            pinnedDistrict = pinnedDistrict,
+            favoriteDistricts = favoriteDistricts,
+            onSelectDistrict = { dist ->
+                IslamicDateAndPrayerHelper.selectDistrict(context, dist)
+            },
+            onPinDistrict = { dist ->
+                IslamicDateAndPrayerHelper.pinDistrict(context, dist)
+            },
+            onToggleFavoriteDistrict = { dist ->
+                IslamicDateAndPrayerHelper.toggleFavoriteDistrict(context, dist)
+            },
+            onDismiss = { showDistrictPicker = false }
+        )
     }
 }

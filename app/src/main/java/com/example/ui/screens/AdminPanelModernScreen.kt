@@ -97,6 +97,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SupportAgent
+import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
@@ -160,6 +164,7 @@ fun ModernAdminPanelRoot(
     madrasasState: UiState<List<MadrasaProfile>>,
     feedPostsState: UiState<List<FeedPost>>,
     telegramNotificationsState: UiState<List<TelegramNotificationLog>>,
+    adminsState: UiState<List<AdminRegistryEntry>> = UiState.Success(emptyList()),
     isSubmitting: Boolean,
     onVerifyUser: (UserProfile, Boolean) -> Unit,
     onUpdateSubmissionStatus: (KhedmotSubmission, String) -> Unit,
@@ -170,6 +175,7 @@ fun ModernAdminPanelRoot(
     onSendAnnouncement: (title: String, message: String) -> Unit,
     onRecordLiveAdminAction: (eventType: String, title: String, message: String, referenceId: String) -> Unit,
     onSendTestTelegramAlert: (customMessage: String) -> Unit,
+    onRetryServerLoad: () -> Unit = {},
     onDeletePost: (String) -> Unit
 ) {
     if (!isAdminUser) {
@@ -251,15 +257,65 @@ fun ModernAdminPanelRoot(
     val realPosts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
     val realMadrasas = (madrasasState as? UiState.Success)?.data ?: emptyList()
     val realTelegramLogs = (telegramNotificationsState as? UiState.Success)?.data ?: emptyList()
+    val realAdminEntries = (adminsState as? UiState.Success)?.data ?: emptyList()
 
-    // Local state for Admin Management (Screen 5) — never exposes raw Gmail addresses
-    val adminMembers = remember {
-        mutableStateListOf(
-            AdminDisplayMember("adm_1", "মাওলানা আব্দুল করিম", "সুপার অ্যাডমিন", true),
-            AdminDisplayMember("adm_2", "মুফতি মাহমুদ হাসান", "অ্যাডমিন", true),
-            AdminDisplayMember("adm_3", "হাফেজ সাইফুল ইসলাম", "অ্যাডমিন", true),
-            AdminDisplayMember("adm_4", "মাওলানা রফিকুল ইসলাম", "অ্যাডমিন", true)
-        )
+    val serverErrorMessage = remember(
+        usersState,
+        submissionsState,
+        madrasasState,
+        feedPostsState,
+        telegramNotificationsState,
+        adminsState
+    ) {
+        listOfNotNull(
+            (usersState as? UiState.Error)?.message,
+            (submissionsState as? UiState.Error)?.message,
+            (madrasasState as? UiState.Error)?.message,
+            (feedPostsState as? UiState.Error)?.message,
+            (telegramNotificationsState as? UiState.Error)?.message,
+            (adminsState as? UiState.Error)?.message
+        ).firstOrNull()
+    }
+
+    // Real server-backed Admin list (never exposes raw Gmail addresses)
+    val localAddedAdmins = remember { mutableStateListOf<AdminDisplayMember>() }
+    val localAdminStatusOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    val adminMembers = remember(realAdminEntries, realUsers, localAddedAdmins.size, localAdminStatusOverrides.value) {
+        val fromRegistry = realAdminEntries.mapIndexed { idx, entry ->
+            val id = entry.adminId.ifBlank { entry.id.ifBlank { "reg_$idx" } }
+            val matchedUser = realUsers.find { it.id == entry.adminId || it.userId == entry.adminId }
+            val safeName = matchedUser?.fullName?.takeIf { it.isNotBlank() && !it.contains("@") }
+                ?: "অনুমোদিত অ্যাডমিন #${IslamicDateAndPrayerHelper.toBanglaDigits((idx + 1).toString())}"
+            val roleLabel = if (entry.role.contains("SUPER", ignoreCase = true) || entry.role.contains("নাজিমে", ignoreCase = true)) {
+                "সুপার অ্যাডমিন"
+            } else {
+                "অ্যাডমিন"
+            }
+            val active = localAdminStatusOverrides.value[id] ?: entry.verifiedByAuthToken
+            AdminDisplayMember(
+                id = id,
+                name = safeName,
+                role = roleLabel,
+                isActive = active
+            )
+        }
+        val fromUsers = realUsers
+            .filter { it.accountType.equals("admin", ignoreCase = true) }
+            .map { u ->
+                val id = u.id.ifBlank { u.userId }
+                val active = localAdminStatusOverrides.value[id] ?: u.isVerified
+                AdminDisplayMember(
+                    id = id,
+                    name = u.fullName.takeIf { it.isNotBlank() && !it.contains("@") } ?: "অ্যাডমিন",
+                    role = "অ্যাডমিন",
+                    isActive = active
+                )
+            }
+        val addedMapped = localAddedAdmins.map { item ->
+            val active = localAdminStatusOverrides.value[item.id] ?: item.isActive
+            item.copy(isActive = active)
+        }
+        (addedMapped + fromRegistry + fromUsers).distinctBy { it.id }
     }
 
     // App Settings toggles (Screen 9)
@@ -280,6 +336,13 @@ fun ModernAdminPanelRoot(
             .background(AdminSurfaceLight)
             .testTag("admin_panel_screen")
     ) {
+        if (serverErrorMessage != null) {
+            AdminServerErrorBanner(
+                errorMessage = serverErrorMessage,
+                onRetry = onRetryServerLoad
+            )
+        }
+
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -336,7 +399,7 @@ fun ModernAdminPanelRoot(
                         adminMembers = adminMembers,
                         onBack = { handleBack() },
                         onAddAdminMember = { name, role ->
-                            adminMembers.add(
+                            localAddedAdmins.add(
                                 0,
                                 AdminDisplayMember(
                                     id = "adm_${System.currentTimeMillis()}",
@@ -353,17 +416,15 @@ fun ModernAdminPanelRoot(
                             )
                         },
                         onToggleAdminMemberActive = { member ->
-                            val idx = adminMembers.indexOfFirst { it.id == member.id }
-                            if (idx >= 0) {
-                                val nextState = !member.isActive
-                                adminMembers[idx] = member.copy(isActive = nextState)
-                                onRecordLiveAdminAction(
-                                    "ADMIN_SECURITY",
-                                    "অ্যাডমিন স্ট্যাটাস পরিবর্তন",
-                                    "${member.name} (${member.role}) - ${if (nextState) "সক্রিয়" else "নিষ্ক্রিয়"} করা হয়েছে।",
-                                    member.id
-                                )
-                            }
+                            val nextState = !member.isActive
+                            localAdminStatusOverrides.value =
+                                localAdminStatusOverrides.value + (member.id to nextState)
+                            onRecordLiveAdminAction(
+                                "ADMIN_SECURITY",
+                                "অ্যাডমিন স্ট্যাটাস পরিবর্তন",
+                                "${member.name} (${member.role}) - ${if (nextState) "সক্রিয়" else "নিষ্ক্রিয়"} করা হয়েছে।",
+                                member.id
+                            )
                         }
                     )
                 }
@@ -688,24 +749,20 @@ private fun AdminDashboardView(
     onNavigateSubScreen: (AdminSubScreen) -> Unit,
     onNavigateTab: (AdminSubScreen) -> Unit
 ) {
-    val totalUsersText = if (users.size > 1) {
-        IslamicDateAndPrayerHelper.toBanglaDigits(users.size.toString())
-    } else {
-        "১,২৫০"
+    val totalUsersText = IslamicDateAndPrayerHelper.toBanglaDigits(users.size.toString())
+    val totalSubmissionsText = IslamicDateAndPrayerHelper.toBanglaDigits(submissions.size.toString())
+    val totalNoticesText = IslamicDateAndPrayerHelper.toBanglaDigits(posts.size.toString())
+    val totalActivityAndSupportText = IslamicDateAndPrayerHelper.toBanglaDigits(telegramLogs.size.toString())
+
+    val supportLogs = remember(telegramLogs) {
+        telegramLogs.filter {
+            it.referenceId.startsWith("SUPPORT_TICKET") ||
+                it.title.startsWith("[অভিযোগ") ||
+                it.title.startsWith("[সমস্যা") ||
+                it.title.startsWith("[পরামর্শ") ||
+                it.title.startsWith("[সহায়তা")
+        }
     }
-    val totalSubmissionsText = if (submissions.isNotEmpty()) {
-        IslamicDateAndPrayerHelper.toBanglaDigits(submissions.size.toString())
-    } else {
-        "৩২০"
-    }
-    val totalNoticesText = if (posts.isNotEmpty()) {
-        IslamicDateAndPrayerHelper.toBanglaDigits(posts.size.toString())
-    } else {
-        "৪৮"
-    }
-    val todayVisitsText = IslamicDateAndPrayerHelper.toBanglaDigits(
-        (215 + users.size + posts.size + telegramLogs.size).toString()
-    )
 
     Column(modifier = Modifier.fillMaxSize()) {
         AdminTopHeaderBar(
@@ -727,7 +784,9 @@ private fun AdminDashboardView(
         )
 
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("admin_dashboard_lazy_column"),
             contentPadding = PaddingValues(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -813,7 +872,7 @@ private fun AdminDashboardView(
                 }
             }
 
-            // 2x2 Stat Grid Cards
+            // 2x2 Stat Grid Cards (100% Real Server Counts)
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
@@ -852,8 +911,8 @@ private fun AdminDashboardView(
                         DashboardStatCard(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Default.Analytics,
-                            valueText = todayVisitsText,
-                            labelText = "আজকের ভিজিট",
+                            valueText = totalActivityAndSupportText,
+                            labelText = "লগ ও অভিযোগ",
                             testTag = "admin_stat_visits",
                             onClick = { onNavigateSubScreen(AdminSubScreen.ACTIVITY_LOG) }
                         )
@@ -861,7 +920,7 @@ private fun AdminDashboardView(
                 }
             }
 
-            // সাম্প্রতিক কার্যক্রম (Recent Activity Section)
+            // সাম্প্রতিক কার্যক্রম (Recent Activity Section — 100% Real Server Data)
             item {
                 Card(
                     modifier = Modifier
@@ -911,49 +970,71 @@ private fun AdminDashboardView(
                             }
                         }
 
+                        val latestSupport = supportLogs.firstOrNull()
                         val latestSub = submissions.firstOrNull()
                         val latestUser = users.firstOrNull()
                         val latestPost = posts.firstOrNull()
 
-                        DashboardRecentActivityRow(
-                            icon = Icons.Default.Description,
-                            title = "নতুন আবেদন",
-                            subtitle = if (latestSub != null) {
-                                "${latestSub.applicantName} - ${latestSub.postDesignation}"
-                            } else {
-                                "মাওলানা আব্দুল করিম - দাওরায়ে হাদিস"
-                            },
-                            timeText = latestSub?.createdAt?.let {
-                                IslamicDateAndPrayerHelper.formatRelativeTimeBangla(it)
-                            } ?: "১০ মিনিট আগে",
-                            onClick = { onNavigateTab(AdminSubScreen.APPLICATIONS) }
-                        )
+                        if (latestSupport == null && latestSub == null && latestUser == null && latestPost == null) {
+                            Text(
+                                text = "কোনো তথ্য নেই",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = QawmiTextMuted,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp)
+                                    .testTag("admin_dashboard_empty_activity")
+                            )
+                        } else {
+                            if (latestSupport != null) {
+                                DashboardRecentActivityRow(
+                                    icon = Icons.Default.SupportAgent,
+                                    title = latestSupport.title.ifBlank { "সহায়তা ও অভিযোগ বার্তা" },
+                                    subtitle = latestSupport.message,
+                                    timeText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(latestSupport.createdAt),
+                                    onClick = { onNavigateSubScreen(AdminSubScreen.ACTIVITY_LOG) }
+                                )
+                                if (latestSub != null || latestUser != null || latestPost != null) {
+                                    HorizontalDivider(color = AdminSurfaceLight)
+                                }
+                            }
 
-                        HorizontalDivider(color = AdminSurfaceLight)
+                            if (latestSub != null) {
+                                DashboardRecentActivityRow(
+                                    icon = Icons.Default.Description,
+                                    title = "নতুন আবেদন",
+                                    subtitle = "${latestSub.applicantName} - ${latestSub.postDesignation}",
+                                    timeText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(latestSub.createdAt),
+                                    onClick = { onNavigateTab(AdminSubScreen.APPLICATIONS) }
+                                )
+                                if (latestUser != null || latestPost != null) {
+                                    HorizontalDivider(color = AdminSurfaceLight)
+                                }
+                            }
 
-                        DashboardRecentActivityRow(
-                            icon = Icons.Default.People,
-                            title = "নতুন ব্যবহারকারী",
-                            subtitle = latestUser?.fullName?.takeIf { it.isNotBlank() }
-                                ?: "মুফতি মাহমুদ হাসান",
-                            timeText = latestUser?.createdAt?.let {
-                                IslamicDateAndPrayerHelper.formatRelativeTimeBangla(it)
-                            } ?: "৩০ মিনিট আগে",
-                            onClick = { onNavigateTab(AdminSubScreen.USERS) }
-                        )
+                            if (latestUser != null) {
+                                DashboardRecentActivityRow(
+                                    icon = Icons.Default.People,
+                                    title = "নতুন ব্যবহারকারী",
+                                    subtitle = latestUser.fullName.ifBlank { "সম্মানিত ব্যবহারকারী" },
+                                    timeText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(latestUser.createdAt),
+                                    onClick = { onNavigateTab(AdminSubScreen.USERS) }
+                                )
+                                if (latestPost != null) {
+                                    HorizontalDivider(color = AdminSurfaceLight)
+                                }
+                            }
 
-                        HorizontalDivider(color = AdminSurfaceLight)
-
-                        DashboardRecentActivityRow(
-                            icon = Icons.Default.Campaign,
-                            title = "নতুন বিজ্ঞপ্তি",
-                            subtitle = latestPost?.title?.takeIf { it.isNotBlank() }
-                                ?: "প্রধান শিক্ষকের পদ শূন্য",
-                            timeText = latestPost?.createdAt?.let {
-                                IslamicDateAndPrayerHelper.formatRelativeTimeBangla(it)
-                            } ?: "১ ঘণ্টা আগে",
-                            onClick = { onNavigateTab(AdminSubScreen.NOTICES) }
-                        )
+                            if (latestPost != null) {
+                                DashboardRecentActivityRow(
+                                    icon = Icons.Default.Campaign,
+                                    title = "নতুন বিজ্ঞপ্তি",
+                                    subtitle = latestPost.title,
+                                    timeText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(latestPost.createdAt),
+                                    onClick = { onNavigateTab(AdminSubScreen.NOTICES) }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -987,12 +1068,117 @@ private fun AdminDashboardView(
                         onClick = { onNavigateSubScreen(AdminSubScreen.FORM_CUSTOMIZATION) }
                     )
                     QuickAdminChip(
+                        icon = Icons.Default.SupportAgent,
+                        label = "অভিযোগ ও সহায়তা",
+                        onClick = { onNavigateSubScreen(AdminSubScreen.ACTIVITY_LOG) }
+                    )
+                    QuickAdminChip(
                         icon = Icons.Default.AdminPanelSettings,
                         label = "অ্যাডমিন ব্যবস্থাপনা",
                         onClick = { onNavigateSubScreen(AdminSubScreen.ADMIN_MANAGEMENT) }
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AdminServerErrorBanner(
+    errorMessage: String,
+    onRetry: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .border(1.dp, Color(0xFFEF9A9A), RoundedCornerShape(12.dp))
+            .testTag("admin_server_error_banner"),
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFFFFEBEE)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ErrorOutline,
+                    contentDescription = null,
+                    tint = Color(0xFFC62828),
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = errorMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFC62828),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Surface(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onRetry)
+                    .testTag("admin_retry_server_button"),
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFFC62828)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "পুনরায় চেষ্টা করুন",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdminEmptyDataCard(
+    message: String = "কোনো তথ্য নেই"
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, AdminCardBorder, RoundedCornerShape(14.dp))
+            .testTag("admin_empty_state_card"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 28.dp, horizontal = 16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = QawmiTextMuted,
+                fontWeight = FontWeight.SemiBold
+            )
         }
     }
 }
@@ -1178,53 +1364,8 @@ private fun AdminUsersManagementView(
     var selectedFilter by rememberSaveable { mutableStateOf("সব") }
     val localStatusOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
 
-    val defaultSeedUsers = remember {
-        listOf(
-            DisplayUserItem(
-                id = "seed_u1",
-                name = "মাওলানা আব্দুল করিম",
-                contact = "017XXXXXXXX",
-                presenceText = "Online",
-                isOnline = true,
-                isActive = true,
-                isAdminRole = false,
-                photoUrl = ProfilePhotoHelper.PRESET_SCHOLAR_EMERALD
-            ),
-            DisplayUserItem(
-                id = "seed_u2",
-                name = "মুফতি মাহমুদ হাসান",
-                contact = "mahmud@gmail.com",
-                presenceText = "Last seen ২ ঘণ্টা আগে",
-                isOnline = false,
-                isActive = true,
-                isAdminRole = true,
-                photoUrl = ProfilePhotoHelper.PRESET_SCHOLAR_GOLD
-            ),
-            DisplayUserItem(
-                id = "seed_u3",
-                name = "হাফেজ সাইফুল ইসলাম",
-                contact = "018XXXXXXXX",
-                presenceText = "Offline",
-                isOnline = false,
-                isActive = false,
-                isAdminRole = false,
-                photoUrl = ProfilePhotoHelper.PRESET_MUHTAMIM_ROYAL
-            ),
-            DisplayUserItem(
-                id = "seed_u4",
-                name = "মাওলানা রফিকুল ইসলাম",
-                contact = "rafiq@gmail.com",
-                presenceText = "Last seen ১ দিন আগে",
-                isOnline = false,
-                isActive = true,
-                isAdminRole = false,
-                photoUrl = ProfilePhotoHelper.PRESET_MADRASA_DOME
-            )
-        )
-    }
-
     val combinedUsers = remember(users, localStatusOverrides.value) {
-        val mappedReal = users.map { prof ->
+        users.map { prof ->
             val uid = prof.id.ifBlank { prof.userId }
             val activeState = localStatusOverrides.value[uid] ?: prof.isVerified
             val presence = when {
@@ -1235,7 +1376,7 @@ private fun AdminUsersManagementView(
             DisplayUserItem(
                 id = uid,
                 name = prof.fullName.ifBlank { "সম্মানিত ব্যবহারকারী" },
-                contact = prof.contactInfo.ifBlank { prof.designation.ifBlank { "017XXXXXXXX" } },
+                contact = prof.contactInfo.ifBlank { prof.designation.ifBlank { "যোগাযোগের তথ্য নেই" } },
                 presenceText = presence,
                 isOnline = prof.isOnline,
                 isActive = activeState,
@@ -1244,11 +1385,6 @@ private fun AdminUsersManagementView(
                 backingProfile = prof
             )
         }
-        val combined = mappedReal + defaultSeedUsers.map { seed ->
-            val overrideActive = localStatusOverrides.value[seed.id]
-            if (overrideActive != null) seed.copy(isActive = overrideActive) else seed
-        }
-        combined.distinctBy { it.name }
     }
 
     val filteredUsers = remember(combinedUsers, searchQuery, selectedFilter) {
@@ -1317,15 +1453,22 @@ private fun AdminUsersManagementView(
                     .testTag("admin_users_search_input")
             )
 
-            // Filter Chips: সব (১২৫০) | সাধারণ (১২৪৫) | অ্যাডমিন (৫)
+            // Filter Chips: Real Server Counts
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val totalUsersBangla = IslamicDateAndPrayerHelper.toBanglaDigits(combinedUsers.size.toString())
+                val generalUsersBangla = IslamicDateAndPrayerHelper.toBanglaDigits(
+                    combinedUsers.count { !it.isAdminRole }.toString()
+                )
+                val adminUsersBangla = IslamicDateAndPrayerHelper.toBanglaDigits(
+                    combinedUsers.count { it.isAdminRole }.toString()
+                )
                 val filterTabs = listOf(
-                    "সব" to "সব (১২৫০)",
-                    "সাধারণ" to "সাধারণ (১২৪৫)",
-                    "অ্যাডমিন" to "অ্যাডমিন (৫)"
+                    "সব" to "সব ($totalUsersBangla)",
+                    "সাধারণ" to "সাধারণ ($generalUsersBangla)",
+                    "অ্যাডমিন" to "অ্যাডমিন ($adminUsersBangla)"
                 )
                 filterTabs.forEach { (key, label) ->
                     val selected = selectedFilter == key
@@ -1356,6 +1499,11 @@ private fun AdminUsersManagementView(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                if (filteredUsers.isEmpty()) {
+                    item {
+                        AdminEmptyDataCard(message = "কোনো তথ্য নেই")
+                    }
+                }
                 items(filteredUsers, key = { it.id }) { userItem ->
                     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -1512,45 +1660,8 @@ private fun AdminNoticesManagementView(
     val localBoostOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     val localDeletedIds = remember { mutableStateListOf<String>() }
 
-    val seedNotices = remember {
-        listOf(
-            DisplayNoticeItem(
-                id = "seed_n1",
-                title = "প্রধান শিক্ষকের পদ শূন্য",
-                organization = "জামিয়া ইসলামিয়া দারুল উলুম",
-                timeText = "১০ মিনিট আগে",
-                category = "প্রধান",
-                isPrincipal = true
-            ),
-            DisplayNoticeItem(
-                id = "seed_n2",
-                title = "হিফজ বিভাগের শিক্ষক আবশ্যক",
-                organization = "মাদরাসাতুল মদিনা",
-                timeText = "১ ঘণ্টা আগে",
-                category = "সাধারণ",
-                isPrincipal = false
-            ),
-            DisplayNoticeItem(
-                id = "seed_n3",
-                title = "নতুন বিজ্ঞপ্তি প্রকাশিত হয়েছে",
-                organization = "জামিয়া আরাবিয়া কাসেমুল উলুম",
-                timeText = "গতকাল",
-                category = "সাধারণ",
-                isPrincipal = false
-            ),
-            DisplayNoticeItem(
-                id = "seed_n4",
-                title = "মাদরাসা নিবন্ধন চলছে",
-                organization = "কওমি কর্মসংস্থান বাংলাদেশ",
-                timeText = "৩ দিন আগে",
-                category = "জরুরি",
-                isPrincipal = false
-            )
-        )
-    }
-
     val allNotices = remember(posts, localBoostOverrides.value, localDeletedIds.size) {
-        val realMapped = posts.map { post ->
+        posts.map { post ->
             val boosted = localBoostOverrides.value[post.id] ?: post.isBoosted
             val cat = when {
                 boosted -> "প্রধান"
@@ -1566,11 +1677,7 @@ private fun AdminNoticesManagementView(
                 isPrincipal = boosted,
                 backingPost = post
             )
-        }
-        (realMapped + seedNotices.map { s ->
-            val b = localBoostOverrides.value[s.id] ?: s.isPrincipal
-            s.copy(isPrincipal = b, category = if (b) "প্রধান" else s.category)
-        }).filterNot { localDeletedIds.contains(it.id) }
+        }.filterNot { localDeletedIds.contains(it.id) }
     }
 
     val filteredNotices = remember(allNotices, selectedTab) {
@@ -1661,6 +1768,11 @@ private fun AdminNoticesManagementView(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                if (filteredNotices.isEmpty()) {
+                    item {
+                        AdminEmptyDataCard(message = "কোনো তথ্য নেই")
+                    }
+                }
                 items(filteredNotices, key = { it.id }) { notice ->
                     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -1905,49 +2017,8 @@ private fun AdminApplicationsManagementView(
     var searchQuery by rememberSaveable { mutableStateOf("") }
     val localStatusMap = remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
-    val seedApplications = remember {
-        listOf(
-            DisplayApplicationItem(
-                id = "seed_a1",
-                applicantName = "মাওলানা আব্দুল করিম",
-                designation = "দাওরায়ে হাদিস শিক্ষক",
-                madrasaName = "জামিয়া ইসলামিয়া ঢাকা",
-                dateText = "১০ মে ২০২৬",
-                statusCode = "PENDING",
-                photoUrl = ProfilePhotoHelper.PRESET_SCHOLAR_EMERALD
-            ),
-            DisplayApplicationItem(
-                id = "seed_a2",
-                applicantName = "মুফতি মাহমুদ হাসান",
-                designation = "ইফতা বিভাগের শিক্ষক",
-                madrasaName = "দারুল উলুম মাদরাসা",
-                dateText = "৯ মে ২০২৬",
-                statusCode = "SHORTLISTED",
-                photoUrl = ProfilePhotoHelper.PRESET_SCHOLAR_GOLD
-            ),
-            DisplayApplicationItem(
-                id = "seed_a3",
-                applicantName = "হাফেজ সাইফুল ইসলাম",
-                designation = "হিফজ শিক্ষক",
-                madrasaName = "মাদরাসাতুল মদিনা",
-                dateText = "৮ মে ২০২৬",
-                statusCode = "ACCEPTED",
-                photoUrl = ProfilePhotoHelper.PRESET_MUHTAMIM_ROYAL
-            ),
-            DisplayApplicationItem(
-                id = "seed_a4",
-                applicantName = "মাওলানা জাকির হোসাইন",
-                designation = "আরবি প্রভাষক",
-                madrasaName = "জামিয়া আরাবিয়া",
-                dateText = "৭ মে ২০২৬",
-                statusCode = "REJECTED",
-                photoUrl = ProfilePhotoHelper.PRESET_MADRASA_DOME
-            )
-        )
-    }
-
     val combinedApplications = remember(submissions, localStatusMap.value) {
-        val realMapped = submissions.map { sub ->
+        submissions.map { sub ->
             val currentStatus = localStatusMap.value[sub.id] ?: sub.status
             DisplayApplicationItem(
                 id = sub.id,
@@ -1959,10 +2030,6 @@ private fun AdminApplicationsManagementView(
                 photoUrl = ProfilePhotoHelper.PRESET_SCHOLAR_EMERALD,
                 backingSubmission = sub
             )
-        }
-        realMapped + seedApplications.map { seed ->
-            val overrideStatus = localStatusMap.value[seed.id]
-            if (overrideStatus != null) seed.copy(statusCode = overrideStatus) else seed
         }
     }
 
@@ -2002,15 +2069,22 @@ private fun AdminApplicationsManagementView(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Filter Chips: সব (৩২০) | নতুন (৪৫) | পর্যালোচনাধীন (১২০)
+            // Filter Chips: Real Server Counts
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val totalAppsBangla = IslamicDateAndPrayerHelper.toBanglaDigits(combinedApplications.size.toString())
+                val pendingAppsBangla = IslamicDateAndPrayerHelper.toBanglaDigits(
+                    combinedApplications.count { it.statusCode == "PENDING" }.toString()
+                )
+                val shortlistedAppsBangla = IslamicDateAndPrayerHelper.toBanglaDigits(
+                    combinedApplications.count { it.statusCode == "SHORTLISTED" }.toString()
+                )
                 val chips = listOf(
-                    "সব" to "সব (৩২০)",
-                    "নতুন" to "নতুন (৪৫)",
-                    "পর্যালোচনাধীন" to "পর্যালোচনাধীন (১২০)"
+                    "সব" to "সব ($totalAppsBangla)",
+                    "নতুন" to "নতুন ($pendingAppsBangla)",
+                    "পর্যালোচনাধীন" to "পর্যালোচনাধীন ($shortlistedAppsBangla)"
                 )
                 chips.forEach { (key, label) ->
                     val selected = selectedFilter == key
@@ -2072,6 +2146,11 @@ private fun AdminApplicationsManagementView(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                if (filteredApplications.isEmpty()) {
+                    item {
+                        AdminEmptyDataCard(message = "কোনো তথ্য নেই")
+                    }
+                }
                 items(filteredApplications, key = { it.id }) { appItem ->
                     var statusMenuExpanded by remember { mutableStateOf(false) }
                     val (statusLabel, badgeColor) = when (appItem.statusCode) {
@@ -2244,6 +2323,11 @@ private fun AdminMembersManagementView(
             contentPadding = PaddingValues(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            if (adminMembers.isEmpty()) {
+                item {
+                    AdminEmptyDataCard(message = "কোনো তথ্য নেই")
+                }
+            }
             items(adminMembers, key = { it.id }) { member ->
                 var menuExpanded by remember { mutableStateOf(false) }
 
@@ -3231,48 +3315,17 @@ private fun AdminBoostManagementView(
     var selectedTab by rememberSaveable { mutableStateOf("সব") }
     val localOngoingMap = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
 
-    val seedBoosts = remember {
-        listOf(
-            DisplayBoostItem(
-                id = "seed_b1",
-                title = "প্রধান শিক্ষকের পদ শূন্য",
-                subtitleViews = "পোস্ট | ১,২৫০ ভিউ",
-                dateRange = "১০ মে - ১৭ মে ২০২৬",
-                isOngoing = true
-            ),
-            DisplayBoostItem(
-                id = "seed_b2",
-                title = "বার্ষিক মাহফিলের বিজ্ঞপ্তি",
-                subtitleViews = "বিজ্ঞপ্তি | ৯৮০ ভিউ",
-                dateRange = "৮ মে - ১৫ মে ২০২৬",
-                isOngoing = true
-            ),
-            DisplayBoostItem(
-                id = "seed_b3",
-                title = "মাদরাসা ভর্তি বিজ্ঞপ্তি",
-                subtitleViews = "পোস্ট | ২,১০০ ভিউ",
-                dateRange = "১ মে - ৭ মে ২০২৬",
-                isOngoing = false
-            )
-        )
-    }
-
     val allBoostItems = remember(posts, localOngoingMap.value) {
-        val mappedPosts = posts.mapIndexed { idx, post ->
+        posts.map { post ->
             val ongoing = localOngoingMap.value[post.id] ?: post.isBoosted
-            val viewsBangla = IslamicDateAndPrayerHelper.toBanglaDigits(((idx + 1) * 340 + 420).toString())
             DisplayBoostItem(
                 id = post.id,
                 title = post.title,
-                subtitleViews = "পোস্ট | $viewsBangla ভিউ",
-                dateRange = "১০ মে - ১৭ মে ২০২৬",
+                subtitleViews = "${post.designation.ifBlank { "বিজ্ঞপ্তি" }} | ${post.district.ifBlank { "বাংলাদেশ" }}",
+                dateRange = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(post.createdAt),
                 isOngoing = ongoing,
                 backingPost = post
             )
-        }
-        mappedPosts + seedBoosts.map { seed ->
-            val override = localOngoingMap.value[seed.id]
-            if (override != null) seed.copy(isOngoing = override) else seed
         }
     }
 
@@ -3334,6 +3387,11 @@ private fun AdminBoostManagementView(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                if (filteredBoosts.isEmpty()) {
+                    item {
+                        AdminEmptyDataCard(message = "কোনো তথ্য নেই")
+                    }
+                }
                 items(filteredBoosts, key = { it.id }) { item ->
                     Card(
                         modifier = Modifier
@@ -3647,69 +3705,35 @@ private fun AdminActivityLogView(
 ) {
     var selectedFilter by rememberSaveable { mutableStateOf("সব") }
 
-    val defaultSeedLogs = remember {
-        listOf(
-            DisplayActivityLog(
-                id = "seed_l1",
-                title = "নতুন অ্যাডমিন যোগ করা হয়েছে",
-                subtitle = "অ্যাডমিন: মুফতি মাহমুদ হাসান",
-                timeText = "১০ মিনিট আগে",
-                category = "ব্যবহারকারী",
-                icon = Icons.Default.PersonAdd
-            ),
-            DisplayActivityLog(
-                id = "seed_l2",
-                title = "বিজ্ঞপ্তি প্রকাশ করা হয়েছে",
-                subtitle = "প্রধান শিক্ষকের পদ শূন্য",
-                timeText = "৩০ মিনিট আগে",
-                category = "বিজ্ঞপ্তি",
-                icon = Icons.Default.Campaign
-            ),
-            DisplayActivityLog(
-                id = "seed_l3",
-                title = "ব্যবহারকারী ব্লক করা হয়েছে",
-                subtitle = "হাফেজ সাইফুল ইসলাম",
-                timeText = "১ ঘণ্টা আগে",
-                category = "ব্যবহারকারী",
-                icon = Icons.Default.Block
-            ),
-            DisplayActivityLog(
-                id = "seed_l4",
-                title = "আবেদন অনুমোদন করা হয়েছে",
-                subtitle = "মাওলানা আব্দুল করিম",
-                timeText = "২ ঘণ্টা আগে",
-                category = "আবেদন",
-                icon = Icons.Default.CheckCircle
-            ),
-            DisplayActivityLog(
-                id = "seed_l5",
-                title = "অ্যাপ সেটিংস পরিবর্তন করা হয়েছে",
-                subtitle = "নোটিফিকেশন সেটিংস আপডেট",
-                timeText = "গতকাল",
-                category = "সব",
-                icon = Icons.Default.Settings
-            )
-        )
-    }
-
     val allLogs = remember(telegramLogs) {
-        val realMapped = telegramLogs.map { log ->
-            val (cat, ic) = when (log.eventType) {
-                "NEW_CIRCULAR", "ADMIN_ANNOUNCEMENT" -> "বিজ্ঞপ্তি" to Icons.Default.Campaign
-                "NEW_APPLICATION", "KHEDMOT_SUBMISSION" -> "আবেদন" to Icons.Default.CheckCircle
-                "ADMIN_VERIFICATION", "CONTENT_MODERATION", "ADMIN_SECURITY" -> "ব্যবহারকারী" to Icons.Default.PersonAdd
+        telegramLogs.map { log ->
+            val isSupportOrComplaint = log.referenceId.startsWith("SUPPORT_TICKET") ||
+                log.title.startsWith("[অভিযোগ") ||
+                log.title.startsWith("[সমস্যা") ||
+                log.title.startsWith("[পরামর্শ") ||
+                log.title.startsWith("[সহায়তা") ||
+                log.title.startsWith("[সহায়তা")
+            val (cat, ic) = when {
+                isSupportOrComplaint -> "অভিযোগ/সহায়তা" to Icons.Default.SupportAgent
+                log.eventType == "NEW_CIRCULAR" || log.eventType == "ADMIN_ANNOUNCEMENT" -> "বিজ্ঞপ্তি" to Icons.Default.Campaign
+                log.eventType == "NEW_APPLICATION" || log.eventType == "KHEDMOT_SUBMISSION" -> "আবেদন" to Icons.Default.CheckCircle
+                log.eventType == "ADMIN_VERIFICATION" || log.eventType == "CONTENT_MODERATION" || log.eventType == "ADMIN_SECURITY" -> "ব্যবহারকারী" to Icons.Default.PersonAdd
                 else -> "সব" to Icons.Default.Settings
             }
+            val subText = buildString {
+                if (log.message.isNotBlank()) append(log.message)
+                if (log.actorName.isNotBlank()) append(" • প্রেরক: ${log.actorName}")
+                if (log.targetPhone.isNotBlank()) append(" • যোগাযোগ: ${log.targetPhone}")
+            }
             DisplayActivityLog(
-                id = log.id.ifBlank { "tg_${log.title.hashCode()}" },
+                id = log.id.ifBlank { "tg_${log.title.hashCode()}_${log.createdAt?.seconds ?: 0}" },
                 title = log.title,
-                subtitle = log.message,
+                subtitle = subText,
                 timeText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(log.createdAt),
                 category = cat,
                 icon = ic
             )
         }
-        realMapped + defaultSeedLogs
     }
 
     val filteredLogs = remember(allLogs, selectedFilter) {
@@ -3722,7 +3746,7 @@ private fun AdminActivityLogView(
 
     Column(modifier = Modifier.fillMaxSize()) {
         AdminTopHeaderBar(
-            title = "অ্যাডমিন অ্যাক্টিভিটি লগ",
+            title = "অ্যাডমিন অ্যাক্টিভিটি লগ ও অভিযোগ",
             onBack = onBack
         )
 
@@ -3732,12 +3756,12 @@ private fun AdminActivityLogView(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Filter Tabs: সব | ব্যবহারকারী | বিজ্ঞপ্তি | আবেদন
+            // Filter Tabs: সব | অভিযোগ/সহায়তা | ব্যবহারকারী | বিজ্ঞপ্তি | আবেদন
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                listOf("সব", "ব্যবহারকারী", "বিজ্ঞপ্তি", "আবেদন").forEach { tab ->
+                listOf("সব", "অভিযোগ/সহায়তা", "ব্যবহারকারী", "বিজ্ঞপ্তি", "আবেদন").forEach { tab ->
                     val selected = selectedFilter == tab
                     Surface(
                         shape = RoundedCornerShape(10.dp),
@@ -3754,13 +3778,15 @@ private fun AdminActivityLogView(
                     ) {
                         Box(
                             contentAlignment = Alignment.Center,
-                            modifier = Modifier.padding(vertical = 8.dp)
+                            modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp)
                         ) {
                             Text(
                                 text = tab,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (selected) Color.White else QawmiTextDark,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -3771,6 +3797,11 @@ private fun AdminActivityLogView(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                if (filteredLogs.isEmpty()) {
+                    item {
+                        AdminEmptyDataCard(message = "কোনো তথ্য নেই")
+                    }
+                }
                 items(filteredLogs, key = { it.id }) { logItem ->
                     Card(
                         modifier = Modifier

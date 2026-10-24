@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DomainAdd
@@ -100,12 +101,15 @@ import com.example.ui.theme.QawmiSeekerBlue
 import com.example.ui.theme.QawmiSoftBg
 import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextSecondary
+import com.example.ui.util.AjkerSmoronHelper
 import com.example.ui.util.IslamicDateAndPrayerHelper
 import com.example.ui.util.QawmiNotificationHelper
 import com.example.ui.viewmodel.FeedFilterTab
 import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.QawmiViewModel
 import com.example.ui.viewmodel.UiState
+import java.util.Calendar
+import java.util.TimeZone
 import kotlinx.coroutines.launch
 
 @Composable
@@ -173,6 +177,7 @@ fun MainAppScaffold(
     val telegramNotificationsState by viewModel.telegramNotificationsState.collectAsStateWithLifecycle()
     val adminUsersState by viewModel.adminUsersState.collectAsStateWithLifecycle()
     val adminSubmissionsState by viewModel.adminSubmissionsState.collectAsStateWithLifecycle()
+    val adminRegistryListState by viewModel.adminRegistryListState.collectAsStateWithLifecycle()
 
     val selectedPostForApply by viewModel.selectedPostForApply.collectAsStateWithLifecycle()
     val selectedPostForDetail by viewModel.selectedPostForDetail.collectAsStateWithLifecycle()
@@ -181,6 +186,42 @@ fun MainAppScaffold(
     val inspectedUserProfileState by viewModel.inspectedUserProfileState.collectAsStateWithLifecycle()
     val activeChatPartnerProfile by viewModel.activeChatPartnerProfileState.collectAsStateWithLifecycle()
     val chatPartnerProfiles by viewModel.chatPartnerProfilesState.collectAsStateWithLifecycle()
+    val smoronServerReceipts by viewModel.smoronServerReceiptsState.collectAsStateWithLifecycle()
+    val focusedSmoronId by viewModel.focusedSmoronId.collectAsStateWithLifecycle()
+
+    LaunchedEffect(viewModel.currentUserId, smoronServerReceipts) {
+        val todayDateKey = AjkerSmoronHelper.currentBangladeshDateKey()
+        val assigned = AjkerSmoronHelper.syncFromServerReceipts(
+            context = context,
+            userId = viewModel.currentUserId,
+            receiptTimestamps = smoronServerReceipts,
+            dateKey = todayDateKey
+        )
+        viewModel.syncSmoronAssignmentToServer(todayDateKey, assigned.id)
+
+        if (AjkerSmoronHelper.isNotificationEnabled(context)) {
+            val (prefHour, prefMin) = AjkerSmoronHelper.getPreferredNotificationTime(context)
+            AjkerSmoronHelper.scheduleDailyPushAlarm(context, prefHour, prefMin)
+
+            // If today's scheduled notification time has already arrived and no push was sent today, deliver once
+            val dhakaCal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
+            val nowMinutes = dhakaCal.get(Calendar.HOUR_OF_DAY) * 60 + dhakaCal.get(Calendar.MINUTE)
+            val targetMinutes = prefHour * 60 + prefMin
+            if (nowMinutes >= targetMinutes &&
+                !AjkerSmoronHelper.hasPushBeenSentForDate(context, viewModel.currentUserId, todayDateKey)
+            ) {
+                val delivered = QawmiNotificationHelper.deliverDailyAjkerSmoronPushNotification(
+                    context = context,
+                    userId = viewModel.currentUserId,
+                    reminder = assigned,
+                    dateKey = todayDateKey
+                )
+                if (delivered) {
+                    viewModel.syncSmoronPushSentToServer(todayDateKey, assigned.id)
+                }
+            }
+        }
+    }
 
     val unreadNotificationsCount = remember(notificationsState, viewModel.currentUserId) {
         (notificationsState as? UiState.Success)?.data?.count {
@@ -307,6 +348,15 @@ fun MainAppScaffold(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     DrawerMenuItem(
+                        label = "আজকের স্মরণ",
+                        icon = Icons.Default.AutoAwesome,
+                        selected = currentDestination == MainDestination.AJKER_SMORON,
+                        testTag = "drawer_item_ajker_smoron"
+                    ) {
+                        scope.launch { drawerState.close() }
+                        viewModel.navigateTo(MainDestination.AJKER_SMORON)
+                    }
+                    DrawerMenuItem(
                         label = "মাদরাসা নিবন্ধন করুন",
                         icon = Icons.Default.DomainAdd,
                         selected = currentDestination == MainDestination.REGISTER_MADRASA,
@@ -414,6 +464,7 @@ fun MainAppScaffold(
             MainDestination.NOTIFICATIONS -> "নোটিফিকেশন"
             MainDestination.ADMIN_PANEL -> "অ্যাডমিন প্যানেল"
             MainDestination.PRAYER_SCHEDULE -> "নামাজের সময়সূচী"
+            MainDestination.AJKER_SMORON -> "আজকের স্মরণ"
             MainDestination.APP_SETTINGS -> "অ্যাপ সেটিংস"
             MainDestination.ABOUT_APP -> "অ্যাপ সম্পর্কে"
             MainDestination.ABOUT_DEVELOPER -> "ডেভেলপার সম্পর্কে"
@@ -511,6 +562,7 @@ fun MainAppScaffold(
                     when (currentDestination) {
                         MainDestination.HOME -> {
                             HomeScreen(
+                                currentUserId = viewModel.currentUserId,
                                 onNavigate = { dest -> viewModel.navigateTo(dest) },
                                 onOpenFeedFilter = { filterTab -> viewModel.openFeedWithFilter(filterTab) }
                             )
@@ -804,7 +856,9 @@ fun MainAppScaffold(
                                 madrasasState = madrasasState,
                                 feedPostsState = feedPostsState,
                                 telegramNotificationsState = telegramNotificationsState,
+                                adminsState = adminRegistryListState,
                                 isSubmitting = isSubmitting,
+                                onRetryServerLoad = { viewModel.retryAdminServerStreams() },
                                 onVerifyUser = { user, ver -> viewModel.adminUpdateUserVerification(user, ver) },
                                 onUpdateSubmissionStatus = { sub, status -> viewModel.adminUpdateSubmissionStatus(sub, status) },
                                 onVerifyMadrasa = { madrasa, ver -> viewModel.adminVerifyMadrasa(madrasa, ver) },
@@ -827,6 +881,22 @@ fun MainAppScaffold(
                             FullPrayerScheduleScreen()
                         }
 
+                        MainDestination.AJKER_SMORON -> {
+                            AjkerSmoronScreen(
+                                currentUserId = viewModel.currentUserId,
+                                serverReceiptsMap = smoronServerReceipts,
+                                focusedReminderId = focusedSmoronId,
+                                onConsumeFocusedReminder = { viewModel.clearFocusedSmoronId() },
+                                onSyncAssignmentToServer = { dateKey, remId ->
+                                    viewModel.syncSmoronAssignmentToServer(dateKey, remId)
+                                },
+                                onSyncAmolCompletedToServer = { dateKey ->
+                                    viewModel.syncSmoronAmolCompletedToServer(dateKey)
+                                },
+                                onShowFeedback = { msg -> viewModel.showFeedbackMessage(msg) }
+                            )
+                        }
+
                         MainDestination.APP_SETTINGS -> {
                             val currentUserProf = (userProfileState as? UiState.Success)?.data
                             UserAppSettingsScreen(
@@ -842,7 +912,17 @@ fun MainAppScaffold(
 
                         MainDestination.ABOUT_DEVELOPER -> {
                             AboutDeveloperScreen(
-                                onShowFeedback = { msg -> viewModel.showFeedbackMessage(msg) }
+                                isSubmitting = isSubmitting,
+                                onShowFeedback = { msg -> viewModel.showFeedbackMessage(msg) },
+                                onSubmitDeveloperFeedback = { category, subject, message, contactPhone, onReset ->
+                                    viewModel.submitUserSupportMessage(
+                                        category = category,
+                                        subject = subject,
+                                        message = message,
+                                        contactPhone = contactPhone,
+                                        onSuccessReset = onReset
+                                    )
+                                }
                             )
                         }
 
@@ -851,7 +931,21 @@ fun MainAppScaffold(
                         }
 
                         MainDestination.HELP_AND_SUPPORT -> {
-                            HelpAndSupportScreen()
+                            val currentUserProf = (userProfileState as? UiState.Success)?.data
+                            HelpAndSupportScreen(
+                                defaultSenderPhone = currentUserProf?.contactInfo.orEmpty(),
+                                isSubmitting = isSubmitting,
+                                onShowFeedback = { msg -> viewModel.showFeedbackMessage(msg) },
+                                onSubmitSupportMessage = { category, subject, message, contactPhone, onSuccessReset ->
+                                    viewModel.submitUserSupportMessage(
+                                        category = category,
+                                        subject = subject,
+                                        message = message,
+                                        contactPhone = contactPhone,
+                                        onSuccessReset = onSuccessReset
+                                    )
+                                }
+                            )
                         }
                     }
                 }

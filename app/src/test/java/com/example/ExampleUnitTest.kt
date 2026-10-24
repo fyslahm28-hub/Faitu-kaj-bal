@@ -118,4 +118,78 @@ class ExampleUnitTest {
         )
         println("Telegram dispatch result in test environment: $dispatched (chatId=$targetChatId, botId=$configuredBotId)")
     }
+
+    @Test
+    fun hanafiPrayerSchedule_calculatesAccurateStartAndEndTimesAndDistrictDifferences() {
+        val helper = com.example.ui.util.IslamicDateAndPrayerHelper
+        // Verify all 64 districts of Bangladesh are configured
+        assertEquals(64, helper.allBangladeshDistrictCoords.size)
+
+        // Calculate Dhaka (23.8103, 90.4125) on October 23, 2026 during Asr (16:15 = 975 min)
+        val dhakaOct23 = helper.calculateHanafiScheduleForCoordinates(
+            districtNameBangla = "ঢাকা",
+            latitude = 23.8103,
+            longitude = 90.4125,
+            year = 2026,
+            month = 10,
+            day = 23,
+            nowMinutesOfDay = 16 * 60 + 15
+        )
+
+        assertEquals(5, dhakaOct23.waqts.size)
+        val fajr = dhakaOct23.waqts[0]
+        val dhuhr = dhakaOct23.waqts[1]
+        val asr = dhakaOct23.waqts[2]
+        val maghrib = dhakaOct23.waqts[3]
+        val isha = dhakaOct23.waqts[4]
+
+        // Every prayer has both start and end times
+        dhakaOct23.waqts.forEach { w ->
+            assertTrue("Start time must not be blank for ${w.nameBangla}", w.timeBangla.isNotBlank())
+            assertTrue("End time must not be blank for ${w.nameBangla}", w.endTimeBangla.isNotBlank())
+        }
+
+        // Verify Hanafi Asr on Oct 23 in Dhaka starts around 03:52 PM (952 min),
+        // NOT Shafi'i (~03:02 PM = 902 min)
+        assertTrue(
+            "Expected Hanafi Asr start between 15:48 and 16:00, got ${asr.startMinutes}",
+            asr.startMinutes in (15 * 60 + 48)..(16 * 60)
+        )
+        // Verify Dhuhr ends 1 minute before Hanafi Asr starts
+        assertEquals(asr.startMinutes - 1, dhuhr.endMinutes)
+        // Verify Fajr ends 1 minute before Sunrise, and Maghrib starts 3 minutes after Asr ends (Sunset)
+        assertTrue(fajr.endMinutes > fajr.startMinutes)
+        assertEquals(asr.endMinutes + 3, maghrib.startMinutes)
+        assertEquals(isha.startMinutes - 1, maghrib.endMinutes)
+
+        // At 16:15 (4:15 PM), Asr must be the active waqt and Maghrib must be the next prayer
+        assertTrue(asr.isCurrentWaqt)
+        assertTrue(dhakaOct23.currentWaqtNameBangla.contains("আসর"))
+        assertTrue(dhakaOct23.nextWaqtNameBangla.contains("মাগরিব"))
+
+        // Verify geographical longitudinal difference: Sylhet (East, 91.87E) vs Rajshahi (West, 88.60E)
+        val sylhetOct23 = helper.calculateHanafiScheduleForCoordinates(
+            districtNameBangla = "সিলেট",
+            latitude = 24.8949,
+            longitude = 91.8687,
+            year = 2026,
+            month = 10,
+            day = 23,
+            nowMinutesOfDay = 12 * 60
+        )
+        val rajshahiOct23 = helper.calculateHanafiScheduleForCoordinates(
+            districtNameBangla = "রাজশাহী",
+            latitude = 24.3745,
+            longitude = 88.6042,
+            year = 2026,
+            month = 10,
+            day = 23,
+            nowMinutesOfDay = 12 * 60
+        )
+
+        // Sylhet prayer times are earlier than Dhaka, and Rajshahi prayer times are later than Dhaka
+        assertTrue(sylhetOct23.waqts[1].startMinutes < dhakaOct23.waqts[1].startMinutes)
+        assertTrue(rajshahiOct23.waqts[1].startMinutes > dhakaOct23.waqts[1].startMinutes)
+    }
 }
+
