@@ -17,8 +17,14 @@ permissions:
 
 jobs:
   build-and-distribute:
-    name: Build APK, Create GitHub Release & Sync Firebase Auto-Update
+    name: Build APK & Publish GitHub Release
     runs-on: ubuntu-latest
+    outputs:
+      version_code: ${{ steps.version_meta.outputs.version_code }}
+      version_name: ${{ steps.version_meta.outputs.version_name }}
+      release_tag: ${{ steps.version_meta.outputs.release_tag }}
+      apk_filename: ${{ steps.version_meta.outputs.apk_filename }}
+      apk_download_url: ${{ steps.version_meta.outputs.apk_download_url }}
 
     steps:
       - name: Checkout Repository
@@ -34,11 +40,6 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '9.3.1'
-
-      - name: Setup Node.js for Firebase Auto-Update Sync
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
       - name: Compute Release Version Metadata
         id: version_meta
@@ -139,14 +140,40 @@ jobs:
           file: app/build/outputs/apk/debug/app-debug.apk
           releaseNotes: "কওমি কর্মসংস্থান বাংলাদেশ — সংস্করণ ${{ steps.version_meta.outputs.version_name }} (Commit: ${{ github.sha }})"
 
-      - name: Update Latest Version & Download Link in Firebase Firestore (/app_releases/latest)
+  sync-firebase-release-metadata:
+    name: Sync & Verify Firebase Firestore Auto-Update (/app_releases/latest)
+    needs: build-and-distribute
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for Firebase Auto-Update Sync
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configure Firebase google-services.json (If Provided via Secret)
+        env:
+          GOOGLE_SERVICES_JSON_SECRET: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "${GOOGLE_SERVICES_JSON_SECRET}" ]; then
+            if echo "${GOOGLE_SERVICES_JSON_SECRET}" | grep -q '^[[:space:]]*{'; then
+              printf '%s\n' "${GOOGLE_SERVICES_JSON_SECRET}" > app/google-services.json
+            else
+              echo "${GOOGLE_SERVICES_JSON_SECRET}" | tr -d '[:space:]' | base64 -d > app/google-services.json
+            fi
+          fi
+
+      - name: Update & Verify Latest Version in Firebase Firestore (/app_releases/latest)
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          RELEASE_VERSION_CODE: ${{ steps.version_meta.outputs.version_code }}
-          RELEASE_VERSION_NAME: ${{ steps.version_meta.outputs.version_name }}
-          RELEASE_APK_URL: ${{ steps.version_meta.outputs.apk_download_url }}
-          RELEASE_TAG: ${{ steps.version_meta.outputs.release_tag }}
-          RELEASE_NOTES: ${{ github.event.inputs.release_notes || format('কওমি কর্মসংস্থান বাংলাদেশ নতুন সংস্করণ {0} প্রকাশিত হয়েছে। উন্নত ফিড, দ্রুততর পারফরম্যান্স ও বাগ ফিক্স যুক্ত করা হয়েছে।', steps.version_meta.outputs.version_name) }}
+          RELEASE_VERSION_CODE: ${{ needs.build-and-distribute.outputs.version_code }}
+          RELEASE_VERSION_NAME: ${{ needs.build-and-distribute.outputs.version_name }}
+          RELEASE_APK_URL: ${{ needs.build-and-distribute.outputs.apk_download_url }}
+          RELEASE_TAG: ${{ needs.build-and-distribute.outputs.release_tag }}
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes || format('কওমি কর্মসংস্থান বাংলাদেশ নতুন সংস্করণ {0} প্রকাশিত হয়েছে। উন্নত ফিড, দ্রুততর পারফরম্যান্স ও বাগ ফিক্স যুক্ত করা হয়েছে।', needs.build-and-distribute.outputs.version_name) }}
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_ACTOR: ${{ github.actor }}
         run: |
@@ -156,4 +183,5 @@ jobs:
             --apk-url "${RELEASE_APK_URL}" \
             --release-tag "${RELEASE_TAG}" \
             --commit-sha "${GITHUB_SHA}" \
-            --release-notes "${RELEASE_NOTES}"
+            --release-notes "${RELEASE_NOTES}" \
+            --require-service-account true

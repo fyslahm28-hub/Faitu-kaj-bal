@@ -40,15 +40,62 @@ function parseArgs(argv) {
   return args;
 }
 
-function extractXmlConfig(xmlPath) {
+/**
+ * Extracts project_id and firestore_database_id from Android XML resource files
+ * (such as `app/src/main/res/values/firebase_applet_config.xml`), properly handling
+ * additional XML attributes like `translatable="false"`.
+ */
+export function extractXmlConfig(xmlPath) {
   try {
     if (!fs.existsSync(xmlPath)) return {};
     const xml = fs.readFileSync(xmlPath, "utf8");
-    const projectIdMatch = xml.match(/<string name="project_id">([^<]+)<\/string>/);
-    const dbIdMatch = xml.match(/<string name="fire(?:base|store)_database_id">([^<]+)<\/string>/);
+    const projectIdMatch = xml.match(
+      /<string\b[^>]*\bname=["']project_id["'][^>]*>([^<]+)<\/string>/i
+    );
+    const dbIdMatch = xml.match(
+      /<string\b[^>]*\bname=["']fire(?:base|store)_database_id["'][^>]*>([^<]+)<\/string>/i
+    );
     return {
       projectId: projectIdMatch ? projectIdMatch[1].trim() : undefined,
       databaseId: dbIdMatch ? dbIdMatch[1].trim() : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Extracts the configured Firestore database ID from `firebase.json` if present.
+ */
+export function extractFirebaseJsonConfig(firebaseJsonPath) {
+  try {
+    if (!fs.existsSync(firebaseJsonPath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(firebaseJsonPath, "utf8"));
+    if (Array.isArray(parsed.firestore) && parsed.firestore.length > 0) {
+      const db = parsed.firestore[0]?.database;
+      if (typeof db === "string" && db.trim()) {
+        return { databaseId: db.trim() };
+      }
+    } else if (parsed.firestore && typeof parsed.firestore.database === "string") {
+      const db = parsed.firestore.database.trim();
+      if (db) return { databaseId: db };
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Extracts `project_info.project_id` from `app/google-services.json` if present.
+ */
+export function extractGoogleServicesConfig(googleServicesPath) {
+  try {
+    if (!fs.existsSync(googleServicesPath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(googleServicesPath, "utf8"));
+    const projectId = parsed?.project_info?.project_id;
+    return {
+      projectId: typeof projectId === "string" && projectId.trim() ? projectId.trim() : undefined,
     };
   } catch {
     return {};
@@ -74,7 +121,7 @@ function parseServiceAccount(rawInput) {
     if (fs.existsSync(trimmed)) {
       return JSON.parse(fs.readFileSync(trimmed, "utf8"));
     }
-    const decoded = Buffer.from(trimmed, "base64").toString("utf8");
+    const decoded = Buffer.from(trimmed.replace(/\s+/g, ""), "base64").toString("utf8");
     if (decoded.trim().startsWith("{")) {
       return JSON.parse(decoded);
     }
@@ -114,13 +161,14 @@ function httpRequestJson(urlString, { method = "GET", headers = {}, body = null 
           if (res.statusCode >= 200 && res.statusCode < 300) {
             resolve({ statusCode: res.statusCode, data: parsed });
           } else {
-            reject(
-              new Error(
-                `HTTP ${res.statusCode} for ${method} ${url.pathname}: ${
-                  typeof parsed === "string" ? parsed : JSON.stringify(parsed)
-                }`
-              )
+            const err = new Error(
+              `HTTP ${res.statusCode} for ${method} ${url.pathname}: ${
+                typeof parsed === "string" ? parsed : JSON.stringify(parsed)
+              }`
             );
+            err.statusCode = res.statusCode;
+            err.responseBody = parsed;
+            reject(err);
           }
         });
       }
@@ -192,6 +240,10 @@ function buildFirestoreDocumentFields(release) {
   };
 }
 
+/**
+ * Safely merges release metadata fields into `/app_releases/{docId}` using
+ * `updateMask.fieldPaths` so any other existing fields on the document are preserved.
+ */
 async function writeReleaseDoc({
   baseOrigin,
   projectId,
@@ -200,15 +252,21 @@ async function writeReleaseDoc({
   release,
   bearerToken,
 }) {
+  const encodedProject = encodeURIComponent(projectId);
   const encodedDb = encodeURIComponent(databaseId);
-  const url = `${baseOrigin}/v1/projects/${encodeURIComponent(
-    projectId
-  )}/databases/${encodedDb}/documents/app_releases/${encodeURIComponent(docId)}`;
+  const encodedDoc = encodeURIComponent(docId);
 
   const body = buildFirestoreDocumentFields({
     ...release,
     releaseId: docId,
   });
+
+  const fieldNames = Object.keys(body.fields);
+  const maskQuery = fieldNames
+    .map((field) => `updateMask.fieldPaths=${encodeURIComponent(field)}`)
+    .join("&");
+
+  const url = `${baseOrigin}/v1/projects/${encodedProject}/databases/${encodedDb}/documents/app_releases/${encodedDoc}?${maskQuery}`;
 
   await httpRequestJson(url, {
     method: "PATCH",
@@ -219,9 +277,112 @@ async function writeReleaseDoc({
   });
 }
 
+/**
+ * Reads back `/app_releases/latest` from Firestore to verify that the release metadata
+ * was genuinely persisted in the target database.
+ */
+async function verifyReleaseDoc({
+  baseOrigin,
+  projectId,
+  databaseId,
+  docId,
+  expectedRelease,
+  bearerToken,
+}) {
+  const encodedProject = encodeURIComponent(projectId);
+  const encodedDb = encodeURIComponent(databaseId);
+  const encodedDoc = encodeURIComponent(docId);
+  const url = `${baseOrigin}/v1/projects/${encodedProject}/databases/${encodedDb}/documents/app_releases/${encodedDoc}`;
+
+  const res = await httpRequestJson(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${bearerToken}`,
+    },
+  });
+
+  const fields = res.data?.fields;
+  if (!fields) {
+    throw new Error(
+      `Verification GET succeeded but returned no fields for /app_releases/${docId} in database "${databaseId}" (project "${projectId}").`
+    );
+  }
+
+  const actualVersionCode = parseInt(fields.versionCode?.integerValue ?? "0", 10);
+  const actualVersionName = fields.versionName?.stringValue ?? "";
+  const actualApkUrl = fields.apkDownloadUrl?.stringValue ?? "";
+
+  if (
+    actualVersionCode !== expectedRelease.versionCode ||
+    actualVersionName !== expectedRelease.versionName ||
+    actualApkUrl !== expectedRelease.apkDownloadUrl
+  ) {
+    throw new Error(
+      `Verification mismatch on /app_releases/${docId} in database "${databaseId}" (project "${projectId}"): ` +
+        `expected versionCode=${expectedRelease.versionCode}, versionName="${expectedRelease.versionName}", apkDownloadUrl="${expectedRelease.apkDownloadUrl}", ` +
+        `but found versionCode=${actualVersionCode}, versionName="${actualVersionName}", apkDownloadUrl="${actualApkUrl}".`
+    );
+  }
+
+  return {
+    versionCode: actualVersionCode,
+    versionName: actualVersionName,
+    apkDownloadUrl: actualApkUrl,
+  };
+}
+
+export function resolveProjectAndDatabaseConfig({
+  args = {},
+  env = process.env,
+  serviceAccount = null,
+  xmlPath = "app/src/main/res/values/firebase_applet_config.xml",
+  firebaseJsonPath = "firebase.json",
+  googleServicesPath = "app/google-services.json",
+} = {}) {
+  const xmlDefaults = extractXmlConfig(xmlPath);
+  const firebaseJsonDefaults = extractFirebaseJsonConfig(firebaseJsonPath);
+  const googleServicesDefaults = extractGoogleServicesConfig(googleServicesPath);
+
+  const appConfiguredProjectId =
+    googleServicesDefaults.projectId || xmlDefaults.projectId || "gen-lang-client-0048059944";
+
+  const projectId =
+    (args["project-id"] && args["project-id"].trim()) ||
+    (env.FIREBASE_PROJECT_ID && env.FIREBASE_PROJECT_ID.trim()) ||
+    appConfiguredProjectId ||
+    (serviceAccount && serviceAccount.project_id);
+
+  const databaseId =
+    (args["database-id"] && args["database-id"].trim()) ||
+    (env.FIRESTORE_DATABASE_ID && env.FIRESTORE_DATABASE_ID.trim()) ||
+    xmlDefaults.databaseId ||
+    firebaseJsonDefaults.databaseId ||
+    "(default)";
+
+  const serviceAccountProjectMismatch =
+    Boolean(
+      serviceAccount &&
+        serviceAccount.project_id &&
+        projectId &&
+        serviceAccount.project_id !== projectId
+    );
+
+  return {
+    projectId,
+    databaseId,
+    appConfiguredProjectId,
+    serviceAccountProjectId: serviceAccount?.project_id || null,
+    serviceAccountProjectMismatch,
+    sources: {
+      xmlDatabaseId: xmlDefaults.databaseId || null,
+      firebaseJsonDatabaseId: firebaseJsonDefaults.databaseId || null,
+      googleServicesProjectId: googleServicesDefaults.projectId || null,
+    },
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv);
-  const xmlDefaults = extractXmlConfig("app/src/main/res/values/firebase_applet_config.xml");
 
   const versionCode = parseInt(
     args["version-code"] || process.env.RELEASE_VERSION_CODE || "2",
@@ -247,14 +408,16 @@ async function main() {
     args["published-by"] ||
     process.env.GITHUB_ACTOR ||
     "GitHub Actions Release Pipeline";
+  const requireServiceAccount =
+    (args["require-service-account"] || process.env.REQUIRE_FIREBASE_SERVICE_ACCOUNT || "false") === "true";
 
   if (!apkDownloadUrl || !/^https?:\/\//i.test(apkDownloadUrl)) {
     throw new Error(
-      `Invalid or missing --apk-url / RELEASE_APK_URL: "${apkDownloadUrl}". Must start with http:// or https://`
+      `[Step: Validate Inputs] Invalid or missing --apk-url / RELEASE_APK_URL: "${apkDownloadUrl}". Must start with http:// or https://`
     );
   }
   if (!Number.isInteger(versionCode) || versionCode < 1) {
-    throw new Error(`Invalid --version-code: ${versionCode}`);
+    throw new Error(`[Step: Validate Inputs] Invalid --version-code: ${versionCode}`);
   }
 
   const emulatorHost =
@@ -264,18 +427,31 @@ async function main() {
     args["service-account"] || process.env.FIREBASE_SERVICE_ACCOUNT || ""
   );
 
-  const projectId =
-    args["project-id"] ||
-    process.env.FIREBASE_PROJECT_ID ||
-    (serviceAccount && serviceAccount.project_id) ||
-    xmlDefaults.projectId ||
-    "gen-lang-client-0048059944";
+  const {
+    projectId,
+    databaseId,
+    serviceAccountProjectId,
+    serviceAccountProjectMismatch,
+    sources,
+  } = resolveProjectAndDatabaseConfig({ args, env: process.env, serviceAccount });
 
-  const configuredDatabaseId =
-    args["database-id"] ||
-    process.env.FIRESTORE_DATABASE_ID ||
-    xmlDefaults.databaseId ||
-    "(default)";
+  console.log(
+    JSON.stringify({
+      info: "Resolved Firebase target configuration",
+      projectId,
+      databaseId,
+      sources,
+      emulatorMode: Boolean(emulatorHost),
+    })
+  );
+
+  if (serviceAccountProjectMismatch) {
+    console.warn(
+      `⚠️ Warning: FIREBASE_SERVICE_ACCOUNT belongs to project "${serviceAccountProjectId}", ` +
+        `while the Android app is configured for project "${projectId}". ` +
+        `Targeting app project "${projectId}" and database "${databaseId}".`
+    );
+  }
 
   const releaseData = {
     versionCode,
@@ -294,96 +470,137 @@ async function main() {
       : `http://${emulatorHost}`;
     // In Firestore Emulator, "owner" Bearer token bypasses security rules just like a service account
     const bearerToken = "owner";
-    const dbTargets = Array.from(new Set([configuredDatabaseId, "(default)"]));
-    for (const dbId of dbTargets) {
-      await writeReleaseDoc({
-        baseOrigin,
-        projectId,
-        databaseId: dbId,
-        docId: "latest",
-        release: releaseData,
-        bearerToken,
-      });
-      await writeReleaseDoc({
-        baseOrigin,
-        projectId,
-        databaseId: dbId,
-        docId: `v_${versionCode}`,
-        release: releaseData,
-        bearerToken,
-      });
-    }
-    console.log(
-      JSON.stringify({
-        status: "SUCCESS",
-        mode: "EMULATOR",
-        emulatorHost,
-        projectId,
-        databases: dbTargets,
-        versionCode,
-        versionName,
-        apkDownloadUrl,
-      })
-    );
-    return;
-  }
-
-  if (!serviceAccount) {
-    console.warn(
-      "⚠️ FIREBASE_SERVICE_ACCOUNT is not set and FIRESTORE_EMULATOR_HOST is not active. Skipping remote Firestore publish."
-    );
-    process.exit(0);
-  }
-
-  const accessToken = await mintGoogleAccessToken(serviceAccount);
-  const baseOrigin = "https://firestore.googleapis.com";
-  const dbTargets = Array.from(new Set([configuredDatabaseId, "(default)"]));
-
-  const updatedDatabases = [];
-  for (const dbId of dbTargets) {
+    let activeStep = `PATCH /app_releases/latest (emulator database: "${databaseId}")`;
     try {
       await writeReleaseDoc({
         baseOrigin,
         projectId,
-        databaseId: dbId,
+        databaseId,
         docId: "latest",
         release: releaseData,
-        bearerToken: accessToken,
+        bearerToken,
       });
+      activeStep = `PATCH /app_releases/v_${versionCode} (emulator database: "${databaseId}")`;
       await writeReleaseDoc({
         baseOrigin,
         projectId,
-        databaseId: dbId,
+        databaseId,
         docId: `v_${versionCode}`,
         release: releaseData,
-        bearerToken: accessToken,
+        bearerToken,
       });
-      updatedDatabases.push(dbId);
+      activeStep = `GET /app_releases/latest verification (emulator database: "${databaseId}")`;
+      const verified = await verifyReleaseDoc({
+        baseOrigin,
+        projectId,
+        databaseId,
+        docId: "latest",
+        expectedRelease: releaseData,
+        bearerToken,
+      });
+      console.log(
+        JSON.stringify({
+          status: "SUCCESS",
+          mode: "EMULATOR",
+          emulatorHost,
+          projectId,
+          databaseId,
+          verifiedDocument: `/app_releases/latest`,
+          ...verified,
+        })
+      );
+      return;
     } catch (err) {
-      console.warn(`Could not write to database "${dbId}": ${err.message}`);
+      throw new Error(
+        `[Step: ${activeStep}] Failed for projectId="${projectId}", databaseId="${databaseId}": ${err.message}`
+      );
     }
   }
 
-  if (updatedDatabases.length === 0) {
+  if (!serviceAccount) {
+    const msg =
+      `[Step: Load Service Account] FIREBASE_SERVICE_ACCOUNT secret is missing or empty ` +
+      `(target projectId="${projectId}", databaseId="${databaseId}", document="/app_releases/latest"). ` +
+      `Configure a valid Firebase Service Account JSON in GitHub repository Secrets -> FIREBASE_SERVICE_ACCOUNT.`;
+    if (requireServiceAccount) {
+      throw new Error(msg);
+    }
+    console.warn(`⚠️ ${msg}`);
+    process.exit(0);
+  }
+
+  let accessToken;
+  try {
+    accessToken = await mintGoogleAccessToken(serviceAccount);
+  } catch (err) {
     throw new Error(
-      `Failed to publish release metadata to any Firestore database in project ${projectId}`
+      `[Step: OAuth2 Access Token Exchange] Failed for projectId="${projectId}", databaseId="${databaseId}": ${err.message}`
     );
   }
 
-  console.log(
-    JSON.stringify({
-      status: "SUCCESS",
-      mode: "PRODUCTION",
+  const baseOrigin = "https://firestore.googleapis.com";
+  let currentStep = `PATCH /app_releases/latest`;
+
+  try {
+    await writeReleaseDoc({
+      baseOrigin,
       projectId,
-      databases: updatedDatabases,
-      versionCode,
-      versionName,
-      apkDownloadUrl,
-    })
-  );
+      databaseId,
+      docId: "latest",
+      release: releaseData,
+      bearerToken: accessToken,
+    });
+
+    currentStep = `PATCH /app_releases/v_${versionCode}`;
+    await writeReleaseDoc({
+      baseOrigin,
+      projectId,
+      databaseId,
+      docId: `v_${versionCode}`,
+      release: releaseData,
+      bearerToken: accessToken,
+    });
+
+    currentStep = `GET /app_releases/latest (Read-After-Write Verification)`;
+    const verified = await verifyReleaseDoc({
+      baseOrigin,
+      projectId,
+      databaseId,
+      docId: "latest",
+      expectedRelease: releaseData,
+      bearerToken: accessToken,
+    });
+
+    console.log(
+      JSON.stringify({
+        status: "SUCCESS",
+        mode: "PRODUCTION",
+        projectId,
+        databaseId,
+        verifiedDocuments: ["/app_releases/latest", `/app_releases/v_${versionCode}`],
+        ...verified,
+      })
+    );
+  } catch (err) {
+    const statusHint =
+      err.statusCode === 404
+        ? ` Ensure that Firestore database "${databaseId}" exists in Firebase project "${projectId}".`
+        : err.statusCode === 403
+        ? ` Ensure the service account in FIREBASE_SERVICE_ACCOUNT belongs to project "${projectId}" and has the "Cloud Datastore User" or "Firebase Admin" IAM role.`
+        : "";
+    throw new Error(
+      `[Step: ${currentStep}] Firestore update failed for projectId="${projectId}", databaseId="${databaseId}": ${err.message}.${statusHint}`
+    );
+  }
 }
 
-main().catch((err) => {
-  console.error("❌ Failed to publish release metadata to Firebase:", err.message);
-  process.exit(1);
-});
+const isDirectRun =
+  process.argv[1] &&
+  import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/").split("/").pop());
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error("❌ Failed to publish release metadata to Firebase:", err.message);
+    process.exit(1);
+  });
+}
