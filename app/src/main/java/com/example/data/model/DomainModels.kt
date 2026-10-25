@@ -536,6 +536,10 @@ data class AppReleaseInfo(
     @get:PropertyName("isMandatory")
     @set:PropertyName("isMandatory")
     var isMandatory: Boolean = false,
+    @field:PropertyName("isPublished")
+    @get:PropertyName("isPublished")
+    @set:PropertyName("isPublished")
+    var isPublished: Boolean = true,
     val publishedBy: String = "",
     @ServerTimestamp val publishedAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null

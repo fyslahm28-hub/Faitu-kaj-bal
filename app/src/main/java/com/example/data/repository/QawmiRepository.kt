@@ -18,6 +18,7 @@ import com.example.data.model.NotificationReadReceipt
 import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.ui.util.AdminSecurityHelper
+import com.example.ui.util.AppUpdateManagerHelper
 import com.example.ui.util.ProfilePhotoHelper
 import com.example.ui.util.TelegramNotificationHelper
 import com.google.firebase.Timestamp
@@ -25,6 +26,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.QuerySnapshot
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -44,6 +46,21 @@ class QawmiRepository(
         FirebaseAuth.getInstance()
     )
 
+    private fun <T> DocumentSnapshot.safeToObject(clazz: Class<T>): T? {
+        if (!exists()) return null
+        return try {
+            toObject(clazz, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun <T> QuerySnapshot.safeToObjects(clazz: Class<T>): List<T> {
+        return documents.mapNotNull { doc ->
+            doc.safeToObject(clazz)
+        }
+    }
+
     private fun requireUserId(): String {
         return auth.currentUser?.uid
             ?: throw IllegalStateException("এটি সম্পন্ন করতে গুগল অ্যাকাউন্ট দিয়ে লগইন করা আবশ্যক।")
@@ -56,11 +73,7 @@ class QawmiRepository(
         return db.collection("admins").document(userId)
             .snapshots()
             .map { snapshot ->
-                if (snapshot.exists()) {
-                    snapshot.toObject(AdminRegistryEntry::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                } else {
-                    null
-                }
+                snapshot.safeToObject(AdminRegistryEntry::class.java)
             }
             .catch {
                 emit(null)
@@ -179,30 +192,34 @@ class QawmiRepository(
     // --- 1. USER PROFILE, PHOTO & REAL-TIME PRESENCE (ONLINE / LAST SEEN) ---
 
     private fun DocumentSnapshot.toUserProfileOrNull(): UserProfile? {
-        val obj = toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
-        val resolvedOnline = getBoolean("isOnline") ?: obj.isOnline
-        val resolvedVerified = getBoolean("isVerified") ?: obj.isVerified
-        val resolvedTypingTo = getString("typingToUserId") ?: obj.typingToUserId
-        val rawBlocked = (get("blockedUserIds") as? List<*>)
-            ?.mapNotNull { it as? String }
-            ?: obj.blockedUserIds
-        val rawThemes = (get("chatThemes") as? Map<*, *>)
-            ?.entries
-            ?.mapNotNull { (k, v) ->
-                val key = k as? String
-                val value = v as? String
-                if (key != null && value != null) key to value else null
-            }
-            ?.toMap()
-            ?: obj.chatThemes
-        return obj.copy(
-            id = id,
-            isOnline = resolvedOnline,
-            isVerified = resolvedVerified,
-            typingToUserId = resolvedTypingTo,
-            blockedUserIds = rawBlocked,
-            chatThemes = rawThemes
-        )
+        return try {
+            val obj = safeToObject(UserProfile::class.java) ?: UserProfile(id = id, userId = id)
+            val resolvedOnline = runCatching { getBoolean("isOnline") }.getOrNull() ?: obj.isOnline
+            val resolvedVerified = runCatching { getBoolean("isVerified") }.getOrNull() ?: obj.isVerified
+            val resolvedTypingTo = runCatching { getString("typingToUserId") }.getOrNull() ?: obj.typingToUserId
+            val rawBlocked = (runCatching { get("blockedUserIds") }.getOrNull() as? List<*>)
+                ?.mapNotNull { it as? String }
+                ?: obj.blockedUserIds
+            val rawThemes = (runCatching { get("chatThemes") }.getOrNull() as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (k, v) ->
+                    val key = k as? String
+                    val value = v as? String
+                    if (key != null && value != null) key to value else null
+                }
+                ?.toMap()
+                ?: obj.chatThemes
+            obj.copy(
+                id = id,
+                isOnline = resolvedOnline,
+                isVerified = resolvedVerified,
+                typingToUserId = resolvedTypingTo,
+                blockedUserIds = rawBlocked,
+                chatThemes = rawThemes
+            )
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     fun observeUserProfile(userId: String): Flow<UserProfile?> {
@@ -507,7 +524,7 @@ class QawmiRepository(
             .whereEqualTo("visibility", "PUBLIC")
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(FeedPost::class.java)
                     .distinctBy { it.id }
                     .sortedWith(
                         compareByDescending<FeedPost> { it.isBoosted }
@@ -976,7 +993,7 @@ class QawmiRepository(
                 .await()
             var sanitizedCount = 0
             for (doc in snap.documents) {
-                val post = doc.toObject(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                val post = doc.safeToObject(FeedPost::class.java)
                     ?: continue
                 val hasLargeInlineImage = post.imageUrls.any {
                     it.length > ProfilePhotoHelper.MAX_INLINE_FEED_IMAGE_PREVIEW_CHARS ||
@@ -1053,7 +1070,7 @@ class QawmiRepository(
         return try {
             val snap = docRef.get().await()
             val existingPost = if (snap.exists()) {
-                snap.toObject(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: post
+                snap.safeToObject(FeedPost::class.java) ?: post
             } else {
                 post
             }
@@ -1091,7 +1108,7 @@ class QawmiRepository(
             .whereEqualTo("visibility", "PUBLIC")
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(FeedComment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(FeedComment::class.java)
                     .distinctBy { it.id }
                     .sortedWith(
                         compareBy<FeedComment> { it.createdAt ?: Timestamp(0, 0) }
@@ -1427,7 +1444,7 @@ class QawmiRepository(
             .whereEqualTo("userId", userId)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(BookmarkItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(BookmarkItem::class.java)
                     .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
@@ -1476,7 +1493,7 @@ class QawmiRepository(
             .whereEqualTo("visibility", "PUBLIC")
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(MadrasaProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(MadrasaProfile::class.java)
                     .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
@@ -1583,7 +1600,7 @@ class QawmiRepository(
             .whereEqualTo("applicantId", userId)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(KhedmotSubmission::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(KhedmotSubmission::class.java)
                     .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
@@ -1598,7 +1615,7 @@ class QawmiRepository(
             .whereEqualTo("recipientId", userId)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(KhedmotSubmission::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(KhedmotSubmission::class.java)
                     .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
@@ -1707,21 +1724,25 @@ class QawmiRepository(
     // --- 6. DIRECT & GROUP MESSAGING (মেসেজিং, গ্রুপ কথোপকথন ও ছবি প্রেরণ) ---
 
     private fun DocumentSnapshot.toChatGroupOrNull(): ChatGroup? {
-        val obj = toObject(ChatGroup::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
-        val members = (get("memberIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.memberIds
-        val namesMap = (get("memberNames") as? Map<*, *>)
-            ?.entries
-            ?.mapNotNull { (k, v) ->
-                val key = k as? String
-                val value = v as? String
-                if (key != null && value != null) key to value else null
-            }
-            ?.toMap() ?: obj.memberNames
-        return obj.copy(
-            id = id,
-            memberIds = members,
-            memberNames = namesMap
-        )
+        return try {
+            val obj = safeToObject(ChatGroup::class.java) ?: return null
+            val members = (runCatching { get("memberIds") }.getOrNull() as? List<*>)?.mapNotNull { it as? String } ?: obj.memberIds
+            val namesMap = (runCatching { get("memberNames") }.getOrNull() as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (k, v) ->
+                    val key = k as? String
+                    val value = v as? String
+                    if (key != null && value != null) key to value else null
+                }
+                ?.toMap() ?: obj.memberNames
+            obj.copy(
+                id = id,
+                memberIds = members,
+                memberNames = namesMap
+            )
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     fun observeUserGroups(userId: String): Flow<List<ChatGroup>> {
@@ -1871,47 +1892,51 @@ class QawmiRepository(
     }
 
     private fun DocumentSnapshot.toDirectMessageOrNull(): DirectMessage? {
-        val obj = toObject(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: return null
-        val resolvedIsRead = getBoolean("isRead") ?: getBoolean("read") ?: obj.isRead
-        val resolvedSenderReaction = getString("senderReaction") ?: obj.senderReaction
-        val resolvedReceiverReaction = getString("receiverReaction") ?: obj.receiverReaction
-        val resolvedIsEdited = getBoolean("isEdited") ?: obj.isEdited
-        val resolvedEditedAt = getTimestamp("editedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: obj.editedAt
-        val resolvedDeletedForSender = getBoolean("deletedForSender") ?: obj.deletedForSender
-        val resolvedDeletedForReceiver = getBoolean("deletedForReceiver") ?: obj.deletedForReceiver
-        val resolvedDeletedForEveryone = getBoolean("isDeletedForEveryone") ?: obj.isDeletedForEveryone
-        val resolvedGroupId = getString("groupId") ?: obj.groupId
-        val resolvedGroupName = getString("groupName") ?: obj.groupName
-        val resolvedGroupMembers = (get("groupMemberIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.groupMemberIds
-        val resolvedImageUrls = (get("imageUrls") as? List<*>)?.mapNotNull { it as? String } ?: obj.imageUrls
-        val resolvedReadBy = (get("readByUserIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.readByUserIds
-        val resolvedDeletedForUsers = (get("deletedForUserIds") as? List<*>)?.mapNotNull { it as? String } ?: obj.deletedForUserIds
-        val resolvedUserReactions = (get("userReactions") as? Map<*, *>)
-            ?.entries
-            ?.mapNotNull { (k, v) ->
-                val key = k as? String
-                val value = v as? String
-                if (key != null && value != null) key to value else null
-            }
-            ?.toMap() ?: obj.userReactions
-        return obj.copy(
-            id = id,
-            groupId = resolvedGroupId,
-            groupName = resolvedGroupName,
-            groupMemberIds = resolvedGroupMembers,
-            imageUrls = resolvedImageUrls,
-            isRead = resolvedIsRead,
-            readByUserIds = resolvedReadBy,
-            senderReaction = resolvedSenderReaction,
-            receiverReaction = resolvedReceiverReaction,
-            userReactions = resolvedUserReactions,
-            isEdited = resolvedIsEdited,
-            editedAt = resolvedEditedAt,
-            deletedForSender = resolvedDeletedForSender,
-            deletedForReceiver = resolvedDeletedForReceiver,
-            deletedForUserIds = resolvedDeletedForUsers,
-            isDeletedForEveryone = resolvedDeletedForEveryone
-        )
+        return try {
+            val obj = safeToObject(DirectMessage::class.java) ?: return null
+            val resolvedIsRead = runCatching { getBoolean("isRead") ?: getBoolean("read") }.getOrNull() ?: obj.isRead
+            val resolvedSenderReaction = runCatching { getString("senderReaction") }.getOrNull() ?: obj.senderReaction
+            val resolvedReceiverReaction = runCatching { getString("receiverReaction") }.getOrNull() ?: obj.receiverReaction
+            val resolvedIsEdited = runCatching { getBoolean("isEdited") }.getOrNull() ?: obj.isEdited
+            val resolvedEditedAt = runCatching { getTimestamp("editedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }.getOrNull() ?: obj.editedAt
+            val resolvedDeletedForSender = runCatching { getBoolean("deletedForSender") }.getOrNull() ?: obj.deletedForSender
+            val resolvedDeletedForReceiver = runCatching { getBoolean("deletedForReceiver") }.getOrNull() ?: obj.deletedForReceiver
+            val resolvedDeletedForEveryone = runCatching { getBoolean("isDeletedForEveryone") }.getOrNull() ?: obj.isDeletedForEveryone
+            val resolvedGroupId = runCatching { getString("groupId") }.getOrNull() ?: obj.groupId
+            val resolvedGroupName = runCatching { getString("groupName") }.getOrNull() ?: obj.groupName
+            val resolvedGroupMembers = (runCatching { get("groupMemberIds") }.getOrNull() as? List<*>)?.mapNotNull { it as? String } ?: obj.groupMemberIds
+            val resolvedImageUrls = (runCatching { get("imageUrls") }.getOrNull() as? List<*>)?.mapNotNull { it as? String } ?: obj.imageUrls
+            val resolvedReadBy = (runCatching { get("readByUserIds") }.getOrNull() as? List<*>)?.mapNotNull { it as? String } ?: obj.readByUserIds
+            val resolvedDeletedForUsers = (runCatching { get("deletedForUserIds") }.getOrNull() as? List<*>)?.mapNotNull { it as? String } ?: obj.deletedForUserIds
+            val resolvedUserReactions = (runCatching { get("userReactions") }.getOrNull() as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (k, v) ->
+                    val key = k as? String
+                    val value = v as? String
+                    if (key != null && value != null) key to value else null
+                }
+                ?.toMap() ?: obj.userReactions
+            obj.copy(
+                id = id,
+                groupId = resolvedGroupId,
+                groupName = resolvedGroupName,
+                groupMemberIds = resolvedGroupMembers,
+                imageUrls = resolvedImageUrls,
+                isRead = resolvedIsRead,
+                readByUserIds = resolvedReadBy,
+                senderReaction = resolvedSenderReaction,
+                receiverReaction = resolvedReceiverReaction,
+                userReactions = resolvedUserReactions,
+                isEdited = resolvedIsEdited,
+                editedAt = resolvedEditedAt,
+                deletedForSender = resolvedDeletedForSender,
+                deletedForReceiver = resolvedDeletedForReceiver,
+                deletedForUserIds = resolvedDeletedForUsers,
+                isDeletedForEveryone = resolvedDeletedForEveryone
+            )
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     fun observeUserMessages(userId: String): Flow<List<DirectMessage>> {
@@ -2443,7 +2468,7 @@ class QawmiRepository(
             .whereEqualTo("recipientId", userId)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(AppNotification::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(AppNotification::class.java)
             }
             .catch { error ->
                 if (error is Exception) handleFirestoreError(error, OperationType.LIST, notifPath)
@@ -2454,7 +2479,7 @@ class QawmiRepository(
             .whereEqualTo("recipientId", "ALL_USERS")
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(AppNotification::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(AppNotification::class.java)
             }
             .catch { error ->
                 if (error is Exception) handleFirestoreError(error, OperationType.LIST, notifPath)
@@ -2467,7 +2492,7 @@ class QawmiRepository(
             .whereEqualTo("userId", userId)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(NotificationReadReceipt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(NotificationReadReceipt::class.java)
                     .map { it.notificationId.ifBlank { it.id } }
                     .toSet()
             }
@@ -2624,7 +2649,7 @@ class QawmiRepository(
         return db.collection(path)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(TelegramNotificationLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(TelegramNotificationLog::class.java)
                     .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
@@ -2826,7 +2851,7 @@ class QawmiRepository(
         return db.collection(path)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(KhedmotSubmission::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(KhedmotSubmission::class.java)
                     .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
@@ -2840,7 +2865,7 @@ class QawmiRepository(
         return db.collection(path)
             .snapshots()
             .map { snapshot ->
-                snapshot.toObjects(AdminRegistryEntry::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                snapshot.safeToObjects(AdminRegistryEntry::class.java)
                     .sortedByDescending { it.updatedAt ?: Timestamp(0, 0) }
             }
             .catch { error ->
@@ -2949,10 +2974,7 @@ class QawmiRepository(
             .snapshots()
             .map { snapshot ->
                 val result = mutableMapOf<String, Long>()
-                snapshot.toObjects(
-                    NotificationReadReceipt::class.java,
-                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-                ).forEach { receipt ->
+                snapshot.safeToObjects(NotificationReadReceipt::class.java).forEach { receipt ->
                     val key = receipt.notificationId.ifBlank { receipt.id }
                     if (key.startsWith("smoron_")) {
                         val tsMillis = receipt.readAt?.toDate()?.time ?: System.currentTimeMillis()
@@ -3057,42 +3079,7 @@ class QawmiRepository(
     // --- 11. APP AUTO-UPDATE SYSTEM (সর্বশেষ ভার্সন ও ডাউনলোড লিংক পরিচালনা) ---
 
     private fun DocumentSnapshot.toAppReleaseInfoOrNull(): AppReleaseInfo? {
-        if (!exists()) return null
-        val obj = toObject(AppReleaseInfo::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-        val resolvedVersionCode = (getLong("versionCode")?.toInt())
-            ?: (getString("versionCode")?.toIntOrNull())
-            ?: obj?.versionCode
-            ?: 1
-        val resolvedVersionName = getString("versionName")?.takeIf { it.isNotBlank() }
-            ?: obj?.versionName
-            ?: "1.0"
-        val resolvedApkUrl = getString("apkDownloadUrl")?.trim()
-            ?: obj?.apkDownloadUrl?.trim()
-            ?: ""
-        if (resolvedApkUrl.isBlank()) return null
-        val resolvedNotes = getString("releaseNotes") ?: obj?.releaseNotes ?: ""
-        val resolvedSha = getString("commitSha") ?: obj?.commitSha ?: ""
-        val resolvedTag = getString("githubReleaseTag") ?: obj?.githubReleaseTag ?: ""
-        val resolvedMandatory = getBoolean("isMandatory") ?: obj?.isMandatory ?: false
-        val resolvedPublishedBy = getString("publishedBy") ?: obj?.publishedBy ?: "GitHub Actions CI"
-        val resolvedPublishedAt = getTimestamp("publishedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-            ?: obj?.publishedAt
-        val resolvedUpdatedAt = getTimestamp("updatedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-            ?: obj?.updatedAt
-        return AppReleaseInfo(
-            id = id,
-            releaseId = getString("releaseId")?.ifBlank { id } ?: id,
-            versionCode = resolvedVersionCode,
-            versionName = resolvedVersionName,
-            apkDownloadUrl = resolvedApkUrl,
-            releaseNotes = resolvedNotes,
-            commitSha = resolvedSha,
-            githubReleaseTag = resolvedTag,
-            isMandatory = resolvedMandatory,
-            publishedBy = resolvedPublishedBy,
-            publishedAt = resolvedPublishedAt,
-            updatedAt = resolvedUpdatedAt
-        )
+        return AppUpdateManagerHelper.parseReleaseSnapshotSafely(this)
     }
 
     fun observeLatestAppRelease(): Flow<AppReleaseInfo?> {

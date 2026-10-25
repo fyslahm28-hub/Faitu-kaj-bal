@@ -50,7 +50,7 @@ android {
     if (!hasGoogleServicesWebClientId) {
       val fallbackWebClientId = System.getenv("DEFAULT_WEB_CLIENT_ID")?.trim()
         ?.takeIf { it.isNotEmpty() }
-        ?: "unconfigured_web_client_id"
+        ?: "629586749547-ubgo99u8c72n63t1pujt7dlof51mqn5e.apps.googleusercontent.com"
       resValue("string", "default_web_client_id", fallbackWebClientId)
     }
 

@@ -578,44 +578,48 @@ object IslamicDateAndPrayerHelper {
     }
 
     fun getFormattedHijriDate(): String {
-        return try {
+        val hijriMonths = listOf(
+            "মুহাররম", "সফর", "রবিউল আউয়াল", "রবিউস সানি",
+            "জমাদিউল আউয়াল", "জমাদিউস সানি", "রজব", "শাবান",
+            "রমজান", "শাওয়াল", "জিলকদ", "জিলহজ"
+        )
+        try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val hijri = HijrahDate.now()
                 val day = hijri.get(ChronoField.DAY_OF_MONTH)
                 val month = hijri.get(ChronoField.MONTH_OF_YEAR)
                 val year = hijri.get(ChronoField.YEAR)
-                val hijriMonths = listOf(
-                    "মুহাররম", "সফর", "রবিউল আউয়াল", "রবিউস সানি",
-                    "জমাদিউল আউয়াল", "জমাদিউস সানি", "রজব", "শাবান",
-                    "রমজান", "শাওয়াল", "জিলকদ", "জিলহজ"
-                )
                 val monthName = hijriMonths.getOrElse(month - 1) { "রবিউল আউয়াল" }
-                "${toBanglaDigits(day.toString())} $monthName ${toBanglaDigits(year.toString())} হিজরি"
-            } else {
-                "১০ রবিউল আউয়াল ১৪৪৭ হিজরি"
+                return "${toBanglaDigits(day.toString())} $monthName ${toBanglaDigits(year.toString())} হিজরি"
             }
-        } catch (e: Exception) {
+        } catch (_: Throwable) {
+            // Fallback to ICU IslamicCalendar below
+        }
+        return try {
+            val icuCal = android.icu.util.IslamicCalendar()
+            val day = icuCal.get(android.icu.util.Calendar.DAY_OF_MONTH)
+            val monthIndex = icuCal.get(android.icu.util.Calendar.MONTH)
+            val year = icuCal.get(android.icu.util.Calendar.YEAR)
+            val monthName = hijriMonths.getOrElse(monthIndex) { "রবিউল আউয়াল" }
+            "${toBanglaDigits(day.toString())} $monthName ${toBanglaDigits(year.toString())} হিজরি"
+        } catch (_: Throwable) {
             "১০ রবিউল আউয়াল ১৪৪৭ হিজরি"
         }
     }
 
     fun getFormattedGregorianDate(): String {
+        val banglaMonths = listOf(
+            "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
+            "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"
+        )
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val now = LocalDate.now()
-                val day = now.dayOfMonth
-                val monthIndex = now.monthValue - 1
-                val year = now.year
-                val banglaMonths = listOf(
-                    "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
-                    "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"
-                )
-                val monthName = banglaMonths.getOrElse(monthIndex) { "অক্টোবর" }
-                "${toBanglaDigits(day.toString())} $monthName ${toBanglaDigits(year.toString())}"
-            } else {
-                "২১ অক্টোবর ২০২৬"
-            }
-        } catch (e: Exception) {
+            val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
+            val day = cal.get(Calendar.DAY_OF_MONTH)
+            val monthIndex = cal.get(Calendar.MONTH)
+            val year = cal.get(Calendar.YEAR)
+            val monthName = banglaMonths.getOrElse(monthIndex) { "অক্টোবর" }
+            "${toBanglaDigits(day.toString())} $monthName ${toBanglaDigits(year.toString())}"
+        } catch (_: Throwable) {
             "২১ অক্টোবর ২০২৬"
         }
     }

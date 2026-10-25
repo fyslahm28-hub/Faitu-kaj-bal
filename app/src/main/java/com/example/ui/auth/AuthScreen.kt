@@ -89,18 +89,34 @@ import kotlinx.coroutines.tasks.await
 
 fun attemptAutoSignIn(
     context: Context,
-    credentialManager: CredentialManager,
+    credentialManager: CredentialManager?,
     onAuthSuccess: () -> Unit,
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    if (Firebase.auth.currentUser != null) {
-        onAuthSuccess()
+    try {
+        if (Firebase.auth.currentUser != null) {
+            onAuthSuccess()
+            return
+        }
+    } catch (t: Throwable) {
+        Log.w("Auth", "Firebase.auth not ready during attemptAutoSignIn: ${t.message}")
+        onUnauthenticated()
         return
     }
+    if (credentialManager == null) {
+        onUnauthenticated()
+        return
+    }
+    val activity = context as? Activity
+    if (activity == null || activity.isFinishing || activity.isDestroyed) {
+        onUnauthenticated()
+        return
+    }
+
     val clientId = try {
         context.getString(R.string.default_web_client_id).trim()
-    } catch (e: Exception) {
+    } catch (t: Throwable) {
         onUnauthenticated()
         return
     }
@@ -109,17 +125,26 @@ fun attemptAutoSignIn(
         return
     }
 
-    val googleIdOption = GetGoogleIdOption.Builder()
-        .setFilterByAuthorizedAccounts(true)
-        .setServerClientId(clientId)
-        .setAutoSelectEnabled(true)
-        .build()
-
-    val request = GetCredentialRequest.Builder().addCredentialOption(googleIdOption).build()
+    val request = try {
+        val googleIdOption = GetGoogleIdOption.Builder()
+            .setFilterByAuthorizedAccounts(true)
+            .setServerClientId(clientId)
+            .setAutoSelectEnabled(true)
+            .build()
+        GetCredentialRequest.Builder().addCredentialOption(googleIdOption).build()
+    } catch (t: Throwable) {
+        Log.w("Auth", "Failed to build GetGoogleIdOption: ${t.message}")
+        onUnauthenticated()
+        return
+    }
 
     scope.launch {
         try {
-            val result = credentialManager.getCredential(context, request)
+            if (activity.isFinishing || activity.isDestroyed) {
+                onUnauthenticated()
+                return@launch
+            }
+            val result = credentialManager.getCredential(activity, request)
             val credential = result.credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
@@ -129,7 +154,8 @@ fun attemptAutoSignIn(
             } else {
                 onUnauthenticated()
             }
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
+            Log.d("Auth", "Auto sign-in skipped or unavailable: ${t.message}")
             onUnauthenticated()
         }
     }
@@ -137,15 +163,19 @@ fun attemptAutoSignIn(
 
 fun onGoogleSignInClicked(
     context: Context,
-    credentialManager: CredentialManager,
+    credentialManager: CredentialManager?,
     onAuthSuccess: () -> Unit,
     onAuthError: (String) -> Unit,
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
+    if (credentialManager == null) {
+        onAuthError("ডিভাইসে Google ক্রেডেনশিয়াল সার্ভিস প্রস্তুত নয়। অনুগ্রহ করে Google Play Services হালনাগাদ করুন।")
+        return
+    }
     val clientId = try {
         context.getString(R.string.default_web_client_id).trim()
-    } catch (e: Exception) {
+    } catch (t: Throwable) {
         onAuthError("Google Sign-In কনফিগারেশন পাওয়া যায়নি (default_web_client_id অনুপস্থিত)")
         return
     }
@@ -154,8 +184,14 @@ fun onGoogleSignInClicked(
         return
     }
 
-    val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-    val request = GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
+    val request = try {
+        val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+        GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
+    } catch (t: Throwable) {
+        Log.e("Auth", "Failed to build GetSignInWithGoogleOption", t)
+        onAuthError("গুগল সাইন-ইন প্রস্তুত করা যায়নি: ${t.localizedMessage ?: "অপ্রত্যাশিত ত্রুটি"}")
+        return
+    }
 
     scope.launch {
         try {
@@ -173,24 +209,28 @@ fun onGoogleSignInClicked(
         } catch (e: GetCredentialCancellationException) {
             Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
             onAuthCancelled()
-        } catch (e: Exception) {
-            Log.e("Auth", "Google Sign-In failed", e)
-            onAuthError(e.localizedMessage ?: "গুগল সাইন-ইন সম্পন্ন করা যায়নি")
+        } catch (t: Throwable) {
+            Log.e("Auth", "Google Sign-In failed", t)
+            onAuthError(t.localizedMessage ?: "গুগল সাইন-ইন সম্পন্ন করা যায়নি")
         }
     }
 }
 
 fun signOutUser(
-    credentialManager: CredentialManager,
+    credentialManager: CredentialManager?,
     onSignOutComplete: () -> Unit,
     scope: CoroutineScope
 ) {
-    Firebase.auth.signOut()
+    try {
+        Firebase.auth.signOut()
+    } catch (t: Throwable) {
+        Log.e("Auth", "Firebase signOut error", t)
+    }
     scope.launch {
         try {
-            credentialManager.clearCredentialState(ClearCredentialStateRequest())
-        } catch (e: Exception) {
-            Log.e("Auth", "Failed to clear credential state", e)
+            credentialManager?.clearCredentialState(ClearCredentialStateRequest())
+        } catch (t: Throwable) {
+            Log.e("Auth", "Failed to clear credential state", t)
         } finally {
             onSignOutComplete()
         }
@@ -203,19 +243,25 @@ fun AuthScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember { CredentialManager.create(context) }
+    val credentialManager = remember(context) {
+        runCatching { CredentialManager.create(context) }.getOrNull()
+    }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var infoMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
-        attemptAutoSignIn(
-            context = context,
-            credentialManager = credentialManager,
-            onAuthSuccess = onAuthSuccess,
-            onUnauthenticated = {},
-            scope = scope
-        )
+        kotlinx.coroutines.delay(350)
+        val activity = context as? Activity
+        if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
+            attemptAutoSignIn(
+                context = context,
+                credentialManager = credentialManager,
+                onAuthSuccess = onAuthSuccess,
+                onUnauthenticated = {},
+                scope = scope
+            )
+        }
     }
 
     Column(

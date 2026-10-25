@@ -125,7 +125,9 @@ fun MainAppScaffold(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember { CredentialManager.create(context) }
+    val credentialManager = remember(context) {
+        runCatching { CredentialManager.create(context) }.getOrNull()
+    }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -138,7 +140,9 @@ fun MainAppScaffold(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             !QawmiNotificationHelper.hasNotificationPermission(context)
         ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            runCatching {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
         }
     }
 
@@ -1207,16 +1211,20 @@ fun MainAppScaffold(
                     }
 
                     // Auto-Update Prompt Overlay (“নতুন আপডেট এসেছে” বার্তাসহ “আপডেট নিন” ও “পরে করুন” বাটন)
+                    val persistedCooldownVersion = remember(context, dismissedUpdateVersionCode) {
+                        dismissedUpdateVersionCode
+                            ?: AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
+                    }
                     val shouldShowUpdatePrompt = remember(
                         installedVersion,
                         latestAppRelease,
-                        dismissedUpdateVersionCode
+                        persistedCooldownVersion
                     ) {
                         AppUpdateManagerHelper.isUpdateAvailable(
                             installedVersionCode = installedVersion.versionCode,
                             installedVersionName = installedVersion.versionName,
                             remoteRelease = latestAppRelease,
-                            dismissedVersionCode = dismissedUpdateVersionCode
+                            dismissedVersionCode = persistedCooldownVersion
                         )
                     }
                     if (shouldShowUpdatePrompt && latestAppRelease != null) {
@@ -1225,7 +1233,9 @@ fun MainAppScaffold(
                             installedVersionName = installedVersion.versionName,
                             releaseInfo = latestAppRelease!!,
                             onDismissLater = {
-                                viewModel.dismissCurrentUpdatePrompt(latestAppRelease!!.versionCode)
+                                val ver = latestAppRelease!!.versionCode
+                                AppUpdateManagerHelper.saveDismissedUpdatePrompt(context, ver)
+                                viewModel.dismissCurrentUpdatePrompt(ver)
                             }
                         )
                     }

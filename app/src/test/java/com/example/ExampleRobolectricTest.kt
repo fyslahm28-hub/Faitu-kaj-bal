@@ -1799,5 +1799,54 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("publish_attach_media_btn").performScrollTo().assertIsDisplayed()
     }
+
+    @Test
+    fun `MainActivity launches cleanly without crashing and QawmiNotificationHelper posts startup notifications safely`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        org.robolectric.Shadows.shadowOf(context as android.app.Application)
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+
+        // 1. Verify ensureFirebaseInitialized initializes FirebaseApp safely without throwing
+        val firebaseReady = ensureFirebaseInitialized(context)
+        assertTrue("Expected ensureFirebaseInitialized to succeed", firebaseReady)
+
+        // 2. Verify QawmiNotificationHelper posts daily Ajker Smoron and unread notifications on startup without crashing on AdaptiveIcon
+        com.example.ui.util.QawmiNotificationHelper.ensureChannelCreated(context)
+        val dateKey = com.example.ui.util.AjkerSmoronHelper.currentBangladeshDateKey()
+        val reminder = com.example.ui.util.AjkerSmoronHelper.syncFromServerReceipts(
+            context = context,
+            userId = "user_startup_test",
+            receiptTimestamps = emptyMap(),
+            dateKey = dateKey
+        )
+        val smoronDelivered = com.example.ui.util.QawmiNotificationHelper.deliverDailyAjkerSmoronPushNotification(
+            context = context,
+            userId = "user_startup_test",
+            reminder = reminder,
+            dateKey = dateKey
+        )
+        assertTrue("Expected startup Ajker Smoron notification delivery to succeed without crashing", smoronDelivered)
+
+        // 3. Verify AppUpdateManagerHelper cooldown persistence ("পরে করুন") stores and retrieves active cooldown version
+        com.example.ui.util.AppUpdateManagerHelper.clearDismissedUpdatePrompt(context)
+        assertNull(com.example.ui.util.AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context))
+        com.example.ui.util.AppUpdateManagerHelper.saveDismissedUpdatePrompt(context, 108)
+        assertEquals(108, com.example.ui.util.AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context))
+        com.example.ui.util.AppUpdateManagerHelper.clearDismissedUpdatePrompt(context)
+
+        // 4. Verify AppNavigation (MainActivity's root startup composable) renders cleanly without crashing
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                AppNavigation(
+                    openNotificationsInitially = false,
+                    deepLink = null,
+                    onDeepLinkConsumed = {}
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("কওমি কর্মসংস্থান").assertIsDisplayed()
+    }
 }
+
 

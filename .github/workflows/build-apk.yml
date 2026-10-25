@@ -69,12 +69,21 @@ jobs:
           DEFAULT_WEB_CLIENT_ID_SECRET: ${{ secrets.DEFAULT_WEB_CLIENT_ID }}
         run: |
           if [ -n "${GOOGLE_SERVICES_JSON_SECRET}" ]; then
+            TEMP_GS_JSON="$(mktemp)"
             if echo "${GOOGLE_SERVICES_JSON_SECRET}" | grep -q '^[[:space:]]*{'; then
-              printf '%s\n' "${GOOGLE_SERVICES_JSON_SECRET}" > app/google-services.json
+              printf '%s\n' "${GOOGLE_SERVICES_JSON_SECRET}" > "${TEMP_GS_JSON}"
             else
-              echo "${GOOGLE_SERVICES_JSON_SECRET}" | tr -d '[:space:]' | base64 -d > app/google-services.json
+              echo "${GOOGLE_SERVICES_JSON_SECRET}" | tr -d '[:space:]' | base64 -d > "${TEMP_GS_JSON}" || true
             fi
-            echo "Prepared app/google-services.json from GOOGLE_SERVICES_JSON secret."
+            if grep -q '"com.aistudio.qawmikormo.khedmt"' "${TEMP_GS_JSON}" && grep -q '"gen-lang-client-0048059944"' "${TEMP_GS_JSON}"; then
+              cp "${TEMP_GS_JSON}" app/google-services.json
+              echo "Prepared validated app/google-services.json from GOOGLE_SERVICES_JSON secret."
+            elif [ -f "app/google-services.json" ]; then
+              echo "GOOGLE_SERVICES_JSON secret did not match package com.aistudio.qawmikormo.khedmt; keeping valid repository app/google-services.json."
+            else
+              cp "${TEMP_GS_JSON}" app/google-services.json
+            fi
+            rm -f "${TEMP_GS_JSON}"
           elif [ -f "app/google-services.json" ]; then
             echo "Using existing app/google-services.json in repository."
           else
@@ -159,11 +168,16 @@ jobs:
           GOOGLE_SERVICES_JSON_SECRET: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           if [ -n "${GOOGLE_SERVICES_JSON_SECRET}" ]; then
+            TEMP_GS_JSON="$(mktemp)"
             if echo "${GOOGLE_SERVICES_JSON_SECRET}" | grep -q '^[[:space:]]*{'; then
-              printf '%s\n' "${GOOGLE_SERVICES_JSON_SECRET}" > app/google-services.json
+              printf '%s\n' "${GOOGLE_SERVICES_JSON_SECRET}" > "${TEMP_GS_JSON}"
             else
-              echo "${GOOGLE_SERVICES_JSON_SECRET}" | tr -d '[:space:]' | base64 -d > app/google-services.json
+              echo "${GOOGLE_SERVICES_JSON_SECRET}" | tr -d '[:space:]' | base64 -d > "${TEMP_GS_JSON}" || true
             fi
+            if grep -q '"gen-lang-client-0048059944"' "${TEMP_GS_JSON}"; then
+              cp "${TEMP_GS_JSON}" app/google-services.json
+            fi
+            rm -f "${TEMP_GS_JSON}"
           fi
 
       - name: Update & Verify Latest Version in Firebase Firestore (/app_releases/latest)

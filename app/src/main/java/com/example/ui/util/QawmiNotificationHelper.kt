@@ -279,7 +279,7 @@ object QawmiNotificationHelper {
     private fun cancelConversationNotificationInternal(context: Context, conversationKey: String) {
         try {
             NotificationManagerCompat.from(context).cancel(conversationNotificationId(conversationKey))
-        } catch (_: SecurityException) {
+        } catch (_: Throwable) {
         }
     }
 
@@ -294,132 +294,131 @@ object QawmiNotificationHelper {
         chatGroups: List<ChatGroup>
     ) {
         if (!hasNotificationPermission(context) || unreadMessages.isEmpty()) return
-        val latestMsg = unreadMessages.maxByOrNull { it.createdAt?.seconds ?: 0L } ?: unreadMessages.first()
-        val isGroup = conversationKey.startsWith("GROUP:", ignoreCase = true) || latestMsg.groupId.isNotBlank()
-        val groupId = if (latestMsg.groupId.isNotBlank()) latestMsg.groupId else conversationKey.substringAfter(":")
-        val groupObj = if (isGroup) chatGroups.firstOrNull { it.id == groupId } else null
-
-        val partnerTitle = if (isGroup) {
-            groupObj?.name?.takeIf { it.isNotBlank() }
-                ?: latestMsg.groupName.takeIf { it.isNotBlank() }
-                ?: latestMsg.receiverName.takeIf { it.isNotBlank() }
-                ?: "গ্রুপ কথোপকথন"
-        } else {
-            latestMsg.senderName.ifBlank { "সম্মানিত দ্বীনি ভাই" }
-        }
-
-        val hidePreview = isMessagePreviewHidden(context)
-        val singlePreview = when {
-            hidePreview -> "নতুন পয়গাম এসেছে • দেখতে ট্যাপ করুন"
-            latestMsg.imageUrls.isNotEmpty() && latestMsg.body.startsWith("📷") -> {
-                if (isGroup) "${latestMsg.senderName}: 📷 ছবি পাঠিয়েছেন" else "📷 ছবি পাঠিয়েছেন"
-            }
-            else -> {
-                val snippet = latestMsg.body.trim().ifBlank { "নতুন পয়গাম" }
-                if (isGroup) "${latestMsg.senderName}: $snippet" else snippet
-            }
-        }
-
-        val unreadCount = unreadMessages.size
-        val contentTitle = if (unreadCount > 1) {
-            "$partnerTitle (${toBanglaDigits(unreadCount)}টি অপঠিত পয়গাম)"
-        } else {
-            partnerTitle
-        }
-
-        val expandedLines = if (hidePreview) {
-            "আপনার ইনবক্সে ${toBanglaDigits(unreadCount)}টি নতুন অপঠিত পয়গাম রয়েছে।"
-        } else {
-            unreadMessages
-                .sortedBy { it.createdAt?.seconds ?: 0L }
-                .takeLast(4)
-                .joinToString("\n") { msg ->
-                    val text = if (msg.imageUrls.isNotEmpty() && msg.body.startsWith("📷")) {
-                        "📷 ছবি পাঠিয়েছেন"
-                    } else {
-                        msg.body.trim()
-                    }
-                    if (isGroup) "${msg.senderName}: $text" else text
-                }
-        }
-
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(EXTRA_OPEN_CHAT_PARTNER_ID, conversationKey)
-            putExtra(EXTRA_OPEN_CHAT_PARTNER_NAME, partnerTitle)
-        }
-        val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-        val notificationId = conversationNotificationId(conversationKey)
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            notificationId,
-            intent,
-            pendingIntentFlags
-        )
-
-        val builder = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(contentTitle)
-            .setContentText(singlePreview)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedLines))
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setNumber(unreadCount)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-
         try {
+            val latestMsg = unreadMessages.maxByOrNull { it.createdAt?.seconds ?: 0L } ?: unreadMessages.first()
+            val isGroup = conversationKey.startsWith("GROUP:", ignoreCase = true) || latestMsg.groupId.isNotBlank()
+            val groupId = if (latestMsg.groupId.isNotBlank()) latestMsg.groupId else conversationKey.substringAfter(":")
+            val groupObj = if (isGroup) chatGroups.firstOrNull { it.id == groupId } else null
+
+            val partnerTitle = if (isGroup) {
+                groupObj?.name?.takeIf { it.isNotBlank() }
+                    ?: latestMsg.groupName.takeIf { it.isNotBlank() }
+                    ?: latestMsg.receiverName.takeIf { it.isNotBlank() }
+                    ?: "গ্রুপ কথোপকথন"
+            } else {
+                latestMsg.senderName.ifBlank { "সম্মানিত দ্বীনি ভাই" }
+            }
+
+            val hidePreview = isMessagePreviewHidden(context)
+            val singlePreview = when {
+                hidePreview -> "নতুন পয়গাম এসেছে • দেখতে ট্যাপ করুন"
+                latestMsg.imageUrls.isNotEmpty() && latestMsg.body.startsWith("📷") -> {
+                    if (isGroup) "${latestMsg.senderName}: 📷 ছবি পাঠিয়েছেন" else "📷 ছবি পাঠিয়েছেন"
+                }
+                else -> {
+                    val snippet = latestMsg.body.trim().ifBlank { "নতুন পয়গাম" }
+                    if (isGroup) "${latestMsg.senderName}: $snippet" else snippet
+                }
+            }
+
+            val unreadCount = unreadMessages.size
+            val contentTitle = if (unreadCount > 1) {
+                "$partnerTitle (${toBanglaDigits(unreadCount)}টি অপঠিত পয়গাম)"
+            } else {
+                partnerTitle
+            }
+
+            val expandedLines = if (hidePreview) {
+                "আপনার ইনবক্সে ${toBanglaDigits(unreadCount)}টি নতুন অপঠিত পয়গাম রয়েছে।"
+            } else {
+                unreadMessages
+                    .sortedBy { it.createdAt?.seconds ?: 0L }
+                    .takeLast(4)
+                    .joinToString("\n") { msg ->
+                        val text = if (msg.imageUrls.isNotEmpty() && msg.body.startsWith("📷")) {
+                            "📷 ছবি পাঠিয়েছেন"
+                        } else {
+                            msg.body.trim()
+                        }
+                        if (isGroup) "${msg.senderName}: $text" else text
+                    }
+            }
+
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_OPEN_CHAT_PARTNER_ID, conversationKey)
+                putExtra(EXTRA_OPEN_CHAT_PARTNER_NAME, partnerTitle)
+            }
+            val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val notificationId = conversationNotificationId(conversationKey)
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                notificationId,
+                intent,
+                pendingIntentFlags
+            )
+
+            val builder = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_qawmi_notification)
+                .setContentTitle(contentTitle)
+                .setContentText(singlePreview)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(expandedLines))
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setNumber(unreadCount)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+
             NotificationManagerCompat.from(context).notify(notificationId, builder.build())
-        } catch (_: SecurityException) {
+        } catch (_: Throwable) {
         }
     }
 
     private fun showSystemNotification(context: Context, notification: AppNotification) {
         if (!hasNotificationPermission(context)) return
-
-        val isSmoronNotif = notification.referenceId.startsWith("ajker_smoron", ignoreCase = true) ||
-            notification.title.contains("আজকের স্মরণ")
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            if (isSmoronNotif) {
-                putExtra(EXTRA_OPEN_AJKER_SMORON, true)
-                putExtra(
-                    EXTRA_AJKER_SMORON_ID,
-                    notification.referenceId.removePrefix("ajker_smoron:")
-                )
-            } else {
-                putExtra(EXTRA_OPEN_NOTIFICATIONS, true)
-            }
-        }
-        val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            notification.id.hashCode(),
-            intent,
-            pendingIntentFlags
-        )
-
-        val builder = NotificationCompat.Builder(context, if (isSmoronNotif) SMORON_CHANNEL_ID else CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(notification.title)
-            .setContentText(notification.message)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(notification.message))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-
         try {
+            val isSmoronNotif = notification.referenceId.startsWith("ajker_smoron", ignoreCase = true) ||
+                notification.title.contains("আজকের স্মরণ")
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                if (isSmoronNotif) {
+                    putExtra(EXTRA_OPEN_AJKER_SMORON, true)
+                    putExtra(
+                        EXTRA_AJKER_SMORON_ID,
+                        notification.referenceId.removePrefix("ajker_smoron:")
+                    )
+                } else {
+                    putExtra(EXTRA_OPEN_NOTIFICATIONS, true)
+                }
+            }
+            val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                notification.id.hashCode(),
+                intent,
+                pendingIntentFlags
+            )
+
+            val builder = NotificationCompat.Builder(context, if (isSmoronNotif) SMORON_CHANNEL_ID else CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_qawmi_notification)
+                .setContentTitle(notification.title)
+                .setContentText(notification.message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(notification.message))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+
             NotificationManagerCompat.from(context).notify(notification.id.hashCode(), builder.build())
-        } catch (_: SecurityException) {
-            // Permission may have been revoked at runtime
+        } catch (_: Throwable) {
+            // Permission may have been revoked or icon rejected by OEM SystemUI
         }
     }
 
@@ -440,46 +439,46 @@ object QawmiNotificationHelper {
             return false
         }
 
-        ensureChannelCreated(context)
+        return try {
+            ensureChannelCreated(context)
 
-        val intent = buildAjkerSmoronDeepLinkIntent(context, reminder.id)
-        val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            SMORON_NOTIFICATION_ID,
-            intent,
-            pendingIntentFlags
-        )
+            val intent = buildAjkerSmoronDeepLinkIntent(context, reminder.id)
+            val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                SMORON_NOTIFICATION_ID,
+                intent,
+                pendingIntentFlags
+            )
 
-        val title = "আজকের স্মরণ • ${reminder.categoryBangla}"
-        val expandedText = buildString {
-            append(reminder.messageBangla)
-            if (reminder.quoteBangla.isNotBlank()) {
-                append("\n\n")
-                append(reminder.quoteBangla)
-                if (reminder.sourceReferenceBangla.isNotBlank()) {
-                    append(" — (")
-                    append(reminder.sourceReferenceBangla)
-                    append(")")
+            val title = "আজকের স্মরণ • ${reminder.categoryBangla}"
+            val expandedText = buildString {
+                append(reminder.messageBangla)
+                if (reminder.quoteBangla.isNotBlank()) {
+                    append("\n\n")
+                    append(reminder.quoteBangla)
+                    if (reminder.sourceReferenceBangla.isNotBlank()) {
+                        append(" — (")
+                        append(reminder.sourceReferenceBangla)
+                        append(")")
+                    }
                 }
             }
-        }
 
-        val builder = NotificationCompat.Builder(context, SMORON_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(reminder.messageBangla)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
-            .setCategory(NotificationCompat.CATEGORY_REMINDER)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
+            val builder = NotificationCompat.Builder(context, SMORON_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_qawmi_notification)
+                .setContentTitle(title)
+                .setContentText(reminder.messageBangla)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
 
-        return try {
             NotificationManagerCompat.from(context).notify(SMORON_NOTIFICATION_ID, builder.build())
             AjkerSmoronHelper.recordPushSentForDate(
                 context = context,
@@ -488,7 +487,7 @@ object QawmiNotificationHelper {
                 reminderId = reminder.id
             )
             true
-        } catch (_: SecurityException) {
+        } catch (_: Throwable) {
             false
         }
     }
