@@ -60,7 +60,28 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      - name: Configure Firebase google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_SECRET: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          DEFAULT_WEB_CLIENT_ID_SECRET: ${{ secrets.DEFAULT_WEB_CLIENT_ID }}
+        run: |
+          if [ -n "${GOOGLE_SERVICES_JSON_SECRET}" ]; then
+            if echo "${GOOGLE_SERVICES_JSON_SECRET}" | grep -q '^[[:space:]]*{'; then
+              printf '%s\n' "${GOOGLE_SERVICES_JSON_SECRET}" > app/google-services.json
+            else
+              echo "${GOOGLE_SERVICES_JSON_SECRET}" | tr -d '[:space:]' | base64 -d > app/google-services.json
+            fi
+            echo "Prepared app/google-services.json from GOOGLE_SERVICES_JSON secret."
+          elif [ -f "app/google-services.json" ]; then
+            echo "Using existing app/google-services.json in repository."
+          else
+            echo "No GOOGLE_SERVICES_JSON secret or file found; Gradle fallback resValue for default_web_client_id will be used."
+          fi
+
       - name: Build Debug APK with Release Version
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          DEFAULT_WEB_CLIENT_ID: ${{ secrets.DEFAULT_WEB_CLIENT_ID }}
         run: |
           gradle assembleDebug \
             -PversionCode=${{ steps.version_meta.outputs.version_code }} \

@@ -24,11 +24,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LockReset
-import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -99,8 +99,12 @@ fun attemptAutoSignIn(
         return
     }
     val clientId = try {
-        context.getString(R.string.default_web_client_id)
+        context.getString(R.string.default_web_client_id).trim()
     } catch (e: Exception) {
+        onUnauthenticated()
+        return
+    }
+    if (clientId.isBlank() || clientId == "unconfigured_web_client_id") {
         onUnauthenticated()
         return
     }
@@ -140,8 +144,12 @@ fun onGoogleSignInClicked(
     onAuthCancelled: () -> Unit = {}
 ) {
     val clientId = try {
-        context.getString(R.string.default_web_client_id)
+        context.getString(R.string.default_web_client_id).trim()
     } catch (e: Exception) {
+        onAuthError("Google Sign-In কনফিগারেশন পাওয়া যায়নি (default_web_client_id অনুপস্থিত)")
+        return
+    }
+    if (clientId.isBlank() || clientId == "unconfigured_web_client_id") {
         onAuthError("Google Sign-In কনফিগারেশন পাওয়া যায়নি (default_web_client_id অনুপস্থিত)")
         return
     }
@@ -432,7 +440,7 @@ fun AuthScreen(
                             Text("প্রবেশ করা হচ্ছে...")
                         } else {
                             Icon(
-                                imageVector = Icons.Default.Login,
+                                imageVector = Icons.AutoMirrored.Filled.Login,
                                 contentDescription = null,
                                 tint = QawmiGold
                             )

@@ -1,5 +1,6 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 import java.time.Duration
+import java.util.Base64
 
 plugins {
   alias(libs.plugins.android.application)
@@ -8,6 +9,32 @@ plugins {
   alias(libs.plugins.secrets)
   alias(libs.plugins.google.services)
 }
+
+// Materialize app/google-services.json from CI environment variables (raw JSON or Base64) if not already on disk.
+val googleServicesJsonFile = project.file("google-services.json")
+if (!googleServicesJsonFile.exists()) {
+  val envGoogleServices = System.getenv("GOOGLE_SERVICES_JSON")?.trim()
+    ?: System.getenv("GOOGLE_SERVICES_JSON_BASE64")?.trim()
+  if (!envGoogleServices.isNullOrEmpty()) {
+    val resolvedJson = if (envGoogleServices.startsWith("{")) {
+      envGoogleServices
+    } else {
+      runCatching {
+        String(Base64.getDecoder().decode(envGoogleServices.replace("\\s".toRegex(), "")), Charsets.UTF_8)
+      }.getOrNull() ?: envGoogleServices
+    }
+    if (resolvedJson.trimStart().startsWith("{")) {
+      googleServicesJsonFile.writeText(resolvedJson)
+    }
+  }
+}
+
+// Verify whether app/google-services.json will cause Google Services Gradle Plugin to generate R.string.default_web_client_id.
+val hasGoogleServicesWebClientId: Boolean = googleServicesJsonFile.exists() && runCatching {
+  val content = googleServicesJsonFile.readText()
+  content.contains("\"com.aistudio.qawmikormo.khedmt\"") &&
+    Regex("\"client_type\"\\s*:\\s*3").containsMatchIn(content)
+}.getOrDefault(false)
 
 android {
   namespace = "com.example"
@@ -19,6 +46,13 @@ android {
     targetSdk = 36
     versionCode = (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 1
     versionName = (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "1.0"
+
+    if (!hasGoogleServicesWebClientId) {
+      val fallbackWebClientId = System.getenv("DEFAULT_WEB_CLIENT_ID")?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: "unconfigured_web_client_id"
+      resValue("string", "default_web_client_id", fallbackWebClientId)
+    }
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
