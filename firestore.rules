@@ -109,7 +109,7 @@ service cloud.firestore {
     function isValidBookmarkItem(data) {
       return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
-             data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION') &&
+             data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION' || data.postType == 'GENERAL_POST') &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
              data.district is string && data.district.size() <= 100 &&
              data.designation is string && data.designation.size() <= 150 &&
@@ -130,12 +130,12 @@ service cloud.firestore {
       return data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
              (!('authorPhotoUrl' in data) || (data.authorPhotoUrl is string && data.authorPhotoUrl.size() <= 250000)) &&
-             data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION') &&
+             data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION' || data.postType == 'GENERAL_POST') &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
-             data.district is string && data.district.size() >= 1 && data.district.size() <= 100 &&
+             data.district is string && data.district.size() <= 100 && (data.postType == 'GENERAL_POST' || data.district.size() >= 1) &&
              data.upazilaOrLocation is string && data.upazilaOrLocation.size() <= 200 &&
-             data.designation is string && data.designation.size() >= 1 && data.designation.size() <= 150 &&
-             data.qualification is string && data.qualification.size() >= 1 && data.qualification.size() <= 200 &&
+             data.designation is string && data.designation.size() <= 150 && (data.postType == 'GENERAL_POST' || data.designation.size() >= 1) &&
+             data.qualification is string && data.qualification.size() <= 200 && (data.postType == 'GENERAL_POST' || data.qualification.size() >= 1) &&
              data.salaryOrExperience is string && data.salaryOrExperience.size() <= 150 &&
              data.deadlineOrPreferredDistricts is string && data.deadlineOrPreferredDistricts.size() <= 250 &&
              data.description is string && data.description.size() <= 2000 &&
@@ -143,8 +143,36 @@ service cloud.firestore {
              data.madrasaId is string && data.madrasaId.size() <= 128 &&
              data.isVerifiedMadrasa is bool &&
              (!('isBoosted' in data) || data.isBoosted is bool) &&
+             (!('khedmotCategories' in data) || (data.khedmotCategories is list && data.khedmotCategories.size() <= 20)) &&
+             (!('customCategory' in data) || (data.customCategory is string && data.customCategory.size() <= 150)) &&
+             (!('imageUrls' in data) || (data.imageUrls is list && data.imageUrls.size() <= 5)) &&
+             (!('userReactions' in data) || (data.userReactions is map && data.userReactions.size() <= 500)) &&
+             (!('userReactionNames' in data) || (data.userReactionNames is map && data.userReactionNames.size() <= 500)) &&
+             (!('commentCount' in data) || (data.commentCount is int && data.commentCount >= 0 && data.commentCount <= 100000)) &&
+             (!('shareCount' in data) || (data.shareCount is int && data.shareCount >= 0 && data.shareCount <= 100000)) &&
+             (!('sharedPostId' in data) || (data.sharedPostId is string && data.sharedPostId.size() <= 128)) &&
+             (!('sharedAuthorId' in data) || (data.sharedAuthorId is string && data.sharedAuthorId.size() <= 128)) &&
+             (!('sharedAuthorName' in data) || (data.sharedAuthorName is string && data.sharedAuthorName.size() <= 200)) &&
+             (!('sharedTitle' in data) || (data.sharedTitle is string && data.sharedTitle.size() <= 200)) &&
+             (!('sharedDescription' in data) || (data.sharedDescription is string && data.sharedDescription.size() <= 2000)) &&
+             (!('sharedPostType' in data) || (data.sharedPostType is string && data.sharedPostType.size() <= 50)) &&
+             (!('isEdited' in data) || data.isEdited is bool) &&
              data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'ARCHIVED') &&
              data.approvalStatus is string && (data.approvalStatus == 'APPROVED' || data.approvalStatus == 'PENDING' || data.approvalStatus == 'REJECTED') &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidFeedComment(data) {
+      return data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
+             (!('authorPhotoUrl' in data) || (data.authorPhotoUrl is string && data.authorPhotoUrl.size() <= 250000)) &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 1500 &&
+             (!('parentCommentId' in data) || (data.parentCommentId is string && data.parentCommentId.size() <= 128)) &&
+             (!('replyToAuthorName' in data) || (data.replyToAuthorName is string && data.replyToAuthorName.size() <= 200)) &&
+             (!('isEdited' in data) || data.isEdited is bool) &&
+             data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'HIDDEN') &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
     }
@@ -194,7 +222,7 @@ service cloud.firestore {
     }
 
     function isValidChatGroup(data) {
-      return data.groupId is string && data.groupId.size() >= 1 && data.groupId.size() <= 128 &&
+      return (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 128)) &&
              data.name is string && data.name.size() >= 1 && data.name.size() <= 150 &&
              (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 250000)) &&
              data.creatorId is string && data.creatorId.size() >= 1 && data.creatorId.size() <= 128 &&
@@ -407,7 +435,7 @@ service cloud.firestore {
       }
     }
 
-    // Feed Posts (নিয়োগ বিজ্ঞপ্তি ও চাকরিপ্রার্থীর আবেদন, Boosted সহ)
+    // Feed Posts (নিয়োগ বিজ্ঞপ্তি, চাকরিপ্রার্থীর আবেদন ও ইসলামিক ফিড পোস্ট)
     match /feed_posts/{postId} {
       allow get: if isSignedIn() && isValidId(postId) && (
         existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
@@ -432,35 +460,97 @@ service cloud.firestore {
                          'upazilaOrLocation', 'designation', 'qualification',
                          'salaryOrExperience', 'deadlineOrPreferredDistricts',
                          'description', 'contactNumber', 'madrasaId',
-                         'isVerifiedMadrasa', 'isBoosted', 'visibility', 'approvalStatus',
+                         'isVerifiedMadrasa', 'isBoosted',
+                         'khedmotCategories', 'customCategory', 'imageUrls',
+                         'userReactions', 'userReactionNames', 'commentCount', 'shareCount',
+                         'sharedPostId', 'sharedAuthorId', 'sharedAuthorName',
+                         'sharedTitle', 'sharedDescription', 'sharedPostType', 'isEdited',
+                         'visibility', 'approvalStatus',
                          'createdAt', 'updatedAt'
                        ]) &&
                        (!('isBoosted' in incoming()) || incoming().isBoosted == false || isAdmin()) &&
                        isValidFeedPost(incoming());
 
+      function canUpdateFeedPost(inc, ext) {
+        let diffKeys = inc.diff(ext).affectedKeys();
+        let boostUnchanged = (!('isBoosted' in inc) || ('isBoosted' in ext && inc.isBoosted == ext.isBoosted) || (!('isBoosted' in ext) && inc.isBoosted == false));
+        let statusUnchanged = inc.approvalStatus == ext.approvalStatus && inc.isVerifiedMadrasa == ext.isVerifiedMadrasa && boostUnchanged;
+        return inc.authorId == ext.authorId &&
+               inc.postType == ext.postType &&
+               inc.createdAt == ext.createdAt && (
+                 (request.auth.uid == ext.authorId &&
+                  statusUnchanged &&
+                  diffKeys.hasOnly([
+                    'authorName', 'authorPhotoUrl', 'title', 'district', 'upazilaOrLocation',
+                    'designation', 'qualification', 'salaryOrExperience',
+                    'deadlineOrPreferredDistricts', 'description',
+                    'contactNumber', 'khedmotCategories', 'customCategory',
+                    'imageUrls', 'isEdited', 'visibility', 'updatedAt'
+                  ])) ||
+                 (statusUnchanged &&
+                  diffKeys.hasOnly([
+                    'userReactions', 'userReactionNames', 'commentCount', 'shareCount', 'updatedAt'
+                  ]) &&
+                  (!('userReactions' in diffKeys) ||
+                   inc.userReactions.diff(ext.get('userReactions', {})).affectedKeys().hasOnly([request.auth.uid])) &&
+                  (!('userReactionNames' in diffKeys) ||
+                   inc.userReactionNames.diff(ext.get('userReactionNames', {})).affectedKeys().hasOnly([request.auth.uid]))) ||
+                 (isAdmin() &&
+                  diffKeys.hasOnly([
+                    'approvalStatus', 'isVerifiedMadrasa', 'isBoosted', 'visibility', 'updatedAt'
+                  ]))
+               );
+      }
+
       allow update: if isSignedIn() &&
                        isValidId(postId) &&
                        isValidFeedPost(incoming()) &&
+                       canUpdateFeedPost(incoming(), existing());
+
+      allow delete: if isSignedIn() && isValidId(postId) && (existing().authorId == request.auth.uid || isAdmin());
+    }
+
+    // Feed Post Comments & Replies (কমেন্ট ও রিপ্লাই)
+    match /post_comments/{commentId} {
+      allow get: if isSignedIn() && isValidId(commentId) && (
+        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(commentId) &&
+                       incoming().authorId == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'postId', 'authorId', 'authorName', 'text',
+                         'visibility', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'postId', 'authorId', 'authorName', 'authorPhotoUrl',
+                         'text', 'parentCommentId', 'replyToAuthorName',
+                         'isEdited', 'visibility', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidFeedComment(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(commentId) &&
+                       isValidFeedComment(incoming()) &&
+                       incoming().postId == existing().postId &&
                        incoming().authorId == existing().authorId &&
-                       incoming().postType == existing().postType &&
                        incoming().createdAt == existing().createdAt && (
                          (request.auth.uid == existing().authorId &&
-                          incoming().approvalStatus == existing().approvalStatus &&
-                          incoming().isVerifiedMadrasa == existing().isVerifiedMadrasa &&
-                          (!('isBoosted' in incoming()) || ('isBoosted' in existing() && incoming().isBoosted == existing().isBoosted) || (!('isBoosted' in existing()) && incoming().isBoosted == false)) &&
+                          incoming().visibility == existing().visibility &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'authorName', 'authorPhotoUrl', 'title', 'district', 'upazilaOrLocation',
-                            'designation', 'qualification', 'salaryOrExperience',
-                            'deadlineOrPreferredDistricts', 'description',
-                            'contactNumber', 'visibility', 'updatedAt'
+                            'authorName', 'authorPhotoUrl', 'text', 'isEdited', 'updatedAt'
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'approvalStatus', 'isVerifiedMadrasa', 'isBoosted', 'visibility', 'updatedAt'
+                            'visibility', 'updatedAt'
                           ]))
                        );
 
-      allow delete: if isSignedIn() && isValidId(postId) && (existing().authorId == request.auth.uid || isAdmin());
+      allow delete: if isSignedIn() && isValidId(commentId) && (existing().authorId == request.auth.uid || isAdmin());
     }
 
     // Madrasas Directory (মাদরাসা ও যাচাইকৃত মাদরাসা)
@@ -555,21 +645,21 @@ service cloud.firestore {
     match /chat_groups/{groupId} {
       allow get: if isSignedIn() && isValidId(groupId) && (
         existing().creatorId == request.auth.uid ||
-        (existing().memberIds is list && request.auth.uid in existing().memberIds)
+        request.auth.uid in existing().memberIds
       );
       allow list: if isSignedIn() && (
         existing().creatorId == request.auth.uid ||
-        (existing().memberIds is list && request.auth.uid in existing().memberIds)
+        request.auth.uid in existing().memberIds
       );
 
       allow create: if isSignedIn() &&
                        isValidId(groupId) &&
-                       incoming().groupId == groupId &&
+                       (!('groupId' in incoming()) || incoming().groupId == groupId) &&
                        incoming().creatorId == request.auth.uid &&
                        incoming().memberIds is list &&
                        (request.auth.uid in incoming().memberIds) &&
                        incoming().keys().hasAll([
-                         'groupId', 'name', 'creatorId', 'creatorName',
+                         'name', 'creatorId', 'creatorName',
                          'memberIds', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
@@ -582,11 +672,11 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(groupId) &&
                        isValidChatGroup(incoming()) &&
-                       incoming().groupId == existing().groupId &&
+                       (!('groupId' in incoming()) || !('groupId' in existing()) || incoming().groupId == existing().groupId) &&
                        incoming().creatorId == existing().creatorId &&
                        incoming().createdAt == existing().createdAt &&
                        (existing().creatorId == request.auth.uid ||
-                        (existing().memberIds is list && request.auth.uid in existing().memberIds)) &&
+                        request.auth.uid in existing().memberIds) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
                          'name', 'photoUrl', 'memberIds', 'memberNames',
                          'memberPhotos', 'themeSpec', 'updatedAt'
@@ -600,7 +690,7 @@ service cloud.firestore {
       function isMessageParticipant(data) {
         return data.senderId == request.auth.uid ||
                data.receiverId == request.auth.uid ||
-               ('groupMemberIds' in data && data.groupMemberIds is list && request.auth.uid in data.groupMemberIds);
+               request.auth.uid in data.groupMemberIds;
       }
 
       allow get: if isSignedIn() && isValidId(messageId) && isMessageParticipant(existing());

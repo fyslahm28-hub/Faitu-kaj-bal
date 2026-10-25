@@ -72,7 +72,7 @@ data class FeedPost(
     val authorId: String = "",
     val authorName: String = "",
     val authorPhotoUrl: String = "",
-    val postType: String = "JOB_CIRCULAR", // "JOB_CIRCULAR" (নিয়োগ বিজ্ঞপ্তি) or "SEEKER_APPLICATION" (চাকরিপ্রার্থীর আবেদন)
+    val postType: String = "JOB_CIRCULAR", // "JOB_CIRCULAR", "SEEKER_APPLICATION", or "GENERAL_POST"
     val title: String = "",
     val district: String = "",
     val upazilaOrLocation: String = "",
@@ -89,11 +89,113 @@ data class FeedPost(
     @get:PropertyName("isBoosted")
     @set:PropertyName("isBoosted")
     var isBoosted: Boolean = false,
+    val khedmotCategories: List<String> = emptyList(),
+    val customCategory: String = "",
+    val imageUrls: List<String> = emptyList(),
+    val userReactions: Map<String, String> = emptyMap(),
+    val userReactionNames: Map<String, String> = emptyMap(),
+    val commentCount: Int = 0,
+    val shareCount: Int = 0,
+    val sharedPostId: String = "",
+    val sharedAuthorId: String = "",
+    val sharedAuthorName: String = "",
+    val sharedTitle: String = "",
+    val sharedDescription: String = "",
+    val sharedPostType: String = "",
+    @get:PropertyName("isEdited")
+    @set:PropertyName("isEdited")
+    var isEdited: Boolean = false,
     val visibility: String = "PUBLIC", // "PUBLIC" or "ARCHIVED"
     val approvalStatus: String = "APPROVED", // "APPROVED", "PENDING", "REJECTED"
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
+
+@IgnoreExtraProperties
+data class FeedComment(
+    @DocumentId val id: String = "",
+    val postId: String = "",
+    val authorId: String = "",
+    val authorName: String = "",
+    val authorPhotoUrl: String = "",
+    val text: String = "",
+    val parentCommentId: String = "",
+    val replyToAuthorName: String = "",
+    @get:PropertyName("isEdited")
+    @set:PropertyName("isEdited")
+    var isEdited: Boolean = false,
+    val visibility: String = "PUBLIC",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+object KhedmotCategoryHelper {
+    const val CAT_NOORANI = "নূরানী"
+    const val CAT_NAZERA = "নাজেরা"
+    const val CAT_DARSIYAT = "দরসিয়াত"
+    const val CAT_IMAM = "ইমাম"
+    const val CAT_MUAZZIN = "মুয়াজ্জিন"
+    const val CAT_KHATIB = "খতিব"
+    const val CAT_OTHER = "অন্যান্য"
+
+    val allCategories: List<String> = listOf(
+        CAT_NOORANI,
+        CAT_NAZERA,
+        CAT_DARSIYAT,
+        CAT_IMAM,
+        CAT_MUAZZIN,
+        CAT_KHATIB,
+        CAT_OTHER
+    )
+
+    fun resolveDisplayBadges(post: FeedPost): List<String> {
+        val badges = mutableListOf<String>()
+        post.khedmotCategories.forEach { cat ->
+            if (cat == CAT_OTHER) {
+                val custom = post.customCategory.trim()
+                if (custom.isNotBlank()) {
+                    badges.add("$CAT_OTHER: $custom")
+                } else {
+                    badges.add(CAT_OTHER)
+                }
+            } else if (cat.isNotBlank()) {
+                badges.add(cat.trim())
+            }
+        }
+        if (post.customCategory.isNotBlank() && CAT_OTHER !in post.khedmotCategories) {
+            badges.add("$CAT_OTHER: ${post.customCategory.trim()}")
+        }
+        return badges.distinct()
+    }
+
+    fun buildCombinedDesignation(
+        manualDesignation: String,
+        selectedCategories: List<String>,
+        customCategory: String
+    ): String {
+        val parts = mutableListOf<String>()
+        selectedCategories.forEach { cat ->
+            if (cat == CAT_OTHER) {
+                if (customCategory.isNotBlank()) parts.add(customCategory.trim())
+            } else if (cat.isNotBlank()) {
+                parts.add(cat.trim())
+            }
+        }
+        val manual = manualDesignation.trim()
+        if (manual.isNotBlank() && parts.none { it.equals(manual, ignoreCase = true) }) {
+            parts.add(0, manual)
+        }
+        return parts.distinct().joinToString(", ")
+    }
+
+    fun matchesCategoryFilter(post: FeedPost, selectedCategory: String): Boolean {
+        if (selectedCategory.isBlank() || selectedCategory == "সকল বিভাগ") return true
+        if (selectedCategory in post.khedmotCategories) return true
+        if (selectedCategory == CAT_OTHER && post.customCategory.isNotBlank()) return true
+        val combinedText = "${post.designation} ${post.title} ${post.description} ${post.customCategory}"
+        return combinedText.contains(selectedCategory, ignoreCase = true)
+    }
+}
 
 @IgnoreExtraProperties
 data class MadrasaProfile(

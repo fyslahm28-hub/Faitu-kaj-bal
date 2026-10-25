@@ -87,6 +87,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.FeedPost
+import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.UserProfile
 import com.example.ui.auth.signOutUser
 import com.example.ui.components.IslamicStarEmblem
@@ -158,6 +159,7 @@ fun MainAppScaffold(
 
     val currentDestination by viewModel.currentDestination.collectAsStateWithLifecycle()
     val selectedFeedFilter by viewModel.selectedFeedFilter.collectAsStateWithLifecycle()
+    val selectedKhedmotCategory by viewModel.selectedKhedmotCategoryFilter.collectAsStateWithLifecycle()
     val selectedDistrict by viewModel.selectedDistrictFilter.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val feedbackBanner by viewModel.feedbackBanner.collectAsStateWithLifecycle()
@@ -166,6 +168,7 @@ fun MainAppScaffold(
 
     val userProfileState by viewModel.userProfileState.collectAsStateWithLifecycle()
     val feedPostsState by viewModel.feedPostsState.collectAsStateWithLifecycle()
+    val postCommentsState by viewModel.postCommentsState.collectAsStateWithLifecycle()
     val bookmarksState by viewModel.bookmarksState.collectAsStateWithLifecycle()
     val madrasasState by viewModel.madrasasState.collectAsStateWithLifecycle()
     val mySentSubmissionsState by viewModel.mySentSubmissionsState.collectAsStateWithLifecycle()
@@ -569,44 +572,142 @@ fun MainAppScaffold(
                         }
 
                         MainDestination.FEED -> {
+                            val currentUserProfile = (userProfileState as? UiState.Success)?.data
                             FeedScreen(
                                 feedPostsState = feedPostsState,
+                                postCommentsState = postCommentsState,
                                 bookmarksState = bookmarksState,
                                 selectedFilter = selectedFeedFilter,
+                                selectedKhedmotCategory = selectedKhedmotCategory,
                                 selectedDistrict = selectedDistrict,
                                 searchQuery = searchQuery,
                                 currentUserId = viewModel.currentUserId,
-                                isAdminUser = isAdminState,
+                                isAdmin = isAdminState,
+                                authorProfiles = chatPartnerProfiles,
+                                currentUserProfile = currentUserProfile,
                                 onSelectFilter = { viewModel.setFeedFilter(it) },
+                                onSelectKhedmotCategory = { viewModel.setKhedmotCategoryFilter(it) },
                                 onSelectDistrict = { viewModel.setDistrictFilter(it) },
                                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
                                 onApplyClick = { post -> viewModel.openApplyDialog(post) },
                                 onViewProfileOrDetailClick = { post -> viewModel.openPostDetailDialog(post) },
+                                onInspectAuthorProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) },
                                 onToggleBookmark = { post, bookmarked -> viewModel.toggleBookmark(post, bookmarked) },
                                 onToggleBoostPost = { post, boost -> viewModel.adminToggleBoostPost(post, boost) },
                                 onDeletePost = { postId -> viewModel.deletePost(postId) },
-                                onNavigate = { dest -> viewModel.navigateTo(dest) }
+                                onNavigate = { dest -> viewModel.navigateTo(dest) },
+                                onReactToPost = { post, reactionType -> viewModel.togglePostReaction(post, reactionType) },
+                                onAddComment = { post, text, parentId, parentAuthor -> viewModel.addCommentToPost(post, text, parentId, parentAuthor) },
+                                onEditComment = { commentId, newText -> viewModel.editPostComment(commentId, newText) },
+                                onDeleteComment = { commentId, postId, currentCount -> viewModel.deletePostComment(commentId, postId, currentCount) },
+                                onSharePostInApp = { post, caption -> viewModel.sharePostInApp(post, caption) },
+                                onPublishQuickDeeniPost = { title, desc, dist, cats, customCat, imgUrls ->
+                                    viewModel.publishFeedPost(
+                                        authorName = currentUserProfile?.fullName?.ifBlank { viewModel.currentUserDisplayName } ?: viewModel.currentUserDisplayName,
+                                        postType = "GENERAL_POST",
+                                        title = title,
+                                        district = dist,
+                                        upazilaOrLocation = currentUserProfile?.district ?: "",
+                                        designation = KhedmotCategoryHelper.buildCombinedDesignation("দ্বীনি আলোচনা", cats, customCat),
+                                        qualification = currentUserProfile?.qualification ?: "",
+                                        salaryOrExperience = currentUserProfile?.experience ?: "",
+                                        deadlineOrPreferredDistricts = "",
+                                        description = desc,
+                                        contactNumber = currentUserProfile?.contactInfo ?: "",
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
+                                        imageUrls = imgUrls,
+                                        onSuccessNavigate = {}
+                                    )
+                                },
+                                onEditOwnPost = { post, title, dist, loc, desig, qual, salExp, deadl, desc, phone, cats, customCat ->
+                                    viewModel.updateOwnPost(
+                                        post = post,
+                                        title = title,
+                                        district = dist,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = salExp,
+                                        deadlineOrPreferredDistricts = deadl,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat
+                                    )
+                                },
+                                onReportPost = { post, reason -> viewModel.reportPost(post, reason) },
+                                onRetryFeed = { viewModel.retryFeedStreams() }
                             )
                         }
 
                         MainDestination.KHEDMOT -> {
+                            val currentUserProfile = (userProfileState as? UiState.Success)?.data
                             FeedScreen(
                                 feedPostsState = feedPostsState,
+                                postCommentsState = postCommentsState,
                                 bookmarksState = bookmarksState,
                                 selectedFilter = FeedFilterTab.JOB_CIRCULAR,
+                                selectedKhedmotCategory = selectedKhedmotCategory,
                                 selectedDistrict = selectedDistrict,
                                 searchQuery = searchQuery,
                                 currentUserId = viewModel.currentUserId,
-                                isAdminUser = isAdminState,
+                                isAdmin = isAdminState,
+                                authorProfiles = chatPartnerProfiles,
+                                currentUserProfile = currentUserProfile,
                                 onSelectFilter = { viewModel.setFeedFilter(it) },
+                                onSelectKhedmotCategory = { viewModel.setKhedmotCategoryFilter(it) },
                                 onSelectDistrict = { viewModel.setDistrictFilter(it) },
                                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
                                 onApplyClick = { post -> viewModel.openApplyDialog(post) },
                                 onViewProfileOrDetailClick = { post -> viewModel.openPostDetailDialog(post) },
+                                onInspectAuthorProfile = { uid, name -> viewModel.openUserProfileInspection(uid, name) },
                                 onToggleBookmark = { post, bookmarked -> viewModel.toggleBookmark(post, bookmarked) },
                                 onToggleBoostPost = { post, boost -> viewModel.adminToggleBoostPost(post, boost) },
                                 onDeletePost = { postId -> viewModel.deletePost(postId) },
-                                onNavigate = { dest -> viewModel.navigateTo(dest) }
+                                onNavigate = { dest -> viewModel.navigateTo(dest) },
+                                onReactToPost = { post, reactionType -> viewModel.togglePostReaction(post, reactionType) },
+                                onAddComment = { post, text, parentId, parentAuthor -> viewModel.addCommentToPost(post, text, parentId, parentAuthor) },
+                                onEditComment = { commentId, newText -> viewModel.editPostComment(commentId, newText) },
+                                onDeleteComment = { commentId, postId, currentCount -> viewModel.deletePostComment(commentId, postId, currentCount) },
+                                onSharePostInApp = { post, caption -> viewModel.sharePostInApp(post, caption) },
+                                onPublishQuickDeeniPost = { title, desc, dist, cats, customCat, imgUrls ->
+                                    viewModel.publishFeedPost(
+                                        authorName = currentUserProfile?.fullName?.ifBlank { viewModel.currentUserDisplayName } ?: viewModel.currentUserDisplayName,
+                                        postType = "GENERAL_POST",
+                                        title = title,
+                                        district = dist,
+                                        upazilaOrLocation = currentUserProfile?.district ?: "",
+                                        designation = KhedmotCategoryHelper.buildCombinedDesignation("দ্বীনি আলোচনা", cats, customCat),
+                                        qualification = currentUserProfile?.qualification ?: "",
+                                        salaryOrExperience = currentUserProfile?.experience ?: "",
+                                        deadlineOrPreferredDistricts = "",
+                                        description = desc,
+                                        contactNumber = currentUserProfile?.contactInfo ?: "",
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
+                                        imageUrls = imgUrls,
+                                        onSuccessNavigate = {}
+                                    )
+                                },
+                                onEditOwnPost = { post, title, dist, loc, desig, qual, salExp, deadl, desc, phone, cats, customCat ->
+                                    viewModel.updateOwnPost(
+                                        post = post,
+                                        title = title,
+                                        district = dist,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = salExp,
+                                        deadlineOrPreferredDistricts = deadl,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat
+                                    )
+                                },
+                                onReportPost = { post, reason -> viewModel.reportPost(post, reason) },
+                                onRetryFeed = { viewModel.retryFeedStreams() }
                             )
                         }
 
@@ -680,6 +781,26 @@ fun MainAppScaffold(
                                             viewModel.openFeedWithFilter(FeedFilterTab.ALL)
                                         }
                                     )
+                                },
+                                onSubmitWithCategories = { authorName, postType, title, district, loc, desig, qual, sal, deadl, desc, phone, cats, customCat ->
+                                    viewModel.publishFeedPost(
+                                        authorName = authorName,
+                                        postType = postType,
+                                        title = title,
+                                        district = district,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = sal,
+                                        deadlineOrPreferredDistricts = deadl,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
+                                        onSuccessNavigate = {
+                                            viewModel.openFeedWithFilter(FeedFilterTab.ALL)
+                                        }
+                                    )
                                 }
                             )
                         }
@@ -702,6 +823,26 @@ fun MainAppScaffold(
                                         deadlineOrPreferredDistricts = prefDist,
                                         description = desc,
                                         contactNumber = phone,
+                                        onSuccessNavigate = {
+                                            viewModel.openFeedWithFilter(FeedFilterTab.APPLICATIONS)
+                                        }
+                                    )
+                                },
+                                onSubmitWithCategories = { authorName, postType, title, district, loc, desig, qual, exp, prefDist, desc, phone, cats, customCat ->
+                                    viewModel.publishFeedPost(
+                                        authorName = authorName,
+                                        postType = postType,
+                                        title = title,
+                                        district = district,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = exp,
+                                        deadlineOrPreferredDistricts = prefDist,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
                                         onSuccessNavigate = {
                                             viewModel.openFeedWithFilter(FeedFilterTab.APPLICATIONS)
                                         }

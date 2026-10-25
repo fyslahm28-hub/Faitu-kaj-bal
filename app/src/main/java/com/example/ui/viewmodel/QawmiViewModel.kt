@@ -8,7 +8,9 @@ import com.example.data.model.AppNotification
 import com.example.data.model.BookmarkItem
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
+import com.example.data.model.FeedComment
 import com.example.data.model.FeedPost
+import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
 import com.example.data.model.TelegramNotificationLog
@@ -62,6 +64,7 @@ enum class FeedFilterTab {
     ALL,            // সব পোস্ট
     JOB_CIRCULAR,   // নিয়োগ বিজ্ঞপ্তি
     APPLICATIONS,   // আবেদন
+    GENERAL_POSTS,  // দ্বীনি আলোচনা
     DISTRICT        // জেলা
 }
 
@@ -83,6 +86,9 @@ class QawmiViewModel(
 
     private val _selectedDistrictFilter = MutableStateFlow("সকল জেলা")
     val selectedDistrictFilter: StateFlow<String> = _selectedDistrictFilter.asStateFlow()
+
+    private val _selectedKhedmotCategoryFilter = MutableStateFlow("সকল বিভাগ")
+    val selectedKhedmotCategoryFilter: StateFlow<String> = _selectedKhedmotCategoryFilter.asStateFlow()
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -176,6 +182,17 @@ class QawmiViewModel(
                 .catch { e ->
                     Log.w(TAG, "Error observing feed posts", e)
                     emit(UiState.Error(e.localizedMessage ?: "ফিড লোড করা যায়নি"))
+                }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    val postCommentsState: StateFlow<UiState<List<FeedComment>>> = _adminDataRefreshToken
+        .flatMapLatest {
+            repository.observePublicPostComments()
+                .map<List<FeedComment>, UiState<List<FeedComment>>> { UiState.Success(it) }
+                .catch { e ->
+                    Log.w(TAG, "Error observing post comments", e)
+                    emit(UiState.Error(e.localizedMessage ?: "কমেন্ট লোড করা যায়নি"))
                 }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
@@ -451,6 +468,10 @@ class QawmiViewModel(
         _selectedDistrictFilter.value = district
     }
 
+    fun setKhedmotCategoryFilter(category: String) {
+        _selectedKhedmotCategoryFilter.value = category
+    }
+
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
     }
@@ -458,6 +479,11 @@ class QawmiViewModel(
     fun openFeedWithFilter(tab: FeedFilterTab) {
         _selectedFeedFilter.value = tab
         navigateTo(MainDestination.FEED)
+    }
+
+    fun retryFeedStreams() {
+        clearBanners()
+        _adminDataRefreshToken.value += 1
     }
 
     fun openApplyDialog(post: FeedPost?) {
@@ -588,39 +614,216 @@ class QawmiViewModel(
         deadlineOrPreferredDistricts: String,
         description: String,
         contactNumber: String,
+        khedmotCategories: List<String> = emptyList(),
+        customCategory: String = "",
+        imageUrls: List<String> = emptyList(),
         onSuccessNavigate: () -> Unit = {}
     ) {
-        if (title.isBlank() || district.isBlank() || designation.isBlank() || qualification.isBlank()) {
-            _errorBanner.value = "অনুগ্রহ করে শিরোনাম, জেলা, পদ এবং শিক্ষাগত যোগ্যতা পূরণ করুন।"
+        if (KhedmotCategoryHelper.CAT_OTHER in khedmotCategories && customCategory.trim().isBlank()) {
+            _errorBanner.value = "‘অন্যান্য’ বিভাগ নির্বাচন করলে অনুগ্রহ করে আপনার খেদমতের ধরনটি লিখুন।"
+            return
+        }
+        val effectiveDesignation = KhedmotCategoryHelper.buildCombinedDesignation(
+            manualDesignation = designation,
+            selectedCategories = khedmotCategories,
+            customCategory = customCategory
+        )
+        if (postType != "GENERAL_POST" && (title.isBlank() || district.isBlank() || effectiveDesignation.isBlank() || qualification.isBlank())) {
+            _errorBanner.value = "অনুগ্রহ করে শিরোনাম, জেলা, খেদমতের বিভাগ/পদ এবং শিক্ষাগত যোগ্যতা পূরণ করুন।"
+            return
+        }
+        if (postType == "GENERAL_POST" && title.isBlank() && description.isBlank() && imageUrls.isEmpty()) {
+            _errorBanner.value = "অনুগ্রহ করে পোস্টের শিরোনাম বা বিবরণ লিখুন।"
             return
         }
         viewModelScope.launch {
             _isSubmitting.value = true
             clearBanners()
+            val resolvedTitle = title.trim().ifBlank {
+                description.trim().lineSequence().firstOrNull()?.take(80)?.ifBlank { "দ্বীনি খেদমত ও আলোচনা" }
+                    ?: "দ্বীনি খেদমত ও আলোচনা"
+            }
             val result = repository.createFeedPost(
-                authorName = authorName.ifBlank { resolveActorDisplayName(title) },
+                authorName = authorName.ifBlank { resolveActorDisplayName(resolvedTitle) },
                 postType = postType,
-                title = title,
-                district = district,
+                title = resolvedTitle,
+                district = district.trim().ifBlank {
+                    (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
+                },
                 upazilaOrLocation = upazilaOrLocation.ifBlank { district },
-                designation = designation,
+                designation = effectiveDesignation.ifBlank {
+                    if (postType == "GENERAL_POST") "দ্বীনি আলোচনা" else designation
+                },
                 qualification = qualification,
-                salaryOrExperience = salaryOrExperience.ifBlank { "আলোচনা সাপেক্ষ" },
-                deadlineOrPreferredDistricts = deadlineOrPreferredDistricts.ifBlank { "চলমান" },
+                salaryOrExperience = salaryOrExperience.ifBlank { if (postType == "GENERAL_POST") "" else "আলোচনা সাপেক্ষ" },
+                deadlineOrPreferredDistricts = deadlineOrPreferredDistricts.ifBlank { if (postType == "GENERAL_POST") "" else "চলমান" },
                 description = description,
                 contactNumber = contactNumber,
-                authorPhotoUrl = resolveActorPhotoUrl()
+                authorPhotoUrl = resolveActorPhotoUrl(),
+                khedmotCategories = khedmotCategories,
+                customCategory = customCategory,
+                imageUrls = imageUrls
             )
             _isSubmitting.value = false
             result.onSuccess {
-                _feedbackBanner.value = if (postType == "JOB_CIRCULAR") {
-                    "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।"
-                } else {
-                    "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদনটি ফিডে প্রকাশিত হয়েছে।"
+                _feedbackBanner.value = when (postType) {
+                    "JOB_CIRCULAR" -> "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।"
+                    "GENERAL_POST" -> "আলহামদুলিল্লাহ, আপনার দ্বীনি পোস্টটি ফিডে প্রকাশিত হয়েছে।"
+                    else -> "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদনটি ফিডে প্রকাশিত হয়েছে।"
                 }
                 onSuccessNavigate()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "প্রকাশ করতে সমস্যা হয়েছে।"
+            }
+        }
+    }
+
+    fun updateOwnPost(
+        post: FeedPost,
+        title: String,
+        district: String,
+        upazilaOrLocation: String,
+        designation: String,
+        qualification: String,
+        salaryOrExperience: String,
+        deadlineOrPreferredDistricts: String,
+        description: String,
+        contactNumber: String,
+        khedmotCategories: List<String> = post.khedmotCategories,
+        customCategory: String = post.customCategory,
+        imageUrls: List<String> = post.imageUrls
+    ) {
+        if (KhedmotCategoryHelper.CAT_OTHER in khedmotCategories && customCategory.trim().isBlank()) {
+            _errorBanner.value = "‘অন্যান্য’ বিভাগ নির্বাচন করলে অনুগ্রহ করে খেদমতের ধরনটি লিখুন।"
+            return
+        }
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val res = repository.updateOwnFeedPost(
+                post = post,
+                title = title,
+                district = district,
+                upazilaOrLocation = upazilaOrLocation,
+                designation = designation,
+                qualification = qualification,
+                salaryOrExperience = salaryOrExperience,
+                deadlineOrPreferredDistricts = deadlineOrPreferredDistricts,
+                description = description,
+                contactNumber = contactNumber,
+                khedmotCategories = khedmotCategories,
+                customCategory = customCategory,
+                imageUrls = imageUrls
+            )
+            _isSubmitting.value = false
+            res.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পোস্টটি সফলভাবে হালনাগাদ হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ করা যায়নি।"
+            }
+        }
+    }
+
+    fun togglePostReaction(post: FeedPost, reactionCode: String) {
+        viewModelScope.launch {
+            val reactorName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
+            val res = repository.togglePostReaction(post, reactionCode, reactorName)
+            res.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "রিঅ্যাকশন যুক্ত করা যায়নি।"
+            }
+        }
+    }
+
+    fun addCommentToPost(
+        post: FeedPost,
+        text: String,
+        parentCommentId: String = "",
+        replyToAuthorName: String = ""
+    ) {
+        if (text.trim().isBlank()) {
+            _errorBanner.value = "অনুগ্রহ করে কমেন্ট লিখুন।"
+            return
+        }
+        viewModelScope.launch {
+            val authorName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
+            val authorPhoto = resolveActorPhotoUrl()
+            val res = repository.addPostComment(
+                post = post,
+                authorName = authorName,
+                authorPhotoUrl = authorPhoto,
+                text = text.trim(),
+                parentCommentId = parentCommentId,
+                replyToAuthorName = replyToAuthorName
+            )
+            res.onSuccess {
+                _feedbackBanner.value = if (parentCommentId.isNotBlank()) {
+                    "আপনার উত্তর যুক্ত হয়েছে।"
+                } else {
+                    "আপনার কমেন্ট যুক্ত হয়েছে।"
+                }
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "কমেন্ট যুক্ত করা যায়নি।"
+            }
+        }
+    }
+
+    fun editPostComment(commentId: String, newText: String) {
+        if (newText.trim().isBlank()) {
+            _errorBanner.value = "কমেন্ট খালি রাখা যাবে না।"
+            return
+        }
+        viewModelScope.launch {
+            val res = repository.editPostComment(commentId, newText.trim())
+            res.onSuccess {
+                _feedbackBanner.value = "কমেন্ট সম্পাদনা করা হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "কমেন্ট সম্পাদনা করা যায়নি।"
+            }
+        }
+    }
+
+    fun deletePostComment(commentId: String, postId: String, currentCommentCount: Int) {
+        viewModelScope.launch {
+            val res = repository.deletePostComment(commentId, postId, currentCommentCount)
+            res.onSuccess {
+                _feedbackBanner.value = "কমেন্ট মুছে ফেলা হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "কমেন্ট মুছে ফেলা যায়নি।"
+            }
+        }
+    }
+
+    fun sharePostInApp(post: FeedPost, caption: String) {
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val sharerName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
+            val sharerPhoto = resolveActorPhotoUrl()
+            val sharerDistrict = (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
+            val res = repository.shareFeedPostInApp(
+                originalPost = post,
+                sharerName = sharerName,
+                sharerPhotoUrl = sharerPhoto,
+                sharerDistrict = sharerDistrict,
+                shareCaption = caption
+            )
+            _isSubmitting.value = false
+            res.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি।"
+            }
+        }
+    }
+
+    fun reportPost(post: FeedPost, reason: String) {
+        viewModelScope.launch {
+            val reporterName = resolveActorDisplayName("ব্যবহারকারী")
+            val res = repository.reportFeedPost(post, reporterName, reason)
+            res.onSuccess {
+                _feedbackBanner.value = "জাযাকাল্লাহু খাইরান। পোস্টটি পর্যালোচনার জন্য অ্যাডমিন প্যানেলে পাঠানো হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "রিপোর্ট পাঠানো যায়নি।"
             }
         }
     }

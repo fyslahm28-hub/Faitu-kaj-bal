@@ -53,6 +53,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -64,6 +66,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -87,6 +90,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.model.BookmarkItem
 import com.example.data.model.FeedPost
+import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.UserProfile
 import com.example.ui.components.IslamicStarEmblem
@@ -125,7 +129,22 @@ fun PublishPostScreen(
         deadlineOrPreferredDistricts: String,
         description: String,
         contactNumber: String
-    ) -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _ -> },
+    onSubmitWithCategories: ((
+        authorName: String,
+        postType: String,
+        title: String,
+        district: String,
+        upazilaOrLocation: String,
+        designation: String,
+        qualification: String,
+        salaryOrExperience: String,
+        deadlineOrPreferredDistricts: String,
+        description: String,
+        contactNumber: String,
+        khedmotCategories: List<String>,
+        customCategory: String
+    ) -> Unit)? = null
 ) {
     val existingProfile = (userProfileState as? UiState.Success)?.data
 
@@ -150,6 +169,81 @@ fun PublishPostScreen(
     }
     var description by remember { mutableStateOf(existingProfile?.bio.orEmpty()) }
     var contactNumber by remember { mutableStateOf(existingProfile?.contactInfo.orEmpty()) }
+
+    var selectedCategories by remember { mutableStateOf<List<String>>(emptyList()) }
+    var customCategory by remember { mutableStateOf("") }
+    var localValidationError by remember { mutableStateOf<String?>(null) }
+    var showPreviewDialog by remember { mutableStateOf(false) }
+
+    val isOtherSelected = KhedmotCategoryHelper.CAT_OTHER in selectedCategories
+    val combinedDesignation = remember(designation, selectedCategories, customCategory) {
+        KhedmotCategoryHelper.buildCombinedDesignation(
+            manualDesignation = designation,
+            selectedCategories = selectedCategories,
+            customCategory = customCategory
+        )
+    }
+
+    fun validateForm(): Boolean {
+        if (isOtherSelected && customCategory.trim().isBlank()) {
+            localValidationError = "‘অন্যান্য’ নির্বাচন করলে অনুগ্রহ করে আপনার খেদমতের ধরনটি লিখুন।"
+            return false
+        }
+        if (title.trim().isBlank()) {
+            localValidationError = if (isCircular) "অনুগ্রহ করে মাদরাসার নাম লিখুন।" else "অনুগ্রহ করে আপনার পূর্ণ নাম লিখুন।"
+            return false
+        }
+        if (district.trim().isBlank()) {
+            localValidationError = "অনুগ্রহ করে জেলার নাম উল্লেখ করুন।"
+            return false
+        }
+        if (combinedDesignation.isBlank()) {
+            localValidationError = "অনুগ্রহ করে অন্তত একটি খেদমতের বিভাগ টিক (☑) দিন অথবা কাঙ্ক্ষিত পদ লিখুন।"
+            return false
+        }
+        if (qualification.trim().isBlank()) {
+            localValidationError = "অনুগ্রহ করে শিক্ষাগত / ইলমি যোগ্যতা উল্লেখ করুন।"
+            return false
+        }
+        localValidationError = null
+        return true
+    }
+
+    fun dispatchSubmit() {
+        val postType = if (isCircular) "JOB_CIRCULAR" else "SEEKER_APPLICATION"
+        val resolvedDesig = combinedDesignation.ifBlank { designation.trim() }
+        if (onSubmitWithCategories != null) {
+            onSubmitWithCategories(
+                title.trim(),
+                postType,
+                title.trim(),
+                district.trim(),
+                upazilaOrLocation.trim(),
+                resolvedDesig,
+                qualification.trim(),
+                salaryOrExperience.trim(),
+                deadlineOrPreferredDistricts.trim(),
+                description.trim(),
+                contactNumber.trim(),
+                selectedCategories,
+                if (isOtherSelected) customCategory.trim() else ""
+            )
+        } else {
+            onSubmit(
+                title.trim(),
+                postType,
+                title.trim(),
+                district.trim(),
+                upazilaOrLocation.trim(),
+                resolvedDesig,
+                qualification.trim(),
+                salaryOrExperience.trim(),
+                deadlineOrPreferredDistricts.trim(),
+                description.trim(),
+                contactNumber.trim()
+            )
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -186,14 +280,203 @@ fun PublishPostScreen(
                     )
                     Text(
                         text = if (isCircular) {
-                            "আপনার মাদরাসার শূন্য পদের বিস্তারিত তথ্য দিন, যাতে যোগ্য আলিম ও মুদাররিসগণ আবেদন করতে পারেন।"
+                            "আপনার মাদরাসার শূন্য পদের বিভাগ ও বিস্তারিত তথ্য দিন, যাতে যোগ্য আলিম ও মুদাররিসগণ আবেদন করতে পারেন।"
                         } else {
-                            "আপনার ইলমি যোগ্যতা, তাজরিবা ও পছন্দের জেলা উল্লেখ করুন যাতে মাদরাসা কর্তৃপক্ষ যোগাযোগ করতে পারেন।"
+                            "একাধিক খেদমত ক্যাটাগরি (নূরানী, নাজেরা, দরসিয়াত, ইমাম, মুয়াজ্জিন, খতিব ইত্যাদি) নির্বাচন করে আপনার আবেদন ফিডে প্রকাশ করুন।"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = QawmiTextSecondary
                     )
                 }
+            }
+        }
+
+        // Multi-Select Khedmot Categories Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.5.dp, QawmiGold.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+                .testTag("publish_khedmot_categories_card"),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isCircular) "খেদমতের বিভাগসমূহ নির্বাচন করুন (একাধিক টিক দেওয়া যাবে) *" else "আবেদনের খেদমত ক্যাটাগরি নির্বাচন করুন (একাধিক টিক দেওয়া যাবে) *",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = QawmiDeepGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "আপনি একসাথে একাধিক বিভাগে টিক (☑) দিতে পারবেন",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = QawmiTextSecondary
+                        )
+                    }
+                    if (selectedCategories.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = QawmiMintSurface,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, QawmiDeepGreen.copy(alpha = 0.3f))
+                        ) {
+                            Text(
+                                text = "${IslamicDateAndPrayerHelper.toBanglaDigits(selectedCategories.size.toString())}টি নির্বাচিত",
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                // Grid of 7 Checkboxes (2 per row)
+                val categories = KhedmotCategoryHelper.allCategories
+                categories.chunked(2).forEach { rowCats ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        rowCats.forEach { cat ->
+                            val isChecked = cat in selectedCategories
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        selectedCategories = if (isChecked) {
+                                            selectedCategories - cat
+                                        } else {
+                                            selectedCategories + cat
+                                        }
+                                        localValidationError = null
+                                    }
+                                    .testTag("category_checkbox_$cat"),
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isChecked) QawmiMintSurface else QawmiSoftBg,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    width = if (isChecked) 1.5.dp else 1.dp,
+                                    color = if (isChecked) QawmiDeepGreen else QawmiMintBorder
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = isChecked,
+                                        onCheckedChange = null,
+                                        colors = CheckboxDefaults.colors(
+                                            checkedColor = QawmiDeepGreen,
+                                            uncheckedColor = QawmiTextSecondary
+                                        )
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = cat,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = if (isChecked) QawmiDeepGreen else QawmiTextDark,
+                                        fontWeight = if (isChecked) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                        if (rowCats.size == 1) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+
+                // Dynamic custom category input when "অন্যান্য" is checked
+                AnimatedVisibility(visible = isOtherSelected) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = customCategory,
+                            onValueChange = {
+                                customCategory = it
+                                localValidationError = null
+                            },
+                            label = { Text("অন্যান্য খেদমতের ধরন লিখুন *") },
+                            placeholder = { Text("যেমন: হিফজ বিভাগ / কুতুবখানা জিম্মাদার / হিসাবরক্ষক") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("publish_custom_category_input"),
+                            singleLine = true
+                        )
+                    }
+                }
+
+                // Selected Categories Summary Badges
+                if (selectedCategories.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(top = 4.dp)
+                            .testTag("selected_categories_summary_row"),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "নির্বাচিত:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = QawmiTextSecondary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        selectedCategories.forEach { cat ->
+                            val badgeLabel = if (cat == KhedmotCategoryHelper.CAT_OTHER && customCategory.isNotBlank()) {
+                                "অন্যান্য: ${customCategory.trim()}"
+                            } else {
+                                cat
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = QawmiDeepGreen,
+                                contentColor = Color.White
+                            ) {
+                                Text(
+                                    text = "✓ $badgeLabel",
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (localValidationError != null) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("publish_validation_error_banner"),
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xFFFFEBEE),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE57373))
+            ) {
+                Text(
+                    text = localValidationError.orEmpty(),
+                    modifier = Modifier.padding(12.dp),
+                    color = Color(0xFFB71C1C),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
 
@@ -210,7 +493,10 @@ fun PublishPostScreen(
             ) {
                 OutlinedTextField(
                     value = title,
-                    onValueChange = { title = it },
+                    onValueChange = {
+                        title = it
+                        localValidationError = null
+                    },
                     label = {
                         Text(if (isCircular) "মাদরাসার নাম *" else "খেদমতপ্রার্থীর পূর্ণ নাম *")
                     },
@@ -226,7 +512,10 @@ fun PublishPostScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
                         value = district,
-                        onValueChange = { district = it },
+                        onValueChange = {
+                            district = it
+                            localValidationError = null
+                        },
                         label = { Text("জেলা *") },
                         placeholder = { Text("যেমন: কুমিল্লা") },
                         modifier = Modifier
@@ -248,9 +537,12 @@ fun PublishPostScreen(
 
                 OutlinedTextField(
                     value = designation,
-                    onValueChange = { designation = it },
-                    label = { Text(if (isCircular) "খেদমতের পদ / বিভাগ *" else "কাঙ্ক্ষিত খেদমতের পদ *") },
-                    placeholder = { Text("যেমন: সহকারী শিক্ষক (আরবি, ফিকহ, তাফসীর) / মুহতামিম") },
+                    onValueChange = {
+                        designation = it
+                        localValidationError = null
+                    },
+                    label = { Text(if (isCircular) "খেদমতের পদ / বিশেষ দায়িত্ব (ঐচ্ছিক যদি উপরে বিভাগ নির্বাচন করেন)" else "কাঙ্ক্ষিত খেদমতের পদ / বিশেষ দক্ষতা") },
+                    placeholder = { Text("যেমন: সহকারী শিক্ষক (আরবি, ফিকহ, তাফসীর) / সিনিয়র উস্তায") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("post_designation_input"),
@@ -259,9 +551,12 @@ fun PublishPostScreen(
 
                 OutlinedTextField(
                     value = qualification,
-                    onValueChange = { qualification = it },
+                    onValueChange = {
+                        qualification = it
+                        localValidationError = null
+                    },
                     label = { Text("শিক্ষাগত / ইলমি যোগ্যতা *") },
-                    placeholder = { Text("যেমন: দাওরায়ে হাদীস / ইফতা / তাফসীর / মাস্টার্স") },
+                    placeholder = { Text("যেমন: দাওরায়ে হাদীস / ইফতা / তাফসীর / কারী") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("post_qualification_input"),
@@ -323,51 +618,138 @@ fun PublishPostScreen(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                Button(
-                    onClick = {
-                        onSubmit(
-                            title,
-                            if (isCircular) "JOB_CIRCULAR" else "SEEKER_APPLICATION",
-                            title,
-                            district,
-                            upazilaOrLocation,
-                            designation,
-                            qualification,
-                            salaryOrExperience,
-                            deadlineOrPreferredDistricts,
-                            description,
-                            contactNumber
-                        )
-                    },
-                    enabled = !isSubmitting,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp)
-                        .testTag("submit_post_button"),
-                    shape = RoundedCornerShape(25.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isCircular) QawmiDeepGreen else QawmiSeekerBlue
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (isSubmitting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = Color.White,
-                            strokeWidth = 2.dp
+                    OutlinedButton(
+                        onClick = {
+                            if (validateForm()) {
+                                showPreviewDialog = true
+                            }
+                        },
+                        enabled = !isSubmitting,
+                        modifier = Modifier
+                            .weight(0.45f)
+                            .height(50.dp)
+                            .testTag("publish_preview_button"),
+                        shape = RoundedCornerShape(25.dp)
+                    ) {
+                        Text("প্রিভিউ দেখুন", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    }
+
+                    Button(
+                        onClick = {
+                            if (validateForm()) {
+                                dispatchSubmit()
+                            }
+                        },
+                        enabled = !isSubmitting,
+                        modifier = Modifier
+                            .weight(0.55f)
+                            .height(50.dp)
+                            .testTag("submit_post_button"),
+                        shape = RoundedCornerShape(25.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isCircular) QawmiDeepGreen else QawmiSeekerBlue
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("প্রকাশ করা হচ্ছে...")
-                    } else {
-                        Icon(Icons.Default.Save, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isCircular) "বিজ্ঞপ্তি প্রকাশ করুন" else "আবেদন ফিডে প্রকাশ করুন",
-                            fontWeight = FontWeight.Bold
-                        )
+                    ) {
+                        if (isSubmitting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("প্রকাশ হচ্ছে...")
+                        } else {
+                            Icon(Icons.Default.Save, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isCircular) "বিজ্ঞপ্তি প্রকাশ করুন" else "আবেদন ফিডে প্রকাশ করুন",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+
+    if (showPreviewDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showPreviewDialog = false },
+            modifier = Modifier.testTag("publish_preview_dialog"),
+            title = {
+                Text(
+                    text = if (isCircular) "বিজ্ঞপ্তি প্রকাশের পূর্বে যাচাই" else "আবেদন প্রকাশের পূর্বে তথ্য যাচাই",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = QawmiDeepGreen
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "${if (isCircular) "মাদরাসা" else "প্রার্থী"}: ${title.trim()}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = QawmiTextDark
+                    )
+                    Text(
+                        text = "জেলা ও স্থান: ${upazilaOrLocation.ifBlank { district }}, ${district.trim()}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "খেদমতের বিভাগ / পদ: $combinedDesignation",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (selectedCategories.isNotEmpty()) {
+                        Text(
+                            text = "নির্বাচিত ক্যাটাগরি: ${selectedCategories.joinToString(", ")}${if (isOtherSelected && customCategory.isNotBlank()) " (${customCategory.trim()})" else ""}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiSeekerBlue,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Text("শিক্ষাগত যোগ্যতা: ${qualification.trim()}", style = MaterialTheme.typography.bodySmall)
+                    if (salaryOrExperience.isNotBlank()) {
+                        Text(
+                            text = "${if (isCircular) "হাদিয়া/বেতন" else "অভিজ্ঞতা"}: ${salaryOrExperience.trim()}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    if (contactNumber.isNotBlank()) {
+                        Text("যোগাযোগ: ${contactNumber.trim()}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (description.isNotBlank()) {
+                        Text("বিবরণ: ${description.trim()}", style = MaterialTheme.typography.bodySmall, color = QawmiTextSecondary)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPreviewDialog = false
+                        dispatchSubmit()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isCircular) QawmiDeepGreen else QawmiSeekerBlue
+                    ),
+                    modifier = Modifier.testTag("confirm_preview_publish_button")
+                ) {
+                    Text("নিশ্চিত ও প্রকাশ করুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPreviewDialog = false }) {
+                    Text("সংশোধন করুন")
+                }
+            }
+        )
     }
 }
 

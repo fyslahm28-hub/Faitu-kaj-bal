@@ -69,7 +69,7 @@ class ExampleUnitTest {
     @Test
     fun telegramNotificationHelper_formatsChatAndBotIdAndRedactsSensitiveSecrets() {
         assertEquals("6255562134", TelegramNotificationHelper.resolveTargetChatId())
-        assertEquals("8917160878", TelegramNotificationHelper.resolveConfiguredBotId())
+        assertEquals("8982853197", TelegramNotificationHelper.resolveConfiguredBotId())
 
         val message = TelegramNotificationHelper.formatTelegramEventMessage(
             eventType = "ADMIN_LOGIN",
@@ -80,7 +80,7 @@ class ExampleUnitTest {
         )
 
         assertTrue(message.contains("6255562134"))
-        assertTrue(message.contains("8917160878"))
+        assertTrue(message.contains("8982853197"))
         assertFalse(message.contains("Q_kormosngsthan_Bangladesh"))
         assertFalse(message.contains("Q_kormosongsthan_Bangladesh"))
         assertTrue(message.contains("সময়:"))
@@ -108,7 +108,7 @@ class ExampleUnitTest {
         val targetChatId = TelegramNotificationHelper.resolveTargetChatId()
         val configuredBotId = TelegramNotificationHelper.resolveConfiguredBotId()
         assertEquals("6255562134", targetChatId)
-        assertEquals("8917160878", configuredBotId)
+        assertEquals("8982853197", configuredBotId)
         // Attempt dispatch using BuildConfig credentials (gracefully returns Boolean without throwing)
         val dispatched = TelegramNotificationHelper.dispatchToTelegramBot(
             eventType = "ADMIN_SECURITY",
@@ -122,7 +122,7 @@ class ExampleUnitTest {
     @Test
     fun telegramNotificationHelper_verifiesRealApiJsonResponsesAndBlocksFalsePositives() = kotlinx.coroutines.runBlocking {
         // 1. Real ok:true response with valid message_id -> DELIVERED
-        val okResponse = """{"ok":true,"result":{"message_id":445566,"from":{"id":8917160878,"is_bot":true,"first_name":"Qawmi Kormo Bot","username":"qawmi_kormo_bot"},"chat":{"id":6255562134,"type":"private"}}}"""
+        val okResponse = """{"ok":true,"result":{"message_id":445566,"from":{"id":8982853197,"is_bot":true,"first_name":"Qawmi Kormo Bot","username":"qawmi_kormo_bot"},"chat":{"id":6255562134,"type":"private"}}}"""
         val okDiag = TelegramNotificationHelper.parseTelegramSendMessageJson(
             httpCode = 200,
             rawResponseBody = okResponse,

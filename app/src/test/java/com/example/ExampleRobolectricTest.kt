@@ -947,7 +947,7 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithText("টেলিগ্রাম ইন্টিগ্রেশন").assertIsDisplayed()
         composeTestRule.onNodeWithText("@Q_kormosngsthan_Bangladesh").assertDoesNotExist()
         composeTestRule.onNodeWithText("চ্যাট আইডি (Chat ID): 6255562134").assertIsDisplayed()
-        composeTestRule.onNodeWithText("বট আইডি (Bot ID): 8917160878").assertIsDisplayed()
+        composeTestRule.onNodeWithText("বট আইডি (Bot ID): 8982853197").assertIsDisplayed()
         composeTestRule.onNodeWithText("🔒 অ্যাপের ভেতরে স্থায়ীভাবে ফিট ও সক্রিয়").assertIsDisplayed()
         composeTestRule.onNodeWithTag("admin_telegram_chat_id_input").assertDoesNotExist()
         composeTestRule.onNodeWithTag("admin_telegram_bot_id_input").assertDoesNotExist()
@@ -1311,6 +1311,209 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("ajker_smoron_next_button").performClick()
         composeTestRule.waitForIdle()
         assertTrue(syncedReminderId.startsWith("$dateKey:"))
+    }
+
+    @Test
+    @Config(qualifiers = "w420dp-h980dp")
+    fun `PublishPostScreen supports multi-select Khedmot categories, custom Other category input, validation, and preview`() {
+        var submittedCategories = emptyList<String>()
+        var submittedCustomCategory = ""
+        var submittedDesignation = ""
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(960.dp)) {
+                    com.example.ui.screens.PublishPostScreen(
+                        isCircular = false,
+                        userProfileState = UiState.Success(
+                            UserProfile(
+                                id = "u_khadim",
+                                fullName = "হাফেজ মাওলানা মাহমুদ",
+                                district = "ঢাকা",
+                                qualification = "হিফজ ও দাওরায়ে হাদীস",
+                                experience = "৪ বছর",
+                                preferredDistricts = "ঢাকা, গাজীপুর",
+                                contactInfo = "01711223344",
+                                bio = "নূরানী ও ইমামতি খেদমতে অভিজ্ঞ।"
+                            )
+                        ),
+                        isSubmitting = false,
+                        onSubmit = { _, _, _, _, _, _, _, _, _, _, _ -> },
+                        onSubmitWithCategories = { _, _, _, _, _, desig, _, _, _, _, _, cats, customCat ->
+                            submittedDesignation = desig
+                            submittedCategories = cats
+                            submittedCustomCategory = customCat
+                        }
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+
+        // 1. Verify all 7 required multi-select checkboxes exist
+        val expectedCategories = listOf("নূরানী", "নাজেরা", "দরসিয়াত", "ইমাম", "মুয়াজ্জিন", "খতিব", "অন্যান্য")
+        expectedCategories.forEach { cat ->
+            composeTestRule.onNodeWithTag("category_checkbox_$cat").assertExists()
+        }
+
+        // 2. Select multiple categories: "নূরানী", "ইমাম", and "অন্যান্য"
+        composeTestRule.onNodeWithTag("category_checkbox_নূরানী").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("category_checkbox_ইমাম").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("category_checkbox_অন্যান্য").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // 3. When "অন্যান্য" is selected, the custom category text box appears; submitting while blank shows validation error
+        composeTestRule.onNodeWithTag("publish_custom_category_input").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("submit_post_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("publish_validation_error_banner").assertExists()
+
+        // 4. Enter custom category text, open Preview dialog, and confirm publish
+        composeTestRule.onNodeWithTag("publish_custom_category_input").performScrollTo().performTextInput("তাফসীর বিভাগ")
+        composeTestRule.onNodeWithTag("post_location_input").performScrollTo().performTextInput("মিরপুর")
+        composeTestRule.onNodeWithTag("publish_preview_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("publish_preview_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("confirm_preview_publish_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(listOf("নূরানী", "ইমাম", "অন্যান্য"), submittedCategories)
+        assertEquals("তাফসীর বিভাগ", submittedCustomCategory)
+        assertTrue(submittedDesignation.contains("নূরানী"))
+        assertTrue(submittedDesignation.contains("ইমাম"))
+        assertTrue(submittedDesignation.contains("তাফসীর বিভাগ"))
+    }
+
+    @Test
+    @Config(qualifiers = "w420dp-h1600dp")
+    fun `FacebookStyle FeedScreen supports multi-category badges, category filtering, Islamic reactions, comments, and in-app share`() {
+        var postsList by mutableStateOf(
+            listOf(
+                com.example.data.model.FeedPost(
+                    id = "post_1",
+                    authorId = "author_1",
+                    authorName = "জামিয়া ইসলামিয়া ঢাকা",
+                    postType = "JOB_CIRCULAR",
+                    title = "জামিয়া ইসলামিয়া ঢাকা",
+                    district = "ঢাকা",
+                    upazilaOrLocation = "মোহাম্মদপুর",
+                    designation = "নূরানী • ইমাম • হেফজ বিভাগ",
+                    qualification = "হাফেজ ও মাওলানা",
+                    salaryOrExperience = "১৫,০০০ টাকা",
+                    deadlineOrPreferredDistricts = "৩০ নভেম্বর ২০২৬",
+                    description = "নূরানী ও ইমামতি খেদমতের জন্য মুত্তাকী আলেম আবশ্যক।",
+                    contactNumber = "01700000000",
+                    khedmotCategories = listOf("নূরানী", "ইমাম", "অন্যান্য"),
+                    customCategory = "হেফজ বিভাগ",
+                    isVerifiedMadrasa = true
+                )
+            )
+        )
+        var commentsList by mutableStateOf(
+            listOf(
+                com.example.data.model.FeedComment(
+                    id = "c_1",
+                    postId = "post_1",
+                    authorId = "user_me",
+                    authorName = "মাওলানা আব্দুল্লাহ",
+                    text = "মাশাআল্লাহ, সুন্দর বিজ্ঞপ্তি।"
+                )
+            )
+        )
+        var selectedCategory by mutableStateOf("সকল বিভাগ")
+        var sharedNote = ""
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1550.dp)) {
+                    com.example.ui.screens.FeedScreen(
+                        feedPostsState = UiState.Success(postsList),
+                        postCommentsState = UiState.Success(commentsList),
+                        bookmarksState = UiState.Success(emptyList()),
+                        selectedFilter = com.example.ui.viewmodel.FeedFilterTab.ALL,
+                        selectedKhedmotCategory = selectedCategory,
+                        selectedDistrict = "সকল জেলা",
+                        searchQuery = "",
+                        currentUserId = "user_me",
+                        isAdmin = false,
+                        currentUserProfile = UserProfile(id = "user_me", fullName = "মাওলানা আব্দুল্লাহ"),
+                        onSelectFilter = {},
+                        onSelectKhedmotCategory = { selectedCategory = it },
+                        onSelectDistrict = {},
+                        onSearchQueryChange = {},
+                        onApplyClick = {},
+                        onViewProfileOrDetailClick = {},
+                        onToggleBookmark = { _, _ -> },
+                        onReactToPost = { post, code ->
+                            postsList = postsList.map { p ->
+                                if (p.id == post.id) {
+                                    p.copy(
+                                        userReactions = p.userReactions + ("user_me" to code),
+                                        userReactionNames = p.userReactionNames + ("user_me" to "মাওলানা আব্দুল্লাহ")
+                                    )
+                                } else p
+                            }
+                        },
+                        onAddComment = { post, text, parentId, parentAuthor ->
+                            commentsList = commentsList + com.example.data.model.FeedComment(
+                                id = "c_${commentsList.size + 1}",
+                                postId = post.id,
+                                authorId = "user_me",
+                                authorName = "মাওলানা আব্দুল্লাহ",
+                                text = text,
+                                parentCommentId = parentId,
+                                replyToAuthorName = parentAuthor
+                            )
+                        },
+                        onEditComment = { cid, newText ->
+                            commentsList = commentsList.map { if (it.id == cid) it.copy(text = newText, isEdited = true) else it }
+                        },
+                        onDeleteComment = { cid, _, _ ->
+                            commentsList = commentsList.filterNot { it.id == cid }
+                        },
+                        onSharePostInApp = { _, caption ->
+                            sharedNote = caption
+                        },
+                        onToggleBoostPost = { _, _ -> },
+                        onDeletePost = {},
+                        onNavigate = {}
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+
+        // 1. Verify Facebook-style composer card and post card with multi-category badges
+        composeTestRule.onNodeWithTag("feed_composer_card").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("feed_post_card_post_1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("post_categories_row_post_1", useUnmergedTree = true).assertExists()
+
+        // 2. React on post_1 via the reaction button
+        composeTestRule.onNodeWithTag("post_react_btn_post_1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("post_engagement_summary_post_1").assertIsDisplayed()
+
+        // 3. Open Share dialog and share in-app
+        composeTestRule.onNodeWithTag("post_share_btn_post_1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("post_share_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("share_post_caption_input").performTextReplacement("গুরুত্বপূর্ণ নিয়োগ বিজ্ঞপ্তি")
+        composeTestRule.onNodeWithTag("confirm_share_in_app_btn").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("গুরুত্বপূর্ণ নিয়োগ বিজ্ঞপ্তি", sharedNote)
+
+        // 4. Open comments section, verify existing comment, and add a new comment
+        composeTestRule.onNodeWithTag("post_comment_btn_post_1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("post_comments_section_post_1").assertExists()
+        composeTestRule.onNodeWithText("মাশাআল্লাহ, সুন্দর বিজ্ঞপ্তি।").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("comment_input_post_1").performTextInput("আল্লাহ কবুল করুন")
+        composeTestRule.onNodeWithTag("send_comment_btn_post_1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("আল্লাহ কবুল করুন").assertIsDisplayed()
     }
 }
 

@@ -16,7 +16,7 @@ admin.initializeApp();
 // Secure server-side secret managed via Firebase Secret Manager / Google Cloud Secret Manager
 const telegramBotTokenSecret = defineSecret("TELEGRAM_BOT_TOKEN");
 const DEFAULT_ADMIN_CHAT_ID = "6255562134";
-const DEFAULT_ADMIN_BOT_ID = "8917160878";
+const DEFAULT_ADMIN_BOT_ID = "8982853197";
 
 function sanitizeSecrets(rawText) {
   if (!rawText) return "";
@@ -84,7 +84,7 @@ exports.dispatchTelegramNotificationOnCreated = onDocumentCreated(
 
     if (!token || token === "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE" || !token.includes(":")) {
       const configErr =
-        "সার্ভার ত্রুটি: TELEGRAM_BOT_TOKEN কনফিগার করা নেই (Secret Manager-এ বট ৮৯১৭১৬০৮৭৮-এর সক্রিয় টোকেন সেট করুন)।";
+        "সার্ভার ত্রুটি: TELEGRAM_BOT_TOKEN কনফিগার করা নেই (Secret Manager-এ বট ৮৯৮২৮৫৩১৯৭-এর সক্রিয় টোকেন সেট করুন)।";
       await snap.ref.update({
         deliveryStatus: "FAILED",
         message: `${sanitizeSecrets(data.message || "")} [ডেলিভারি ত্রুটি: ${configErr}]`.slice(0, 1950),

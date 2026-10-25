@@ -7,7 +7,9 @@ import com.example.data.model.AppNotification
 import com.example.data.model.BookmarkItem
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
+import com.example.data.model.FeedComment
 import com.example.data.model.FeedPost
+import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
 import com.example.data.model.NotificationReadReceipt
@@ -498,6 +500,7 @@ class QawmiRepository(
             .snapshots()
             .map { snapshot ->
                 snapshot.toObjects(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .distinctBy { it.id }
                     .sortedWith(
                         compareByDescending<FeedPost> { it.isBoosted }
                             .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
@@ -523,29 +526,69 @@ class QawmiRepository(
         contactNumber: String,
         madrasaId: String = "",
         isVerifiedMadrasa: Boolean = false,
-        authorPhotoUrl: String = ""
+        authorPhotoUrl: String = "",
+        khedmotCategories: List<String> = emptyList(),
+        customCategory: String = "",
+        imageUrls: List<String> = emptyList(),
+        sharedPostId: String = "",
+        sharedAuthorId: String = "",
+        sharedAuthorName: String = "",
+        sharedTitle: String = "",
+        sharedDescription: String = "",
+        sharedPostType: String = ""
     ): Result<String> {
         val uid = requireUserId()
         val collectionRef = db.collection("feed_posts")
         val docRef = collectionRef.document()
         return try {
-            val payload = mapOf(
+            val cleanedCategories = khedmotCategories.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
+            val cleanedCustomCategory = if (KhedmotCategoryHelper.CAT_OTHER in cleanedCategories) {
+                customCategory.trim().take(150)
+            } else {
+                customCategory.trim().take(150)
+            }
+            val cleanedImages = imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5)
+            // Never auto-claim user general or seeker posts as verified madrasa content
+            val safeVerified = if (postType == "JOB_CIRCULAR") isVerifiedMadrasa else false
+            val resolvedDesignation = KhedmotCategoryHelper.buildCombinedDesignation(
+                manualDesignation = designation,
+                selectedCategories = cleanedCategories,
+                customCategory = cleanedCustomCategory
+            ).ifBlank {
+                if (postType == "GENERAL_POST") "দ্বীনি আলোচনা ও খেদমত" else designation.trim()
+            }
+
+            val payload = mutableMapOf<String, Any>(
                 "authorId" to uid,
-                "authorName" to authorName.trim(),
+                "authorName" to authorName.trim().ifBlank { title.trim() },
                 "authorPhotoUrl" to authorPhotoUrl.trim(),
                 "postType" to postType,
                 "title" to title.trim(),
                 "district" to district.trim(),
                 "upazilaOrLocation" to upazilaOrLocation.trim(),
-                "designation" to designation.trim(),
+                "designation" to resolvedDesignation.take(150),
                 "qualification" to qualification.trim(),
                 "salaryOrExperience" to salaryOrExperience.trim(),
                 "deadlineOrPreferredDistricts" to deadlineOrPreferredDistricts.trim(),
-                "description" to description.trim(),
+                "description" to description.trim().take(2000),
                 "contactNumber" to contactNumber.trim(),
                 "madrasaId" to madrasaId,
-                "isVerifiedMadrasa" to isVerifiedMadrasa,
+                "isVerifiedMadrasa" to safeVerified,
                 "isBoosted" to false,
+                "khedmotCategories" to cleanedCategories,
+                "customCategory" to cleanedCustomCategory,
+                "imageUrls" to cleanedImages,
+                "userReactions" to emptyMap<String, String>(),
+                "userReactionNames" to emptyMap<String, String>(),
+                "commentCount" to 0,
+                "shareCount" to 0,
+                "sharedPostId" to sharedPostId.trim(),
+                "sharedAuthorId" to sharedAuthorId.trim(),
+                "sharedAuthorName" to sharedAuthorName.trim(),
+                "sharedTitle" to sharedTitle.trim().take(200),
+                "sharedDescription" to sharedDescription.trim().take(2000),
+                "sharedPostType" to sharedPostType.trim(),
+                "isEdited" to false,
                 "visibility" to "PUBLIC",
                 "approvalStatus" to "APPROVED",
                 "createdAt" to FieldValue.serverTimestamp(),
@@ -555,15 +598,16 @@ class QawmiRepository(
 
             // Deliver community notification to other users (observeNotifications excludes senderId == uid)
             val isCircular = postType == "JOB_CIRCULAR"
-            val notifTitle = if (isCircular) {
-                "নতুন খেদমতের নিয়োগ বিজ্ঞপ্তি"
-            } else {
-                "নতুন খেদমতপ্রার্থীর আবেদন"
+            val isGeneral = postType == "GENERAL_POST"
+            val notifTitle = when {
+                isCircular -> "নতুন খেদমতের নিয়োগ বিজ্ঞপ্তি"
+                isGeneral -> "নতুন দ্বীনি পোস্ট ও আলোচনা"
+                else -> "নতুন খেদমতপ্রার্থীর আবেদন"
             }
-            val notifMsg = if (isCircular) {
-                "${title.trim()} (${district.trim()})-এ '${designation.trim()}' পদে নিয়োগ বিজ্ঞপ্তি প্রকাশিত হয়েছে।"
-            } else {
-                "${title.trim()} (${qualification.trim()}) '${designation.trim()}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
+            val notifMsg = when {
+                isCircular -> "${title.trim()} (${district.trim()})-এ '${resolvedDesignation}' পদে নিয়োগ বিজ্ঞপ্তি প্রকাশিত হয়েছে।"
+                isGeneral -> "${authorName.trim().ifBlank { title.trim() }} ফিডে একটি নতুন পোস্ট শেয়ার করেছেন: ${title.trim()}"
+                else -> "${title.trim()} (${qualification.trim()}) '${resolvedDesignation}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
             }
             val resolvedSender = authorName.trim().ifBlank { title.trim() }
             createNotification(
@@ -589,6 +633,330 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateOwnFeedPost(
+        post: FeedPost,
+        title: String,
+        district: String,
+        upazilaOrLocation: String,
+        designation: String,
+        qualification: String,
+        salaryOrExperience: String,
+        deadlineOrPreferredDistricts: String,
+        description: String,
+        contactNumber: String,
+        khedmotCategories: List<String> = post.khedmotCategories,
+        customCategory: String = post.customCategory,
+        imageUrls: List<String> = post.imageUrls
+    ): Result<Unit> {
+        val uid = requireUserId()
+        if (post.authorId != uid) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র নিজের প্রকাশিত পোস্ট সম্পাদনা করা যাবে।"))
+        }
+        val docRef = db.collection("feed_posts").document(post.id)
+        return try {
+            val cleanedCategories = khedmotCategories.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
+            val cleanedCustom = customCategory.trim().take(150)
+            val resolvedDesignation = KhedmotCategoryHelper.buildCombinedDesignation(
+                manualDesignation = designation,
+                selectedCategories = cleanedCategories,
+                customCategory = cleanedCustom
+            ).ifBlank {
+                if (post.postType == "GENERAL_POST") "দ্বীনি আলোচনা ও খেদমত" else designation.trim()
+            }
+            val updates = mapOf(
+                "title" to title.trim().take(200),
+                "district" to district.trim().take(100),
+                "upazilaOrLocation" to upazilaOrLocation.trim().take(200),
+                "designation" to resolvedDesignation.take(150),
+                "qualification" to qualification.trim().take(200),
+                "salaryOrExperience" to salaryOrExperience.trim().take(150),
+                "deadlineOrPreferredDistricts" to deadlineOrPreferredDistricts.trim().take(250),
+                "description" to description.trim().take(2000),
+                "contactNumber" to contactNumber.trim().take(100),
+                "khedmotCategories" to cleanedCategories,
+                "customCategory" to cleanedCustom,
+                "imageUrls" to imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5),
+                "isEdited" to true,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.update(updates).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun togglePostReaction(
+        post: FeedPost,
+        reactionCode: String,
+        reactorName: String
+    ): Result<Unit> {
+        val uid = requireUserId()
+        val docRef = db.collection("feed_posts").document(post.id)
+        return try {
+            val snap = docRef.get().await()
+            val existingPost = if (snap.exists()) {
+                snap.toObject(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: post
+            } else {
+                post
+            }
+            val updatedReactions = existingPost.userReactions.toMutableMap()
+            val updatedNames = existingPost.userReactionNames.toMutableMap()
+            val currentReaction = updatedReactions[uid].orEmpty()
+
+            if (reactionCode.isBlank() || currentReaction == reactionCode) {
+                updatedReactions.remove(uid)
+                updatedNames.remove(uid)
+            } else {
+                updatedReactions[uid] = reactionCode
+                updatedNames[uid] = reactorName.trim().ifBlank { "সম্মানিত সদস্য" }.take(120)
+            }
+
+            docRef.update(
+                mapOf(
+                    "userReactions" to updatedReactions,
+                    "userReactionNames" to updatedNames,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    fun observePublicPostComments(): Flow<List<FeedComment>> {
+        val path = "post_comments"
+        return db.collection(path)
+            .whereEqualTo("visibility", "PUBLIC")
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toObjects(FeedComment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .distinctBy { it.id }
+                    .sortedWith(
+                        compareBy<FeedComment> { it.createdAt ?: Timestamp(0, 0) }
+                            .thenBy { it.id }
+                    )
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    suspend fun addPostComment(
+        post: FeedPost,
+        authorName: String,
+        authorPhotoUrl: String,
+        text: String,
+        parentCommentId: String = "",
+        replyToAuthorName: String = ""
+    ): Result<String> {
+        val uid = requireUserId()
+        val cleanText = text.trim().take(1500)
+        if (cleanText.isBlank()) {
+            return Result.failure(IllegalArgumentException("কমেন্ট খালি রাখা যাবে না।"))
+        }
+        val commentRef = db.collection("post_comments").document()
+        val postRef = db.collection("feed_posts").document(post.id)
+        return try {
+            val resolvedAuthor = authorName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }.take(200)
+            val payload = mapOf(
+                "postId" to post.id,
+                "authorId" to uid,
+                "authorName" to resolvedAuthor,
+                "authorPhotoUrl" to authorPhotoUrl.trim(),
+                "text" to cleanText,
+                "parentCommentId" to parentCommentId.trim(),
+                "replyToAuthorName" to replyToAuthorName.trim().take(200),
+                "isEdited" to false,
+                "visibility" to "PUBLIC",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            commentRef.set(payload).await()
+
+            try {
+                val postSnap = postRef.get().await()
+                val currentCount = (postSnap.getLong("commentCount")?.toInt() ?: post.commentCount).coerceAtLeast(0)
+                postRef.update(
+                    mapOf(
+                        "commentCount" to (currentCount + 1),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } catch (_: Exception) {
+                // Non-fatal if post counter update is skipped
+            }
+
+            if (post.authorId.isNotBlank() && post.authorId != uid) {
+                createNotification(
+                    recipientId = post.authorId,
+                    senderName = resolvedAuthor,
+                    title = if (parentCommentId.isNotBlank()) "আপনার পোস্টের কমেন্টে নতুন উত্তর" else "আপনার পোস্টে নতুন কমেন্ট",
+                    message = "$resolvedAuthor মন্তব্য করেছেন: \"${cleanText.take(120)}\"",
+                    type = "APPLICATION",
+                    referenceId = post.id
+                )
+            }
+
+            Result.success(commentRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, commentRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun editPostComment(
+        commentId: String,
+        newText: String
+    ): Result<Unit> {
+        requireUserId()
+        val cleanText = newText.trim().take(1500)
+        if (cleanText.isBlank()) {
+            return Result.failure(IllegalArgumentException("কমেন্ট খালি রাখা যাবে না।"))
+        }
+        val commentRef = db.collection("post_comments").document(commentId)
+        return try {
+            commentRef.update(
+                mapOf(
+                    "text" to cleanText,
+                    "isEdited" to true,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, commentRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deletePostComment(
+        commentId: String,
+        postId: String,
+        currentCommentCount: Int
+    ): Result<Unit> {
+        requireUserId()
+        val commentRef = db.collection("post_comments").document(commentId)
+        return try {
+            commentRef.delete().await()
+            if (postId.isNotBlank()) {
+                try {
+                    val postRef = db.collection("feed_posts").document(postId)
+                    val snap = postRef.get().await()
+                    val existingCount = (snap.getLong("commentCount")?.toInt() ?: currentCommentCount).coerceAtLeast(1)
+                    postRef.update(
+                        mapOf(
+                            "commentCount" to (existingCount - 1).coerceAtLeast(0),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                } catch (_: Exception) {
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, commentRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun shareFeedPostInApp(
+        originalPost: FeedPost,
+        sharerName: String,
+        sharerPhotoUrl: String,
+        sharerDistrict: String,
+        shareCaption: String
+    ): Result<String> {
+        val uid = requireUserId()
+        val targetOriginalId = originalPost.sharedPostId.ifBlank { originalPost.id }
+        val targetOriginalAuthorId = originalPost.sharedAuthorId.ifBlank { originalPost.authorId }
+        val targetOriginalAuthorName = originalPost.sharedAuthorName.ifBlank { originalPost.authorName.ifBlank { originalPost.title } }
+        val targetOriginalTitle = originalPost.sharedTitle.ifBlank { originalPost.title }
+        val targetOriginalDesc = originalPost.sharedDescription.ifBlank {
+            buildString {
+                if (originalPost.designation.isNotBlank()) append("পদ/বিভাগ: ${originalPost.designation} | ")
+                if (originalPost.district.isNotBlank()) append("জেলা: ${originalPost.district} | ")
+                append(originalPost.description)
+            }
+        }
+        val targetOriginalType = originalPost.sharedPostType.ifBlank { originalPost.postType }
+
+        val createRes = createFeedPost(
+            authorName = sharerName.ifBlank { "সম্মানিত দ্বীনি ভাই" },
+            postType = "GENERAL_POST",
+            title = shareCaption.trim().ifBlank { "$targetOriginalAuthorName-এর পোস্ট শেয়ার করেছেন" }.take(200),
+            district = sharerDistrict.ifBlank { originalPost.district },
+            upazilaOrLocation = originalPost.upazilaOrLocation,
+            designation = originalPost.designation.ifBlank { "দ্বীনি খেদমত শেয়ার" },
+            qualification = originalPost.qualification,
+            salaryOrExperience = originalPost.salaryOrExperience,
+            deadlineOrPreferredDistricts = originalPost.deadlineOrPreferredDistricts,
+            description = shareCaption.trim(),
+            contactNumber = originalPost.contactNumber,
+            authorPhotoUrl = sharerPhotoUrl,
+            khedmotCategories = originalPost.khedmotCategories,
+            customCategory = originalPost.customCategory,
+            sharedPostId = targetOriginalId,
+            sharedAuthorId = targetOriginalAuthorId,
+            sharedAuthorName = targetOriginalAuthorName,
+            sharedTitle = targetOriginalTitle,
+            sharedDescription = targetOriginalDesc,
+            sharedPostType = targetOriginalType
+        )
+
+        createRes.onSuccess {
+            try {
+                val origRef = db.collection("feed_posts").document(originalPost.id)
+                val snap = origRef.get().await()
+                val currentShares = (snap.getLong("shareCount")?.toInt() ?: originalPost.shareCount).coerceAtLeast(0)
+                origRef.update(
+                    mapOf(
+                        "shareCount" to (currentShares + 1),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } catch (_: Exception) {
+            }
+        }
+        return createRes
+    }
+
+    suspend fun reportFeedPost(
+        post: FeedPost,
+        reporterName: String,
+        reason: String
+    ): Result<Unit> {
+        requireUserId()
+        return try {
+            enqueueAndDispatchTelegramNotification(
+                eventType = "CONTENT_MODERATION",
+                title = "ফিড পোস্ট রিপোর্ট (মডারেশন প্রয়োজন)",
+                message = "পোস্ট: '${post.title}' (প্রকাশক: ${post.authorName}) | রিপোর্টের কারণ: ${reason.trim().ifBlank { "নীতিমালা পরিপন্থী পোস্ট" }}",
+                actorName = reporterName.ifBlank { "ব্যবহারকারী" },
+                referenceId = post.id
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }

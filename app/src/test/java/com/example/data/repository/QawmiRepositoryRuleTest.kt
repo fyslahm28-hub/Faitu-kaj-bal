@@ -526,6 +526,123 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
     }
 
     @Test
+    fun facebookStyleIslamicFeed_multiCategoryPosts_reactions_comments_andShares_complyWithSecurityRules() = runBlocking {
+        val authorEmail = "author_${UUID.randomUUID()}@test.com"
+        val readerEmail = "reader_${UUID.randomUUID()}@test.com"
+
+        val authorUid = signInTestUser(authorEmail)
+        val repo = QawmiRepository(firestore, auth)
+
+        // 1. Author publishes a multi-category Seeker Application with "অন্যান্য" custom category
+        val appCreateRes = withTimeout(5000L) {
+            repo.createFeedPost(
+                authorName = "হাফেজ মাওলানা মাহমুদ",
+                postType = "SEEKER_APPLICATION",
+                title = "হাফেজ মাওলানা মাহমুদ",
+                district = "ঢাকা",
+                upazilaOrLocation = "মিরপুর",
+                designation = "নূরানী • নাজেরা • ইমাম • তাফসীর বিভাগ",
+                qualification = "হিফজুল কুরআন ও দাওরায়ে হাদীস",
+                salaryOrExperience = "৪ বছর",
+                deadlineOrPreferredDistricts = "ঢাকা, গাজীপুর",
+                description = "নূরানী, নাজেরা ও ইমামতি খেদমতে আগ্রহী।",
+                contactNumber = "01712345678",
+                khedmotCategories = listOf("নূরানী", "নাজেরা", "ইমাম", "অন্যান্য"),
+                customCategory = "তাফসীর বিভাগ"
+            )
+        }
+        assertTrue("Multi-category application creation failed: ${appCreateRes.exceptionOrNull()}", appCreateRes.isSuccess)
+        val postId = appCreateRes.getOrThrow()
+
+        // 2. Author publishes a GENERAL_POST (Deeni discussion)
+        val generalPostRes = withTimeout(5000L) {
+            repo.createFeedPost(
+                authorName = "হাফেজ মাওলানা মাহমুদ",
+                postType = "GENERAL_POST",
+                title = "দ্বীনি পরামর্শ",
+                district = "ঢাকা",
+                upazilaOrLocation = "মিরপুর",
+                designation = "দরসিয়াত",
+                qualification = "দাওরায়ে হাদীস",
+                salaryOrExperience = "",
+                deadlineOrPreferredDistricts = "",
+                description = "তালিবে ইলমদের পাঠদানে আদব ও ইখলাসের গুরুত্ব অপরিসীম।",
+                contactNumber = "",
+                khedmotCategories = listOf("দরসিয়াত"),
+                customCategory = ""
+            )
+        }
+        assertTrue("GENERAL_POST creation failed: ${generalPostRes.exceptionOrNull()}", generalPostRes.isSuccess)
+
+        // 3. Switch to reader user: observe post, toggle reaction, add comment, edit own comment, and share post
+        val readerUid = signInTestUser(readerEmail)
+        val postsForReader = withTimeout(5000L) {
+            repo.observePublicFeedPosts().first { list -> list.any { it.id == postId } }
+        }
+        val targetPost = postsForReader.first { it.id == postId }
+        assertEquals(listOf("নূরানী", "নাজেরা", "ইমাম", "অন্যান্য"), targetPost.khedmotCategories)
+        assertEquals("তাফসীর বিভাগ", targetPost.customCategory)
+
+        val reactRes = withTimeout(5000L) {
+            repo.togglePostReaction(targetPost, "SUNDOR", "মাওলানা সাদিক")
+        }
+        assertTrue("togglePostReaction failed: ${reactRes.exceptionOrNull()}", reactRes.isSuccess)
+
+        val addCommentRes = withTimeout(5000L) {
+            repo.addPostComment(
+                post = targetPost,
+                authorName = "মাওলানা সাদিক",
+                authorPhotoUrl = "preset:scholar_emerald",
+                text = "মাশাআল্লাহ, আল্লাহ আপনার খেদমত কবুল করুন।"
+            )
+        }
+        assertTrue("addPostComment failed: ${addCommentRes.exceptionOrNull()}", addCommentRes.isSuccess)
+        val commentId = addCommentRes.getOrThrow()
+
+        val observedComments = withTimeout(5000L) {
+            repo.observePublicPostComments().first { list -> list.any { it.id == commentId } }
+        }
+        val addedComment = observedComments.first { it.id == commentId }
+        assertEquals(readerUid, addedComment.authorId)
+
+        val editCommentRes = withTimeout(5000L) {
+            repo.editPostComment(commentId, "মাশাআল্লাহ, আল্লাহ তাআলা উত্তম জাযা দান করুন।")
+        }
+        assertTrue("editPostComment by author failed: ${editCommentRes.exceptionOrNull()}", editCommentRes.isSuccess)
+
+        // Share post in-app
+        val shareRes = withTimeout(5000L) {
+            repo.shareFeedPostInApp(
+                originalPost = targetPost,
+                sharerName = "মাওলানা সাদিক",
+                sharerPhotoUrl = "preset:scholar_emerald",
+                sharerDistrict = "ঢাকা",
+                shareCaption = "ঢাকার মাদরাসাগুলোর জন্য উপযুক্ত একজন হাফেজ ও আলেম।"
+            )
+        }
+        assertTrue("shareFeedPostInApp failed: ${shareRes.exceptionOrNull()}", shareRes.isSuccess)
+
+        // 4. Switch back to original author: verify author CANNOT edit reader's comment, and author CAN reply
+        signInTestUser(authorEmail)
+        val unauthorizedCommentEdit = withTimeout(5000L) {
+            repo.editPostComment(commentId, "অন্যের কমেন্ট এডিট চেষ্টা")
+        }
+        assertTrue("Non-owner must not be able to edit another user's comment", unauthorizedCommentEdit.isFailure)
+
+        val replyRes = withTimeout(5000L) {
+            repo.addPostComment(
+                post = targetPost,
+                authorName = "হাফেজ মাওলানা মাহমুদ",
+                authorPhotoUrl = "",
+                text = "আমিন, জাযাকাল্লাহু খাইরান।",
+                parentCommentId = commentId,
+                replyToAuthorName = "মাওলানা সাদিক"
+            )
+        }
+        assertTrue("Author reply comment failed: ${replyRes.exceptionOrNull()}", replyRes.isSuccess)
+    }
+
+    @Test
     fun observePublicFeedPosts_unauthenticatedUser_failsWithPermissionDenied() = runBlocking {
         auth.signOut()
         val repository = QawmiRepository(firestore, auth)

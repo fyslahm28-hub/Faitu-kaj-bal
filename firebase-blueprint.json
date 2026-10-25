@@ -38,12 +38,12 @@
       }
     },
     "FeedPost": {
-      "description": "Public feed item representing either a Madrasa job circular (JOB_CIRCULAR) or a candidate's application post (SEEKER_APPLICATION), supporting Admin Boost and author profile photo.",
+      "description": "Public feed item representing a Madrasa job circular (JOB_CIRCULAR), a candidate's application post (SEEKER_APPLICATION), or an Islamic discussion/shared post (GENERAL_POST), supporting multi-select Khedmot categories, custom category, reactions, comments, shares, and Admin Boost.",
       "properties": {
         "authorId": { "type": "string", "required": true },
         "authorName": { "type": "string", "required": true },
         "authorPhotoUrl": { "type": "string", "required": false },
-        "postType": { "type": "string", "required": true, "enum": ["JOB_CIRCULAR", "SEEKER_APPLICATION"] },
+        "postType": { "type": "string", "required": true, "enum": ["JOB_CIRCULAR", "SEEKER_APPLICATION", "GENERAL_POST"] },
         "title": { "type": "string", "required": true },
         "district": { "type": "string", "required": true },
         "upazilaOrLocation": { "type": "string", "required": true },
@@ -56,8 +56,38 @@
         "madrasaId": { "type": "string", "required": true },
         "isVerifiedMadrasa": { "type": "boolean", "required": true },
         "isBoosted": { "type": "boolean", "required": false },
+        "khedmotCategories": { "type": "array", "required": false },
+        "customCategory": { "type": "string", "required": false },
+        "imageUrls": { "type": "array", "required": false },
+        "userReactions": { "type": "object", "required": false },
+        "userReactionNames": { "type": "object", "required": false },
+        "commentCount": { "type": "number", "required": false },
+        "shareCount": { "type": "number", "required": false },
+        "sharedPostId": { "type": "string", "required": false },
+        "sharedAuthorId": { "type": "string", "required": false },
+        "sharedAuthorName": { "type": "string", "required": false },
+        "sharedTitle": { "type": "string", "required": false },
+        "sharedDescription": { "type": "string", "required": false },
+        "sharedPostType": { "type": "string", "required": false },
+        "isEdited": { "type": "boolean", "required": false },
         "visibility": { "type": "string", "required": true, "enum": ["PUBLIC", "ARCHIVED"] },
         "approvalStatus": { "type": "string", "required": true, "enum": ["APPROVED", "PENDING", "REJECTED"] },
+        "createdAt": { "type": "timestamp", "required": true },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
+    },
+    "FeedComment": {
+      "description": "Comment or nested reply on a public FeedPost.",
+      "properties": {
+        "postId": { "type": "string", "required": true },
+        "authorId": { "type": "string", "required": true },
+        "authorName": { "type": "string", "required": true },
+        "authorPhotoUrl": { "type": "string", "required": false },
+        "text": { "type": "string", "required": true },
+        "parentCommentId": { "type": "string", "required": false },
+        "replyToAuthorName": { "type": "string", "required": false },
+        "isEdited": { "type": "boolean", "required": false },
+        "visibility": { "type": "string", "required": true, "enum": ["PUBLIC", "HIDDEN"] },
         "createdAt": { "type": "timestamp", "required": true },
         "updatedAt": { "type": "timestamp", "required": true }
       }
@@ -220,7 +250,12 @@
     {
       "path": "/feed_posts/{postId}",
       "entity": "FeedPost",
-      "access": "Authenticated users can read public posts and create posts with their own authorId; authors can update/delete their own posts; admins can moderate, verify, and boost."
+      "access": "Authenticated users can read public posts, create posts with their own authorId, and update reaction/comment/share counters; authors can update/delete their own posts; admins can moderate, verify, and boost."
+    },
+    {
+      "path": "/post_comments/{commentId}",
+      "entity": "FeedComment",
+      "access": "Authenticated users can read public comments and create comments with their own authorId; only comment author can edit text; comment author or admin can delete."
     },
     {
       "path": "/madrasas/{madrasaId}",

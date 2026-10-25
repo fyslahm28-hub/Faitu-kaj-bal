@@ -418,4 +418,160 @@ test("ChatGroup & Image Attachments: members can create groups, add/remove membe
   );
 });
 
+test("Facebook-Style Islamic Feed: multi-category Khedmot posts, GENERAL_POST, reactions, and post_comments ownership rules", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  const ts = nowDate();
+
+  // 1. Alice publishes a multi-category Seeker Application with customCategory ("অন্যান্য")
+  await assertSucceeds(
+    aliceDb.collection("feed_posts").doc("post_multi_cat_1").set({
+      authorId: ALICE_UID,
+      authorName: "মাওলানা আব্দুল্লাহ",
+      postType: "SEEKER_APPLICATION",
+      title: "মাওলানা আব্দুল্লাহ",
+      district: "ঢাকা",
+      upazilaOrLocation: "মোহাম্মদপুর, ঢাকা",
+      designation: "নূরানী, নাজেরা, ইমাম, হিফজ বিভাগ",
+      qualification: "দাওরায়ে হাদীস ও কারী",
+      salaryOrExperience: "৫ বছর",
+      deadlineOrPreferredDistricts: "ঢাকা, গাজীপুর",
+      description: "নূরানী, নাজেরা ও ইমামতি খেদমতে আগ্রহী।",
+      contactNumber: "01711223344",
+      madrasaId: "",
+      isVerifiedMadrasa: false,
+      isBoosted: false,
+      khedmotCategories: ["নূরানী", "নাজেরা", "ইমাম", "অন্যান্য"],
+      customCategory: "হিফজ বিভাগ",
+      userReactions: {},
+      userReactionNames: {},
+      commentCount: 0,
+      shareCount: 0,
+      visibility: "PUBLIC",
+      approvalStatus: "APPROVED",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // 2. Bob reacts to Alice's post with "DUA" (মাশাআল্লাহ/দোয়া)
+  await assertSucceeds(
+    bobDb.collection("feed_posts").doc("post_multi_cat_1").update({
+      userReactions: { [BOB_UID]: "DUA" },
+      userReactionNames: { [BOB_UID]: "মুফতি মাহমুদ" },
+      updatedAt: nowDate(),
+    })
+  );
+
+  // 3. Bob CANNOT forge a reaction on behalf of Alice or edit Alice's post title
+  await assertFails(
+    bobDb.collection("feed_posts").doc("post_multi_cat_1").update({
+      userReactions: { [BOB_UID]: "DUA", [ALICE_UID]: "SAMMATI" },
+      updatedAt: nowDate(),
+    })
+  );
+  await assertFails(
+    bobDb.collection("feed_posts").doc("post_multi_cat_1").update({
+      title: "অননুমোদিত পরিবর্তন",
+      updatedAt: nowDate(),
+    })
+  );
+
+  // 4. Bob adds a public comment on Alice's post and increments commentCount
+  await assertSucceeds(
+    bobDb.collection("post_comments").doc("comment_1").set({
+      postId: "post_multi_cat_1",
+      authorId: BOB_UID,
+      authorName: "মুফতি মাহমুদ",
+      authorPhotoUrl: "preset:scholar_gold",
+      text: "মাশাআল্লাহ, আল্লাহ আপনার খেদমত কবুল করুন।",
+      parentCommentId: "",
+      replyToAuthorName: "",
+      isEdited: false,
+      visibility: "PUBLIC",
+      createdAt: nowDate(),
+      updatedAt: nowDate(),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("feed_posts").doc("post_multi_cat_1").update({
+      commentCount: 1,
+      updatedAt: nowDate(),
+    })
+  );
+
+  // 5. Alice replies to Bob's comment
+  await assertSucceeds(
+    aliceDb.collection("post_comments").doc("comment_reply_1").set({
+      postId: "post_multi_cat_1",
+      authorId: ALICE_UID,
+      authorName: "মাওলানা আব্দুল্লাহ",
+      text: "আমিন, জাযাকাল্লাহু খাইরান।",
+      parentCommentId: "comment_1",
+      replyToAuthorName: "মুফতি মাহমুদ",
+      isEdited: false,
+      visibility: "PUBLIC",
+      createdAt: nowDate(),
+      updatedAt: nowDate(),
+    })
+  );
+
+  // 6. Alice CANNOT edit or delete Bob's comment
+  await assertFails(
+    aliceDb.collection("post_comments").doc("comment_1").update({
+      text: "পরিবর্তিত কমেন্ট",
+      isEdited: true,
+      updatedAt: nowDate(),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("post_comments").doc("comment_1").delete()
+  );
+
+  // 7. Bob CAN edit and delete his own comment
+  await assertSucceeds(
+    bobDb.collection("post_comments").doc("comment_1").update({
+      text: "মাশাআল্লাহ, আল্লাহ তাআলা আপনার ইলম ও আমলে বরকত দান করুন।",
+      isEdited: true,
+      updatedAt: nowDate(),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("post_comments").doc("comment_1").delete()
+  );
+
+  // 8. Bob shares Alice's post as a GENERAL_POST in the feed
+  await assertSucceeds(
+    bobDb.collection("feed_posts").doc("post_shared_1").set({
+      authorId: BOB_UID,
+      authorName: "মুফতি মাহমুদ",
+      postType: "GENERAL_POST",
+      title: "দ্বীনি খেদমত পোস্ট শেয়ার",
+      district: "ঢাকা",
+      upazilaOrLocation: "",
+      designation: "দ্বীনি আলোচনা",
+      qualification: "",
+      salaryOrExperience: "",
+      deadlineOrPreferredDistricts: "",
+      description: "যোগ্য উস্তাযের আবেদনটি সবার দৃষ্টি আকর্ষণ করছি।",
+      contactNumber: "",
+      madrasaId: "",
+      isVerifiedMadrasa: false,
+      isBoosted: false,
+      sharedPostId: "post_multi_cat_1",
+      sharedAuthorId: ALICE_UID,
+      sharedAuthorName: "মাওলানা আব্দুল্লাহ",
+      sharedTitle: "মাওলানা আব্দুল্লাহ",
+      sharedDescription: "নূরানী, নাজেরা ও ইমামতি খেদমতে আগ্রহী।",
+      sharedPostType: "SEEKER_APPLICATION",
+      visibility: "PUBLIC",
+      approvalStatus: "APPROVED",
+      createdAt: nowDate(),
+      updatedAt: nowDate(),
+    })
+  );
+});
+
+
 

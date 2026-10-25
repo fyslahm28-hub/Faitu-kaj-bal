@@ -3720,7 +3720,7 @@ private fun AdminTelegramIntegrationView(
 
                     val statusExplanation = getMeDiagResult?.diagnosticMessageBangla
                         ?: if (!isTokenConfigured) {
-                            "সতর্কতা: অ্যাপের পরিবেশে TELEGRAM_BOT_TOKEN কনফিগার করা নেই (অথবা বট ৮৯১৭১৬০৮৭৮-এর আগের টোকেনটি @BotFather-এ বাতিল/401 Unauthorized হয়েছে)। AI Studio-এর Secrets প্যানেলে বট ৮৯১৭১৬০৮৭৮-এর সক্রিয় টোকেন সেট করুন।"
+                            "সতর্কতা: অ্যাপের পরিবেশে TELEGRAM_BOT_TOKEN কনফিগার করা নেই। AI Studio-এর Secrets প্যানেলে বট ৮৯৮২৮৫৩১৯৭-এর সক্রিয় টোকেন সেট করুন।"
                         } else {
                             "বট টোকেন কনফিগার করা আছে। নিচের 'বট সংযোগ যাচাই করুন (getMe API)' বাটনে ট্যাপ করে টেলিগ্রাম সার্ভারের সরাসরি রেসপন্স পরীক্ষা করুন।"
                         }

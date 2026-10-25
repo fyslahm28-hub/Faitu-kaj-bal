@@ -79,6 +79,41 @@ tasks.withType<Test> {
   }
 }
 
+// Synchronize secrets injected via AI Studio Secrets panel environment variables into the gitignored .env file
+// so the Secrets Gradle Plugin populates BuildConfig fields accurately without hardcoding secrets.
+val envExampleFile = rootProject.file(".env.example")
+val dotEnvFile = rootProject.file(".env")
+if (envExampleFile.exists()) {
+  val envLines = mutableListOf<String>()
+  val existingMap = mutableMapOf<String, String>()
+  if (dotEnvFile.exists()) {
+    dotEnvFile.readLines().forEach { line ->
+      val trimmed = line.trim()
+      if (trimmed.isNotEmpty() && !trimmed.startsWith("#") && trimmed.contains("=")) {
+        val k = trimmed.substringBefore("=").trim()
+        val v = trimmed.substringAfter("=").trim()
+        existingMap[k] = v
+      }
+    }
+  }
+  var updatedFromEnv = false
+  envExampleFile.readLines().forEach { line ->
+    val trimmed = line.trim()
+    if (trimmed.isNotEmpty() && !trimmed.startsWith("#") && trimmed.contains("=")) {
+      val key = trimmed.substringBefore("=").trim()
+      val sysVal = System.getenv(key)?.trim()
+      if (!sysVal.isNullOrEmpty()) {
+        existingMap[key] = sysVal
+        updatedFromEnv = true
+      }
+    }
+  }
+  if (updatedFromEnv && existingMap.isNotEmpty()) {
+    existingMap.forEach { (k, v) -> envLines.add("$k=$v") }
+    dotEnvFile.writeText(envLines.joinToString("\n") + "\n")
+  }
+}
+
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
 secrets {

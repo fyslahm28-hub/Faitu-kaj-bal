@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap
 object TelegramNotificationHelper {
 
     const val DEFAULT_ADMIN_CHAT_ID = "6255562134"
-    const val DEFAULT_ADMIN_BOT_ID = "8917160878"
+    const val DEFAULT_ADMIN_BOT_ID = "8982853197"
 
     private const val PLACEHOLDER_TOKEN = "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE"
     private const val PLACEHOLDER_CHAT_ID = "TELEGRAM_CHAT_ID_DEFAULT_VALUE"
@@ -67,14 +67,30 @@ object TelegramNotificationHelper {
     }
 
     /**
-     * Permanently fitted Telegram Bot ID inside the app (8917160878).
+     * Permanently fitted Telegram Bot ID inside the app (8982853197).
      */
     fun resolveConfiguredBotId(): String {
+        val token = BuildConfig.TELEGRAM_BOT_TOKEN.trim()
+        if (token.isNotBlank() && token != PLACEHOLDER_TOKEN && token.contains(":")) {
+            val prefix = token.substringBefore(":").trim()
+            if (prefix.matches(Regex("""^\d{6,15}$"""))) {
+                return prefix
+            }
+        }
         return DEFAULT_ADMIN_BOT_ID
     }
 
     private fun resolveActiveBotToken(): String {
-        return BuildConfig.TELEGRAM_BOT_TOKEN.trim()
+        val fromBuildConfig = BuildConfig.TELEGRAM_BOT_TOKEN.trim()
+        if (fromBuildConfig.isNotBlank() && fromBuildConfig != PLACEHOLDER_TOKEN) {
+            return fromBuildConfig
+        }
+        val fromEnv = try {
+            System.getenv("TELEGRAM_BOT_TOKEN")?.trim().orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+        return if (fromEnv.isNotBlank()) fromEnv else fromBuildConfig
     }
 
     fun isChatIdStructurallyValid(chatId: String = resolveTargetChatId()): Boolean {
@@ -190,7 +206,7 @@ object TelegramNotificationHelper {
                 "Telegram API 401 (Unauthorized): বট টোকেনটি বৈধ নয় অথবা @BotFather থেকে বাতিল/পরিবর্তিত (Revoked) হয়েছে। অনুগ্রহ করে @BotFather থেকে বট ($botId)-এর সক্রিয় টোকেন নিয়ে AI Studio Secrets প্যানেলে TELEGRAM_BOT_TOKEN হালনাগাদ করুন।"
             }
             httpCode == 400 && lower.contains("chat not found") -> {
-                "Telegram API 400 (chat not found): চ্যাট আইডি ($chatId) খুঁজে পাওয়া যায়নি অথবা ঐ টেলিগ্রাম অ্যাকাউন্ট থেকে এখনো বটটিতে মেসেজ (/start) পাঠানো হয়নি।"
+                "Telegram API 400 (chat not found): বট টোকেন শতভাগ সচল, কিন্তু চ্যাট আইডি ($chatId) থেকে নতুন বটটিতে (@Quwmi_kormosongsthan_bot) এখনো মেসেজ (/start) পাঠানো হয়নি। টেলিগ্রামে @Quwmi_kormosongsthan_bot ওপেন করে Start বাটনে চাপুন।"
             }
             httpCode == 403 && (lower.contains("blocked") || lower.contains("forbidden")) -> {
                 "Telegram API 403 (Forbidden): চ্যাট আইডি ($chatId) থেকে বটটিকে ব্লক করা হয়েছে অথবা বটের মেসেজ পাঠানোর অনুমতি নেই। বট আনব্লক করে /start পাঠান।"
@@ -556,6 +572,29 @@ object TelegramNotificationHelper {
         return result.sendMessageOk
     }
 
+    private fun escapeJsonString(raw: String): String {
+        val sb = StringBuilder(raw.length + 16)
+        for (ch in raw) {
+            when (ch) {
+                '\\' -> sb.append("\\\\")
+                '"' -> sb.append("\\\"")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                else -> {
+                    if (ch < ' ') {
+                        sb.append(String.format(Locale.US, "\\u%04x", ch.code))
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+            }
+        }
+        return sb.toString()
+    }
+
     private fun executeSendMessageHttpCall(
         token: String,
         chatId: String,
@@ -565,11 +604,7 @@ object TelegramNotificationHelper {
         var conn: HttpURLConnection? = null
         return try {
             val apiUrl = URL("https://api.telegram.org/bot$token/sendMessage")
-            val payload = JSONObject().apply {
-                put("chat_id", chatId)
-                put("text", formattedText)
-                put("disable_web_page_preview", true)
-            }.toString()
+            val payload = """{"chat_id":"${escapeJsonString(chatId)}","text":"${escapeJsonString(formattedText)}","disable_web_page_preview":true}"""
 
             conn = (apiUrl.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
