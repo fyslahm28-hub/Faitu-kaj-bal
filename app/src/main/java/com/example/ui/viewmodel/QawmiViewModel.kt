@@ -1641,7 +1641,10 @@ class QawmiViewModel(
         versionName: String,
         apkDownloadUrl: String,
         releaseNotes: String,
+        apkSha256: String = "",
+        apkFileSizeBytes: Long = 0L,
         isMandatory: Boolean = false,
+        releaseStatus: String = "PUBLISHED",
         onComplete: () -> Unit = {}
     ) {
         if (!isAdminUser) {
@@ -1657,13 +1660,21 @@ class QawmiViewModel(
                 versionName = versionName,
                 apkDownloadUrl = apkDownloadUrl,
                 releaseNotes = releaseNotes,
+                apkSha256 = apkSha256,
+                apkFileSizeBytes = apkFileSizeBytes,
                 isMandatory = isMandatory,
+                releaseStatus = releaseStatus,
                 publishedBy = adminName
             )
             _isSubmitting.value = false
             result.onSuccess {
                 _dismissedUpdateVersionCode.value = null
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, নতুন অ্যাপ সংস্করণ ($versionName / কোড $versionCode) ফায়ারবেসে প্রকাশিত হয়েছে।"
+                val statusLabel = when (releaseStatus.uppercase()) {
+                    "PAUSED" -> "সাময়িক স্থগিত"
+                    "DISABLED" -> "বন্ধ"
+                    else -> "প্রকাশিত"
+                }
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, অ্যাপ আপডেট সংস্করণ ($versionName / কোড $versionCode — অবস্থা: $statusLabel) সংরক্ষিত হয়েছে।"
                 onComplete()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "নতুন আপডেট তথ্য সংরক্ষণ করা যায়নি।"

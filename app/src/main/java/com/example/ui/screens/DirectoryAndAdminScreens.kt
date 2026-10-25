@@ -4071,6 +4071,7 @@ fun AdminPanelScreen(
     feedPostsState: UiState<List<FeedPost>>,
     telegramNotificationsState: UiState<List<TelegramNotificationLog>> = UiState.Success(emptyList()),
     adminsState: UiState<List<com.example.data.model.AdminRegistryEntry>> = UiState.Success(emptyList()),
+    latestAppRelease: com.example.data.model.AppReleaseInfo? = null,
     isSubmitting: Boolean = false,
     onRetryServerLoad: () -> Unit = {},
     onVerifyUser: (UserProfile, Boolean) -> Unit = { _, _ -> },
@@ -4085,6 +4086,16 @@ fun AdminPanelScreen(
     onRecordLiveAdminAction: (eventType: String, title: String, message: String, referenceId: String) -> Unit = { _, _, _, _ -> },
     onRequestPasswordReset: (email: String) -> Unit = {},
     onSendTestTelegramAlert: (customMessage: String) -> Unit = {},
+    onPublishAppRelease: (
+        versionCode: Int,
+        versionName: String,
+        apkDownloadUrl: String,
+        apkSha256: String,
+        apkFileSizeBytes: Long,
+        releaseNotes: String,
+        isMandatory: Boolean,
+        releaseStatus: String
+    ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onDeletePost: (String) -> Unit
 ) {
     ModernAdminPanelRoot(
@@ -4097,6 +4108,7 @@ fun AdminPanelScreen(
         feedPostsState = feedPostsState,
         telegramNotificationsState = telegramNotificationsState,
         adminsState = adminsState,
+        latestAppRelease = latestAppRelease,
         isSubmitting = isSubmitting,
         onRetryServerLoad = onRetryServerLoad,
         onVerifyUser = onVerifyUser,
@@ -4108,6 +4120,7 @@ fun AdminPanelScreen(
         onSendAnnouncement = onSendAnnouncement,
         onRecordLiveAdminAction = onRecordLiveAdminAction,
         onSendTestTelegramAlert = onSendTestTelegramAlert,
+        onPublishAppRelease = onPublishAppRelease,
         onDeletePost = onDeletePost
     )
 }

@@ -167,6 +167,7 @@ fun ModernAdminPanelRoot(
     feedPostsState: UiState<List<FeedPost>>,
     telegramNotificationsState: UiState<List<TelegramNotificationLog>>,
     adminsState: UiState<List<AdminRegistryEntry>> = UiState.Success(emptyList()),
+    latestAppRelease: com.example.data.model.AppReleaseInfo? = null,
     isSubmitting: Boolean,
     onVerifyUser: (UserProfile, Boolean) -> Unit,
     onUpdateSubmissionStatus: (KhedmotSubmission, String) -> Unit,
@@ -177,6 +178,16 @@ fun ModernAdminPanelRoot(
     onSendAnnouncement: (title: String, message: String) -> Unit,
     onRecordLiveAdminAction: (eventType: String, title: String, message: String, referenceId: String) -> Unit,
     onSendTestTelegramAlert: (customMessage: String) -> Unit,
+    onPublishAppRelease: (
+        versionCode: Int,
+        versionName: String,
+        apkDownloadUrl: String,
+        apkSha256: String,
+        apkFileSizeBytes: Long,
+        releaseNotes: String,
+        isMandatory: Boolean,
+        releaseStatus: String
+    ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onRetryServerLoad: () -> Unit = {},
     onDeletePost: (String) -> Unit
 ) {
@@ -471,6 +482,8 @@ fun ModernAdminPanelRoot(
                         notifyNewNotice = notifyNewNotice,
                         pushNotificationsEnabled = pushNotificationsEnabled,
                         appAnalyticsEnabled = appAnalyticsEnabled,
+                        latestAppRelease = latestAppRelease,
+                        isSubmitting = isSubmitting,
                         onToggleNewApp = { enabled ->
                             notifyNewApplication = enabled
                             onRecordLiveAdminAction(
@@ -522,6 +535,24 @@ fun ModernAdminPanelRoot(
                                 "অ্যাপ কনফিগারেশন হালনাগাদ",
                                 "অ্যাপ কনফিগারেশন ও সার্ভার সেটিংস সফলভাবে হালনাগাদ করা হয়েছে।",
                                 "app_config"
+                            )
+                        },
+                        onPublishAppRelease = { verCode, verName, apkUrl, sha256, sizeBytes, notes, mandatory, status ->
+                            onPublishAppRelease(
+                                verCode,
+                                verName,
+                                apkUrl,
+                                sha256,
+                                sizeBytes,
+                                notes,
+                                mandatory,
+                                status
+                            )
+                            onRecordLiveAdminAction(
+                                "ADMIN_SETTINGS_CHANGE",
+                                "অ্যাপ আপডেট সংস্করণ কনফিগারেশন ($verName / কোড $verCode)",
+                                "অবস্থা: $status | বাধ্যতামূলক: ${if (mandatory) "হ্যাঁ" else "না"} | লিংক: $apkUrl",
+                                "app_release_$verCode"
                             )
                         },
                         onBack = { handleBack() }
@@ -3107,6 +3138,8 @@ private fun AdminAppSettingsView(
     notifyNewNotice: Boolean,
     pushNotificationsEnabled: Boolean,
     appAnalyticsEnabled: Boolean,
+    latestAppRelease: com.example.data.model.AppReleaseInfo? = null,
+    isSubmitting: Boolean = false,
     onToggleNewApp: (Boolean) -> Unit,
     onToggleNewNotice: (Boolean) -> Unit,
     onTogglePush: (Boolean) -> Unit,
@@ -3114,8 +3147,60 @@ private fun AdminAppSettingsView(
     onOpenPermissions: () -> Unit,
     onTriggerBackup: () -> Unit,
     onTriggerConfigSync: () -> Unit,
+    onPublishAppRelease: (
+        versionCode: Int,
+        versionName: String,
+        apkDownloadUrl: String,
+        apkSha256: String,
+        apkFileSizeBytes: Long,
+        releaseNotes: String,
+        isMandatory: Boolean,
+        releaseStatus: String
+    ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onBack: () -> Unit
 ) {
+    var versionNameInput by rememberSaveable(latestAppRelease?.versionName) {
+        mutableStateOf(latestAppRelease?.versionName?.takeIf { it.isNotBlank() } ?: "1.0.2")
+    }
+    var versionCodeInput by rememberSaveable(latestAppRelease?.versionCode) {
+        mutableStateOf((latestAppRelease?.versionCode?.takeIf { it > 0 } ?: 2).toString())
+    }
+    var apkUrlInput by rememberSaveable(latestAppRelease?.apkDownloadUrl) {
+        mutableStateOf(
+            latestAppRelease?.apkDownloadUrl?.takeIf { it.isNotBlank() }
+                ?: "https://github.com/qawmi-bd/qawmi-kormosangsthan/releases/latest/download/Qawmi-Kormosangsthan-Bangladesh.apk"
+        )
+    }
+    var apkSha256Input by rememberSaveable(latestAppRelease?.apkSha256) {
+        mutableStateOf(latestAppRelease?.apkSha256.orEmpty())
+    }
+    var apkFileSizeInput by rememberSaveable(latestAppRelease?.apkFileSizeBytes) {
+        mutableStateOf(
+            latestAppRelease?.apkFileSizeBytes?.takeIf { it > 0L }?.toString().orEmpty()
+        )
+    }
+    var releaseNotesInput by rememberSaveable(latestAppRelease?.releaseNotes) {
+        mutableStateOf(
+            latestAppRelease?.releaseNotes?.takeIf { it.isNotBlank() }
+                ?: "নতুন ফিচার, উন্নত নিরাপত্তা ও পারফরম্যান্স যুক্ত করা হয়েছে।"
+        )
+    }
+    var isMandatoryInput by rememberSaveable(latestAppRelease?.isMandatory) {
+        mutableStateOf(latestAppRelease?.isMandatory ?: false)
+    }
+    var releaseStatusInput by rememberSaveable(latestAppRelease?.releaseStatus, latestAppRelease?.isPublished) {
+        mutableStateOf(
+            when {
+                latestAppRelease == null -> "PUBLISHED"
+                !latestAppRelease.isPublished && latestAppRelease.releaseStatus == "PUBLISHED" -> "PAUSED"
+                latestAppRelease.releaseStatus.uppercase() in setOf("PUBLISHED", "PAUSED", "DISABLED") ->
+                    latestAppRelease.releaseStatus.uppercase()
+                else -> "PUBLISHED"
+            }
+        )
+    }
+    var validationMessage by remember { mutableStateOf<String?>(null) }
+
     Column(modifier = Modifier.fillMaxSize()) {
         AdminTopHeaderBar(
             title = "অ্যাপ সেটিংস",
@@ -3192,6 +3277,230 @@ private fun AdminAppSettingsView(
                         label = "অ্যাপ কনফিগারেশন",
                         onClick = onTriggerConfigSync
                     )
+                }
+            }
+
+            // অ্যাপ আপডেট ও সংস্করণ নিয়ন্ত্রণ (Firebase /app_releases/latest)
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, AdminCardBorder, RoundedCornerShape(16.dp))
+                    .testTag("admin_app_update_control_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "অ্যাপ আপডেট ও সংস্করণ নিয়ন্ত্রণ",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = AdminHeaderDarkGreen
+                    )
+                    Text(
+                        text = "সর্বশেষ সংস্করণ, নিরাপদ HTTPS ডাউনলোড লিংক, SHA-256 চেকসাম এবং রিলিজের অবস্থা নির্ধারণ করুন।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = QawmiTextSecondary
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = versionNameInput,
+                            onValueChange = { versionNameInput = it },
+                            label = { Text("সংস্করণের নাম *") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("admin_update_version_name_input")
+                        )
+                        OutlinedTextField(
+                            value = versionCodeInput,
+                            onValueChange = { versionCodeInput = it.filter { ch -> ch.isDigit() } },
+                            label = { Text("সংস্করণ কোড *") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("admin_update_version_code_input")
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = apkUrlInput,
+                        onValueChange = { apkUrlInput = it },
+                        label = { Text("APK ডাউনলোড লিংক (HTTPS) *") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_update_apk_url_input")
+                    )
+
+                    OutlinedTextField(
+                        value = apkSha256Input,
+                        onValueChange = { apkSha256Input = it.trim() },
+                        label = { Text("APK SHA-256 Checksum (৬৪ অক্ষরের Hex)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_update_sha256_input")
+                    )
+
+                    OutlinedTextField(
+                        value = apkFileSizeInput,
+                        onValueChange = { apkFileSizeInput = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("APK ফাইল সাইজ (বাইট - ঐচ্ছিক)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_update_file_size_input")
+                    )
+
+                    OutlinedTextField(
+                        value = releaseNotesInput,
+                        onValueChange = { releaseNotesInput = it },
+                        label = { Text("রিলিজ নোট / পরিবর্তনের বিবরণ *") },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_update_release_notes_input")
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "বাধ্যতামূলক আপডেট (Mandatory)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = QawmiTextDark
+                            )
+                            Text(
+                                text = if (isMandatoryInput) "বাধ্যতামূলক (সকল ইউজারের জন্য জরুরি)" else "ঐচ্ছিক (ইউজার 'পরে করুন' চাপতে পারবেন)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiTextSecondary
+                            )
+                        }
+                        Switch(
+                            checked = isMandatoryInput,
+                            onCheckedChange = { isMandatoryInput = it },
+                            modifier = Modifier.testTag("admin_update_mandatory_switch")
+                        )
+                    }
+
+                    Text(
+                        text = "রিলিজের অবস্থা:",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = QawmiTextDark
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val statusOptions = listOf(
+                            "PUBLISHED" to "প্রকাশিত",
+                            "PAUSED" to "সাময়িক স্থগিত",
+                            "DISABLED" to "বন্ধ"
+                        )
+                        statusOptions.forEach { (statusCode, statusLabel) ->
+                            val selected = releaseStatusInput == statusCode
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) AdminHeaderDarkGreen else QawmiMintSurface,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { releaseStatusInput = statusCode }
+                                    .testTag("admin_update_status_${statusCode.lowercase()}")
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = statusLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (selected) Color.White else QawmiTextDark
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (validationMessage != null) {
+                        Text(
+                            text = validationMessage.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFC62828),
+                            modifier = Modifier.testTag("admin_update_validation_message")
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            val parsedCode = versionCodeInput.trim().toIntOrNull() ?: 0
+                            val parsedSize = apkFileSizeInput.trim().toLongOrNull() ?: 0L
+                            val trimmedName = versionNameInput.trim()
+                            val trimmedUrl = apkUrlInput.trim()
+                            val trimmedSha = com.example.ui.util.AppUpdateManagerHelper.normalizeSha256(apkSha256Input)
+                            when {
+                                parsedCode < 1 -> {
+                                    validationMessage = "সঠিক সংস্করণ কোড (ন্যূনতম ১) প্রদান করুন।"
+                                }
+                                trimmedName.isBlank() -> {
+                                    validationMessage = "সঠিক সংস্করণের নাম লিখুন।"
+                                }
+                                !com.example.ui.util.AppUpdateManagerHelper.isTrustedHttpsApkUrl(trimmedUrl) -> {
+                                    validationMessage = "শুধুমাত্র বৈধ HTTPS APK ডাউনলোড লিংক (https://...) প্রদান করুন।"
+                                }
+                                trimmedSha.isNotBlank() && !com.example.ui.util.AppUpdateManagerHelper.isValidSha256Hex(trimmedSha) -> {
+                                    validationMessage = "SHA-256 চেকসাম অবশ্যই ৬৪ অক্ষরের বৈধ Hex হতে হবে।"
+                                }
+                                else -> {
+                                    validationMessage = null
+                                    onPublishAppRelease(
+                                        parsedCode,
+                                        trimmedName,
+                                        trimmedUrl,
+                                        trimmedSha,
+                                        parsedSize,
+                                        releaseNotesInput.trim(),
+                                        isMandatoryInput,
+                                        releaseStatusInput
+                                    )
+                                }
+                            }
+                        },
+                        enabled = !isSubmitting,
+                        colors = ButtonDefaults.buttonColors(containerColor = AdminHeaderDarkGreen),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("admin_publish_update_btn")
+                    ) {
+                        Text(
+                            text = "আপডেট তথ্য সংরক্ষণ করুন",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }

@@ -3101,24 +3101,32 @@ class QawmiRepository(
         versionName: String,
         apkDownloadUrl: String,
         releaseNotes: String,
+        apkSha256: String = "",
+        apkFileSizeBytes: Long = 0L,
         commitSha: String = "",
         githubReleaseTag: String = "",
         isMandatory: Boolean = false,
+        releaseStatus: String = "PUBLISHED",
         publishedBy: String = "নাজিমে আলা (অ্যাডমিন)"
     ): Result<Unit> {
         requireUserId()
         val trimmedUrl = apkDownloadUrl.trim()
         val trimmedVersionName = versionName.trim()
+        val normalizedSha256 = AppUpdateManagerHelper.normalizeSha256(apkSha256)
+        val normalizedStatus = releaseStatus.trim().uppercase().let {
+            if (it in setOf("PUBLISHED", "PAUSED", "DISABLED")) it else "PUBLISHED"
+        }
         if (versionCode < 1) {
             return Result.failure(IllegalArgumentException("সঠিক ভার্সন কোড প্রদান করুন (ন্যূনতম ১)।"))
         }
         if (trimmedVersionName.isBlank()) {
             return Result.failure(IllegalArgumentException("সঠিক ভার্সন নাম লিখুন (যেমন: 1.0.2)।"))
         }
-        if (!trimmedUrl.startsWith("https://", ignoreCase = true) &&
-            !trimmedUrl.startsWith("http://", ignoreCase = true)
-        ) {
-            return Result.failure(IllegalArgumentException("সঠিক APK ডাউনলোড লিংক (https://...) প্রদান করুন।"))
+        if (!AppUpdateManagerHelper.isTrustedHttpsApkUrl(trimmedUrl)) {
+            return Result.failure(IllegalArgumentException("নিরাপদ ও বৈধ HTTPS APK ডাউনলোড লিংক (https://...) প্রদান করুন।"))
+        }
+        if (normalizedSha256.isNotBlank() && !AppUpdateManagerHelper.isValidSha256Hex(normalizedSha256)) {
+            return Result.failure(IllegalArgumentException("সঠিক ৬৪ অক্ষরের SHA-256 চেকসাম (Hex) প্রদান করুন।"))
         }
 
         val latestRef = db.collection("app_releases").document("latest")
@@ -3128,6 +3136,7 @@ class QawmiRepository(
         }
         val safePublisher = publishedBy.trim().ifBlank { "GitHub Actions CI" }
         val safeTag = githubReleaseTag.trim().ifBlank { "v$trimmedVersionName" }
+        val isPublishedBool = normalizedStatus == "PUBLISHED"
 
         return try {
             val latestPayload = mapOf(
@@ -3135,10 +3144,14 @@ class QawmiRepository(
                 "versionCode" to versionCode,
                 "versionName" to trimmedVersionName,
                 "apkDownloadUrl" to trimmedUrl,
+                "apkSha256" to normalizedSha256,
+                "apkFileSizeBytes" to apkFileSizeBytes.coerceAtLeast(0L),
                 "releaseNotes" to safeNotes,
                 "commitSha" to commitSha.trim(),
                 "githubReleaseTag" to safeTag,
                 "isMandatory" to isMandatory,
+                "isPublished" to isPublishedBool,
+                "releaseStatus" to normalizedStatus,
                 "publishedBy" to safePublisher,
                 "publishedAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()

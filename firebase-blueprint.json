@@ -229,16 +229,20 @@
       }
     },
     "AppReleaseInfo": {
-      "description": "Latest APK release metadata managed via Firebase and GitHub Actions for in-app auto-update detection and installation.",
+      "description": "Latest APK release metadata managed via Firebase and GitHub Actions for in-app auto-update detection, SHA-256 verification, and installation.",
       "properties": {
         "releaseId": { "type": "string", "required": true },
         "versionCode": { "type": "number", "required": true },
         "versionName": { "type": "string", "required": true },
         "apkDownloadUrl": { "type": "string", "required": true },
+        "apkSha256": { "type": "string", "required": false },
+        "apkFileSizeBytes": { "type": "number", "required": false },
         "releaseNotes": { "type": "string", "required": true },
         "commitSha": { "type": "string", "required": false },
         "githubReleaseTag": { "type": "string", "required": false },
         "isMandatory": { "type": "boolean", "required": false },
+        "isPublished": { "type": "boolean", "required": false },
+        "releaseStatus": { "type": "string", "required": false, "enum": ["PUBLISHED", "PAUSED", "DISABLED"] },
         "publishedBy": { "type": "string", "required": true },
         "publishedAt": { "type": "timestamp", "required": true },
         "updatedAt": { "type": "timestamp", "required": true }

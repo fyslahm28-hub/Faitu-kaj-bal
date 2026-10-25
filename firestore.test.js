@@ -573,7 +573,7 @@ test("Facebook-Style Islamic Feed: multi-category Khedmot posts, GENERAL_POST, r
   );
 });
 
-test("App Releases Auto-Update: signed-in users can read /app_releases/latest; only admins can publish or update release metadata", async () => {
+test("App Releases Auto-Update: pre-login and signed-in users can read /app_releases/latest; only admins can publish or update release metadata", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
   const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
     email: "regular_user@gmail.com",
@@ -589,10 +589,14 @@ test("App Releases Auto-Update: signed-in users can read /app_releases/latest; o
     versionCode: 102,
     versionName: "1.0.2",
     apkDownloadUrl: "https://github.com/qawmi-bd/qawmi-kormosangsthan/releases/download/v1.0.2/Qawmi-Kormosangsthan-Bangladesh.apk",
+    apkSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    apkFileSizeBytes: 18452000,
     releaseNotes: "নতুন ফিচার ও দ্রুততর পারফরম্যান্স যুক্ত করা হয়েছে।",
     commitSha: "a1b2c3d4e5f6",
     githubReleaseTag: "v1.0.2",
     isMandatory: false,
+    isPublished: true,
+    releaseStatus: "PUBLISHED",
     publishedBy: "GitHub Actions CI / Super Admin",
     publishedAt: ts,
     updatedAt: ts,
@@ -602,14 +606,19 @@ test("App Releases Auto-Update: signed-in users can read /app_releases/latest; o
   await assertFails(
     aliceDb.collection("app_releases").doc("latest").set(releasePayload)
   );
+  await assertFails(
+    unauthDb.collection("app_releases").doc("latest").set(releasePayload)
+  );
 
   // Admin can publish /app_releases/latest
   await assertSucceeds(
     adminDb.collection("app_releases").doc("latest").set(releasePayload)
   );
 
-  // Unauthenticated user cannot read /app_releases/latest
-  await assertFails(unauthDb.collection("app_releases").doc("latest").get());
+  // Unauthenticated user CAN read /app_releases/latest (pre-login update check), but CANNOT list or read other release docs
+  await assertSucceeds(unauthDb.collection("app_releases").doc("latest").get());
+  await assertFails(unauthDb.collection("app_releases").doc("v_102").get());
+  await assertFails(unauthDb.collection("app_releases").get());
 
   // Authenticated user CAN read and list /app_releases/latest
   await assertSucceeds(aliceDb.collection("app_releases").doc("latest").get());

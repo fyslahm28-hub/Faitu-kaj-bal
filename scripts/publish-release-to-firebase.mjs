@@ -223,16 +223,22 @@ async function mintGoogleAccessToken(serviceAccount) {
 
 function buildFirestoreDocumentFields(release) {
   const timestampIso = new Date(Date.now() - 1000).toISOString();
+  const status = String(release.releaseStatus || "PUBLISHED").toUpperCase();
+  const isPublished = release.isPublished !== undefined ? Boolean(release.isPublished) : status === "PUBLISHED";
   return {
     fields: {
       releaseId: { stringValue: String(release.releaseId) },
       versionCode: { integerValue: String(release.versionCode) },
       versionName: { stringValue: String(release.versionName) },
       apkDownloadUrl: { stringValue: String(release.apkDownloadUrl) },
+      apkSha256: { stringValue: String(release.apkSha256 || "") },
+      apkFileSizeBytes: { integerValue: String(release.apkFileSizeBytes || 0) },
       releaseNotes: { stringValue: String(release.releaseNotes) },
       commitSha: { stringValue: String(release.commitSha || "") },
       githubReleaseTag: { stringValue: String(release.githubReleaseTag || "") },
       isMandatory: { booleanValue: Boolean(release.isMandatory) },
+      isPublished: { booleanValue: isPublished },
+      releaseStatus: { stringValue: status },
       publishedBy: { stringValue: String(release.publishedBy) },
       publishedAt: { timestampValue: timestampIso },
       updatedAt: { timestampValue: timestampIso },
@@ -394,6 +400,12 @@ async function main() {
     args["apk-url"] ||
     process.env.RELEASE_APK_URL ||
     "";
+  const apkSha256 =
+    (args["apk-sha256"] || process.env.RELEASE_APK_SHA256 || "").trim().toLowerCase();
+  const apkFileSizeBytes = parseInt(
+    args["apk-size-bytes"] || process.env.RELEASE_APK_SIZE_BYTES || "0",
+    10
+  ) || 0;
   const releaseNotes =
     args["release-notes"] ||
     process.env.RELEASE_NOTES ||
@@ -404,6 +416,8 @@ async function main() {
     args["release-tag"] || process.env.RELEASE_TAG || `v${versionName}`;
   const isMandatory =
     (args["mandatory"] || process.env.RELEASE_MANDATORY || "false") === "true";
+  const releaseStatus =
+    (args["release-status"] || process.env.RELEASE_STATUS || "PUBLISHED").trim().toUpperCase();
   const publishedBy =
     args["published-by"] ||
     process.env.GITHUB_ACTOR ||
@@ -457,10 +471,14 @@ async function main() {
     versionCode,
     versionName,
     apkDownloadUrl,
+    apkSha256,
+    apkFileSizeBytes,
     releaseNotes,
     commitSha,
     githubReleaseTag,
     isMandatory,
+    isPublished: releaseStatus === "PUBLISHED",
+    releaseStatus,
     publishedBy,
   };
 

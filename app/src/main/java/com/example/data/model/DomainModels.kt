@@ -529,6 +529,8 @@ data class AppReleaseInfo(
     val versionCode: Int = 1,
     val versionName: String = "1.0",
     val apkDownloadUrl: String = "",
+    val apkSha256: String = "",
+    val apkFileSizeBytes: Long = 0L,
     val releaseNotes: String = "",
     val commitSha: String = "",
     val githubReleaseTag: String = "",
@@ -540,6 +542,7 @@ data class AppReleaseInfo(
     @get:PropertyName("isPublished")
     @set:PropertyName("isPublished")
     var isPublished: Boolean = true,
+    val releaseStatus: String = "PUBLISHED", // "PUBLISHED", "PAUSED", "DISABLED"
     val publishedBy: String = "",
     @ServerTimestamp val publishedAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null

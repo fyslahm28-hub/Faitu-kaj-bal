@@ -25,6 +25,8 @@ jobs:
       release_tag: ${{ steps.version_meta.outputs.release_tag }}
       apk_filename: ${{ steps.version_meta.outputs.apk_filename }}
       apk_download_url: ${{ steps.version_meta.outputs.apk_download_url }}
+      apk_sha256: ${{ steps.build_apk.outputs.apk_sha256 }}
+      apk_size_bytes: ${{ steps.build_apk.outputs.apk_size_bytes }}
 
     steps:
       - name: Checkout Repository
@@ -91,6 +93,7 @@ jobs:
           fi
 
       - name: Build Debug APK with Release Version
+        id: build_apk
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
           DEFAULT_WEB_CLIENT_ID: ${{ secrets.DEFAULT_WEB_CLIENT_ID }}
@@ -100,6 +103,10 @@ jobs:
             -PversionName=${{ steps.version_meta.outputs.version_name }} \
             --no-daemon
           cp app/build/outputs/apk/debug/app-debug.apk ${{ steps.version_meta.outputs.apk_filename }}
+          APK_SHA256=$(sha256sum "${{ steps.version_meta.outputs.apk_filename }}" | awk '{print $1}')
+          APK_SIZE_BYTES=$(stat -c%s "${{ steps.version_meta.outputs.apk_filename }}" 2>/dev/null || wc -c < "${{ steps.version_meta.outputs.apk_filename }}" | tr -d ' ')
+          echo "apk_sha256=${APK_SHA256}" >> $GITHUB_OUTPUT
+          echo "apk_size_bytes=${APK_SIZE_BYTES}" >> $GITHUB_OUTPUT
 
       - name: Upload APK Artifact to GitHub Actions
         uses: actions/upload-artifact@v4
@@ -186,6 +193,8 @@ jobs:
           RELEASE_VERSION_CODE: ${{ needs.build-and-distribute.outputs.version_code }}
           RELEASE_VERSION_NAME: ${{ needs.build-and-distribute.outputs.version_name }}
           RELEASE_APK_URL: ${{ needs.build-and-distribute.outputs.apk_download_url }}
+          RELEASE_APK_SHA256: ${{ needs.build-and-distribute.outputs.apk_sha256 }}
+          RELEASE_APK_SIZE_BYTES: ${{ needs.build-and-distribute.outputs.apk_size_bytes }}
           RELEASE_TAG: ${{ needs.build-and-distribute.outputs.release_tag }}
           RELEASE_NOTES: ${{ github.event.inputs.release_notes || format('কওমি কর্মসংস্থান বাংলাদেশ নতুন সংস্করণ {0} প্রকাশিত হয়েছে। উন্নত ফিড, দ্রুততর পারফরম্যান্স ও বাগ ফিক্স যুক্ত করা হয়েছে।', needs.build-and-distribute.outputs.version_name) }}
           GITHUB_SHA: ${{ github.sha }}
@@ -195,7 +204,10 @@ jobs:
             --version-code "${RELEASE_VERSION_CODE}" \
             --version-name "${RELEASE_VERSION_NAME}" \
             --apk-url "${RELEASE_APK_URL}" \
+            --apk-sha256 "${RELEASE_APK_SHA256}" \
+            --apk-size-bytes "${RELEASE_APK_SIZE_BYTES}" \
             --release-tag "${RELEASE_TAG}" \
             --commit-sha "${GITHUB_SHA}" \
             --release-notes "${RELEASE_NOTES}" \
+            --release-status "PUBLISHED" \
             --require-service-account true

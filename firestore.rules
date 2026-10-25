@@ -340,10 +340,14 @@ service cloud.firestore {
              data.versionName is string && data.versionName.size() >= 1 && data.versionName.size() <= 100 &&
              data.apkDownloadUrl is string && data.apkDownloadUrl.size() >= 8 && data.apkDownloadUrl.size() <= 2000 &&
              (data.apkDownloadUrl.matches('^https://.*') || data.apkDownloadUrl.matches('^http://.*')) &&
+             (!('apkSha256' in data) || (data.apkSha256 is string && data.apkSha256.size() <= 128)) &&
+             (!('apkFileSizeBytes' in data) || (data.apkFileSizeBytes is int && data.apkFileSizeBytes >= 0 && data.apkFileSizeBytes <= 1073741824)) &&
              data.releaseNotes is string && data.releaseNotes.size() <= 4000 &&
              (!('commitSha' in data) || (data.commitSha is string && data.commitSha.size() <= 128)) &&
              (!('githubReleaseTag' in data) || (data.githubReleaseTag is string && data.githubReleaseTag.size() <= 128)) &&
              (!('isMandatory' in data) || data.isMandatory is bool) &&
+             (!('isPublished' in data) || data.isPublished is bool) &&
+             (!('releaseStatus' in data) || (data.releaseStatus is string && data.releaseStatus in ['PUBLISHED', 'PAUSED', 'DISABLED'])) &&
              data.publishedBy is string && data.publishedBy.size() >= 1 && data.publishedBy.size() <= 200 &&
              isValidTimestamp(data.publishedAt) &&
              isValidTimestamp(data.updatedAt);
@@ -913,7 +917,7 @@ service cloud.firestore {
 
     // App Releases Auto-Update Metadata (অটো আপডেট ও নতুন ভার্সন তথ্য)
     match /app_releases/{releaseId} {
-      allow get: if isSignedIn() && isValidId(releaseId);
+      allow get: if isValidId(releaseId) && (releaseId == 'latest' || isSignedIn());
       allow list: if isSignedIn();
 
       allow create, update: if isAdmin() &&
@@ -926,9 +930,10 @@ service cloud.firestore {
                                ]) &&
                                incoming().keys().hasOnly([
                                  'releaseId', 'versionCode', 'versionName',
-                                 'apkDownloadUrl', 'releaseNotes', 'commitSha',
-                                 'githubReleaseTag', 'isMandatory', 'publishedBy',
-                                 'publishedAt', 'updatedAt'
+                                 'apkDownloadUrl', 'apkSha256', 'apkFileSizeBytes',
+                                 'releaseNotes', 'commitSha', 'githubReleaseTag',
+                                 'isMandatory', 'isPublished', 'releaseStatus',
+                                 'publishedBy', 'publishedAt', 'updatedAt'
                                ]) &&
                                isValidAppReleaseInfo(incoming());
 

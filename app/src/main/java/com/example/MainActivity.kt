@@ -24,11 +24,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,11 +39,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import kotlinx.coroutines.launch
 import com.example.data.model.AppReleaseInfo
 import com.example.data.repository.QawmiRepository
 import com.example.ui.auth.AuthScreen
@@ -260,6 +266,8 @@ fun AppNavigation(
     val user = currentUser
 
     if (user == null) {
+        val lifecycleOwner = LocalLifecycleOwner.current
+        val unauthScope = rememberCoroutineScope()
         val installedVersion = remember(context) { AppUpdateManagerHelper.getInstalledVersion(context) }
         var unauthLatestRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
         var unauthDismissedVersionCode by remember(context) {
@@ -267,9 +275,31 @@ fun AppNavigation(
         }
 
         LaunchedEffect(Unit) {
+            unauthDismissedVersionCode = AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
             val remote = AppUpdateManagerHelper.fetchLatestReleaseSafely(context)
             if (remote != null) {
                 unauthLatestRelease = remote
+            }
+        }
+
+        DisposableEffect(lifecycleOwner, context) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    unauthDismissedVersionCode = AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
+                    val lastCheck = AppUpdateManagerHelper.getLastUpdateCheckTimestampMs(context)
+                    if (System.currentTimeMillis() - lastCheck >= AppUpdateManagerHelper.PERIODIC_CHECK_INTERVAL_MS) {
+                        unauthScope.launch {
+                            val remote = AppUpdateManagerHelper.fetchLatestReleaseSafely(context)
+                            if (remote != null) {
+                                unauthLatestRelease = remote
+                            }
+                        }
+                    }
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
             }
         }
 

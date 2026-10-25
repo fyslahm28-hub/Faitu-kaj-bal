@@ -202,6 +202,15 @@ fun MainAppScaffold(
     val latestAppRelease by viewModel.latestAppReleaseState.collectAsStateWithLifecycle()
     val dismissedUpdateVersionCode by viewModel.dismissedUpdateVersionCode.collectAsStateWithLifecycle()
     val installedVersion = remember(context) { AppUpdateManagerHelper.getInstalledVersion(context) }
+    var fetchedFallbackRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    val effectiveLatestRelease = latestAppRelease ?: fetchedFallbackRelease
+
+    LaunchedEffect(viewModel.currentUserId) {
+        val remote = AppUpdateManagerHelper.fetchLatestReleaseSafely(context)
+        if (remote != null) {
+            fetchedFallbackRelease = remote
+        }
+    }
 
     LaunchedEffect(viewModel.currentUserId, smoronServerReceipts) {
         val todayDateKey = AjkerSmoronHelper.currentBangladeshDateKey()
@@ -1118,6 +1127,7 @@ fun MainAppScaffold(
                                 feedPostsState = feedPostsState,
                                 telegramNotificationsState = telegramNotificationsState,
                                 adminsState = adminRegistryListState,
+                                latestAppRelease = effectiveLatestRelease,
                                 isSubmitting = isSubmitting,
                                 onRetryServerLoad = { viewModel.retryAdminServerStreams() },
                                 onVerifyUser = { user, ver -> viewModel.adminUpdateUserVerification(user, ver) },
@@ -1134,6 +1144,18 @@ fun MainAppScaffold(
                                 },
                                 onRequestPasswordReset = { email -> viewModel.requestAdminPasswordReset(email) },
                                 onSendTestTelegramAlert = { customMsg -> viewModel.sendTestTelegramNotification(customMsg) },
+                                onPublishAppRelease = { verCode, verName, apkUrl, sha256, sizeBytes, notes, mandatory, status ->
+                                    viewModel.adminPublishAppRelease(
+                                        versionCode = verCode,
+                                        versionName = verName,
+                                        apkDownloadUrl = apkUrl,
+                                        releaseNotes = notes,
+                                        apkSha256 = sha256,
+                                        apkFileSizeBytes = sizeBytes,
+                                        isMandatory = mandatory,
+                                        releaseStatus = status
+                                    )
+                                },
                                 onDeletePost = { id -> viewModel.deletePost(id) }
                             )
                         }
@@ -1210,30 +1232,30 @@ fun MainAppScaffold(
                         }
                     }
 
-                    // Auto-Update Prompt Overlay (“নতুন আপডেট এসেছে” বার্তাসহ “আপডেট নিন” ও “পরে করুন” বাটন)
+                    // Auto-Update Prompt Overlay (“নতুন আপডেট উপলব্ধ” / “নতুন আপডেট এসেছে” বার্তাসহ “আপডেট নিন” ও “পরে করুন” বাটন)
                     val persistedCooldownVersion = remember(context, dismissedUpdateVersionCode) {
                         dismissedUpdateVersionCode
                             ?: AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
                     }
                     val shouldShowUpdatePrompt = remember(
                         installedVersion,
-                        latestAppRelease,
+                        effectiveLatestRelease,
                         persistedCooldownVersion
                     ) {
                         AppUpdateManagerHelper.isUpdateAvailable(
                             installedVersionCode = installedVersion.versionCode,
                             installedVersionName = installedVersion.versionName,
-                            remoteRelease = latestAppRelease,
+                            remoteRelease = effectiveLatestRelease,
                             dismissedVersionCode = persistedCooldownVersion
                         )
                     }
-                    if (shouldShowUpdatePrompt && latestAppRelease != null) {
+                    if (shouldShowUpdatePrompt && effectiveLatestRelease != null) {
                         AppUpdatePromptOverlay(
                             installedVersionCode = installedVersion.versionCode,
                             installedVersionName = installedVersion.versionName,
-                            releaseInfo = latestAppRelease!!,
+                            releaseInfo = effectiveLatestRelease!!,
                             onDismissLater = {
-                                val ver = latestAppRelease!!.versionCode
+                                val ver = effectiveLatestRelease!!.versionCode
                                 AppUpdateManagerHelper.saveDismissedUpdatePrompt(context, ver)
                                 viewModel.dismissCurrentUpdatePrompt(ver)
                             }
@@ -1662,11 +1684,84 @@ fun AppUpdatePromptOverlay(
     onDismissLater: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     var isDownloading by remember(releaseInfo.versionCode) { mutableStateOf(false) }
     var downloadProgress by remember(releaseInfo.versionCode) { mutableStateOf(0) }
     var statusMessage by remember(releaseInfo.versionCode) { mutableStateOf<String?>(null) }
     var errorMessage by remember(releaseInfo.versionCode) { mutableStateOf<String?>(null) }
+    var awaitingUnknownSourcesPermission by remember(releaseInfo.versionCode) { mutableStateOf(false) }
+    var verifiedReadyApkFile by remember(releaseInfo.versionCode) { mutableStateOf< java.io.File? >(null) }
+
+    fun attemptInstallVerifiedApk(apkFile: java.io.File) {
+        val installResult = AppUpdateManagerHelper.launchApkInstallation(
+            context = context,
+            apkFile = apkFile,
+            releaseInfo = releaseInfo,
+            fallbackDownloadUrl = releaseInfo.apkDownloadUrl
+        )
+        installResult.onSuccess {
+            awaitingUnknownSourcesPermission = false
+            errorMessage = null
+            statusMessage = "APK যাচাই ও ডাউনলোড সম্পন্ন হয়েছে। Android ইনস্টলার চালু করা হয়েছে।"
+        }.onFailure { err ->
+            if (err is com.example.ui.util.UnknownSourcesPermissionRequiredException) {
+                awaitingUnknownSourcesPermission = true
+                verifiedReadyApkFile = apkFile
+                statusMessage = "ইনস্টল অনুমতির অপেক্ষায়..."
+                errorMessage = err.message
+            } else {
+                awaitingUnknownSourcesPermission = false
+                errorMessage = err.localizedMessage
+                    ?: "ইনস্টলার চালু করা যায়নি। পুনরায় চেষ্টা করুন।"
+            }
+        }
+    }
+
+    fun startUpdateDownloadAndInstall() {
+        if (isDownloading || AppUpdateManagerHelper.isDownloadInProgress()) return
+        isDownloading = true
+        errorMessage = null
+        awaitingUnknownSourcesPermission = false
+        statusMessage = "APK ডাউনলোড ও নিরাপত্তা যাচাই শুরু হচ্ছে..."
+        scope.launch {
+            val downloadResult = AppUpdateManagerHelper.downloadApkWithProgress(
+                context = context,
+                releaseInfo = releaseInfo,
+                onProgress = { pct ->
+                    downloadProgress = pct
+                    statusMessage = "APK ডাউনলোড হচ্ছে... $pct%"
+                }
+            )
+            isDownloading = false
+            downloadResult.onSuccess { apkFile ->
+                downloadProgress = 100
+                verifiedReadyApkFile = apkFile
+                attemptInstallVerifiedApk(apkFile)
+            }.onFailure { err ->
+                verifiedReadyApkFile = null
+                errorMessage = err.localizedMessage
+                    ?: "APK ডাউনলোড ব্যর্থ হয়েছে। ইন্টারনেট সংযোগ যাচাই করে পুনরায় চেষ্টা করুন।"
+            }
+        }
+    }
+
+    // Automatically resume APK installation when the user returns from "Install unknown apps" settings
+    DisposableEffect(lifecycleOwner, awaitingUnknownSourcesPermission, verifiedReadyApkFile) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME &&
+                awaitingUnknownSourcesPermission &&
+                verifiedReadyApkFile != null &&
+                AppUpdateManagerHelper.canRequestPackageInstalls(context)
+            ) {
+                attemptInstallVerifiedApk(verifiedReadyApkFile!!)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -1707,16 +1802,43 @@ fun AppUpdatePromptOverlay(
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "নতুন আপডেট এসেছে",
+                            text = "কওমি কর্মসংস্থান বাংলাদেশ",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = QawmiSeekerBlue,
+                            modifier = Modifier.testTag("update_prompt_app_name")
+                        )
+                        Text(
+                            text = "নতুন আপডেট উপলব্ধ",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.ExtraBold,
                             color = QawmiDeepGreen,
                             modifier = Modifier.testTag("update_prompt_title")
                         )
                         Text(
-                            text = "কওমি কর্মসংস্থান বাংলাদেশ — নতুন সংস্করণ উপলব্ধ",
+                            text = "নতুন আপডেট এসেছে",
                             style = MaterialTheme.typography.bodySmall,
-                            color = QawmiTextSecondary
+                            color = QawmiTextSecondary,
+                            modifier = Modifier.testTag("update_prompt_subtitle")
+                        )
+                    }
+                }
+
+                if (releaseInfo.isMandatory) {
+                    Surface(
+                        color = Color(0xFFFFF8E1),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, QawmiGold, RoundedCornerShape(10.dp))
+                            .testTag("update_mandatory_notice")
+                    ) {
+                        Text(
+                            text = "জরুরি ও বাধ্যতামূলক আপডেট: অ্যাপের নিরাপত্তা, ডেটা সুরক্ষা ও গুরুত্বপূর্ণ সেবা সচল রাখতে এই সংস্করণে আপডেট করা আবশ্যক। আপডেট করলে আপনার লগইন ও সকল তথ্য সম্পূর্ণ অক্ষুণ্ন থাকবে।",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = QawmiTextDark,
+                            modifier = Modifier.padding(10.dp)
                         )
                     }
                 }
@@ -1733,12 +1855,13 @@ fun AppUpdatePromptOverlay(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "বর্তমান ভার্সন: $installedVersionName (কোড $installedVersionCode)",
+                            text = "বর্তমান সংস্করণ: $installedVersionName (কোড $installedVersionCode)",
                             style = MaterialTheme.typography.bodySmall,
-                            color = QawmiTextSecondary
+                            color = QawmiTextSecondary,
+                            modifier = Modifier.testTag("update_prompt_installed_version_text")
                         )
                         Text(
-                            text = "নতুন ভার্সন: ${releaseInfo.versionName} (কোড ${releaseInfo.versionCode})",
+                            text = "নতুন সংস্করণ: ${releaseInfo.versionName} (কোড ${releaseInfo.versionCode})",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Bold,
                             color = QawmiDeepGreen,
@@ -1749,6 +1872,14 @@ fun AppUpdatePromptOverlay(
                                 text = "রিলিজ ট্যাগ: ${releaseInfo.githubReleaseTag}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = QawmiSeekerBlue
+                            )
+                        }
+                        if (releaseInfo.apkSha256.isNotBlank()) {
+                            Text(
+                                text = "নিরাপত্তা চেকসাম (SHA-256): ${releaseInfo.apkSha256.take(16)}...",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiDeepGreen,
+                                modifier = Modifier.testTag("update_prompt_sha256_text")
                             )
                         }
                     }
@@ -1802,14 +1933,53 @@ fun AppUpdatePromptOverlay(
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = errorMessage.orEmpty(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFC62828),
-                            modifier = Modifier
-                                .padding(10.dp)
-                                .testTag("update_error_message")
-                        )
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = errorMessage.orEmpty(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFC62828),
+                                modifier = Modifier.testTag("update_error_message")
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (awaitingUnknownSourcesPermission && verifiedReadyApkFile != null) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (AppUpdateManagerHelper.canRequestPackageInstalls(context)) {
+                                                attemptInstallVerifiedApk(verifiedReadyApkFile!!)
+                                            } else {
+                                                AppUpdateManagerHelper.openUnknownSourcesSettings(context)
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("update_grant_permission_button")
+                                    ) {
+                                        Text(
+                                            text = "অনুমতি সেটিংস / এখন ইনস্টল করুন",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = QawmiDeepGreen
+                                        )
+                                    }
+                                }
+                                TextButton(
+                                    onClick = { startUpdateDownloadAndInstall() },
+                                    enabled = !isDownloading,
+                                    modifier = Modifier.testTag("update_retry_button")
+                                ) {
+                                    Text(
+                                        text = "পুনরায় চেষ্টা করুন",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFC62828)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1818,59 +1988,24 @@ fun AppUpdatePromptOverlay(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (!releaseInfo.isMandatory) {
-                        OutlinedButton(
-                            onClick = onDismissLater,
-                            enabled = !isDownloading,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .defaultMinSize(minHeight = 48.dp)
-                                .testTag("update_later_button")
-                        ) {
-                            Text(
-                                text = "পরে করুন",
-                                fontWeight = FontWeight.Bold,
-                                color = QawmiTextDark
-                            )
-                        }
+                    OutlinedButton(
+                        onClick = onDismissLater,
+                        enabled = !isDownloading,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("update_later_button")
+                    ) {
+                        Text(
+                            text = "পরে করুন",
+                            fontWeight = FontWeight.Bold,
+                            color = QawmiTextDark
+                        )
                     }
 
                     Button(
-                        onClick = {
-                            if (isDownloading) return@Button
-                            isDownloading = true
-                            errorMessage = null
-                            statusMessage = "APK ডাউনলোড শুরু হচ্ছে..."
-                            scope.launch {
-                                val downloadResult = AppUpdateManagerHelper.downloadApkWithProgress(
-                                    context = context,
-                                    releaseInfo = releaseInfo,
-                                    onProgress = { pct ->
-                                        downloadProgress = pct
-                                        statusMessage = "APK ডাউনলোড হচ্ছে... $pct%"
-                                    }
-                                )
-                                isDownloading = false
-                                downloadResult.onSuccess { apkFile ->
-                                    downloadProgress = 100
-                                    val installResult = AppUpdateManagerHelper.launchApkInstallation(
-                                        context = context,
-                                        apkFile = apkFile,
-                                        fallbackDownloadUrl = releaseInfo.apkDownloadUrl
-                                    )
-                                    installResult.onSuccess {
-                                        statusMessage = "APK ডাউনলোড সম্পন্ন হয়েছে। Android ইনস্টলার চালু করা হয়েছে।"
-                                    }.onFailure { err ->
-                                        errorMessage = err.localizedMessage
-                                            ?: "ইনস্টলার চালু করা যায়নি। পুনরায় চেষ্টা করুন।"
-                                    }
-                                }.onFailure { err ->
-                                    errorMessage = err.localizedMessage
-                                        ?: "APK ডাউনলোড ব্যর্থ হয়েছে। ইন্টারনেট সংযোগ যাচাই করুন।"
-                                }
-                            }
-                        },
+                        onClick = { startUpdateDownloadAndInstall() },
                         enabled = !isDownloading,
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
