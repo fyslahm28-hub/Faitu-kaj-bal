@@ -1515,6 +1515,99 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("আল্লাহ কবুল করুন").assertIsDisplayed()
     }
+
+    @Test
+    fun `AutoUpdatePrompt shows Notun Update Eseche with Update Nin and Pore Korun buttons and launches Android APK installer`() {
+        val remoteRelease = com.example.data.model.AppReleaseInfo(
+            id = "latest",
+            releaseId = "latest",
+            versionCode = 105,
+            versionName = "1.0.5",
+            apkDownloadUrl = "https://github.com/qawmi-bd/qawmi-kormosangsthan/releases/download/v1.0.5/Qawmi-Kormosangsthan-Bangladesh.apk",
+            releaseNotes = "নতুন ফিচার, উন্নত পারফরম্যান্স ও বাগ ফিক্স যুক্ত করা হয়েছে।",
+            githubReleaseTag = "v1.0.5",
+            isMandatory = false,
+            publishedBy = "GitHub Actions CI"
+        )
+
+        var dismissedVersionCode by mutableStateOf<Int?>(null)
+        com.example.ui.util.AppUpdateManagerHelper.lastDownloadedApkFile = null
+        com.example.ui.util.AppUpdateManagerHelper.lastLaunchedInstallIntent = null
+        com.example.ui.util.AppUpdateManagerHelper.customApkFetcher = { _, targetFile, onProgress ->
+            onProgress(50)
+            targetFile.parentFile?.mkdirs()
+            targetFile.writeBytes("PK\u0003\u0004-mock-signed-apk-binary".toByteArray())
+            onProgress(100)
+            Result.success(targetFile)
+        }
+
+        try {
+            composeTestRule.setContent {
+                MyApplicationTheme {
+                    Box(modifier = Modifier.width(420.dp).height(800.dp)) {
+                        val showPrompt = com.example.ui.util.AppUpdateManagerHelper.isUpdateAvailable(
+                            installedVersionCode = 1,
+                            installedVersionName = "1.0",
+                            remoteRelease = remoteRelease,
+                            dismissedVersionCode = dismissedVersionCode
+                        )
+                        if (showPrompt) {
+                            com.example.ui.screens.AppUpdatePromptOverlay(
+                                installedVersionCode = 1,
+                                installedVersionName = "1.0",
+                                releaseInfo = remoteRelease,
+                                onDismissLater = {
+                                    dismissedVersionCode = remoteRelease.versionCode
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            composeTestRule.waitForIdle()
+
+            // 1. Verify “নতুন আপডেট এসেছে” message and “আপডেট নিন” & “পরে করুন” buttons are displayed
+            composeTestRule.onNodeWithTag("update_prompt_dialog").assertIsDisplayed()
+            composeTestRule.onNodeWithText("নতুন আপডেট এসেছে").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("update_now_button").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("update_later_button").assertIsDisplayed()
+            composeTestRule.onNodeWithText("আপডেট নিন").assertIsDisplayed()
+            composeTestRule.onNodeWithText("পরে করুন").assertIsDisplayed()
+
+            // 2. Click “পরে করুন” and verify the prompt is dismissed
+            composeTestRule.onNodeWithTag("update_later_button").performClick()
+            composeTestRule.waitForIdle()
+            assertEquals(105, dismissedVersionCode)
+            composeTestRule.onNodeWithTag("update_prompt_dialog").assertDoesNotExist()
+
+            // 3. Re-enable prompt (e.g., next session or manual check) and click “আপডেট নিন”
+            dismissedVersionCode = null
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("update_now_button").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("update_now_button").performClick()
+            composeTestRule.waitForIdle()
+
+            // 4. Verify APK was downloaded and Android's approved installation Intent was launched
+            val downloadedFile = com.example.ui.util.AppUpdateManagerHelper.lastDownloadedApkFile
+            assertNotNull("Expected APK file to be downloaded to cacheDir/updates/", downloadedFile)
+            assertTrue("Expected downloaded APK file to exist and be non-empty", downloadedFile!!.exists() && downloadedFile.length() > 0L)
+
+            val launchedIntent = com.example.ui.util.AppUpdateManagerHelper.lastLaunchedInstallIntent
+            assertNotNull("Expected Android package installer Intent to be launched", launchedIntent)
+            assertEquals(android.content.Intent.ACTION_VIEW, launchedIntent?.action)
+            assertEquals("application/vnd.android.package-archive", launchedIntent?.type)
+            val flags = launchedIntent?.flags ?: 0
+            assertTrue(
+                "Expected FLAG_GRANT_READ_URI_PERMISSION on APK install intent",
+                (flags and android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0
+            )
+            composeTestRule.onNodeWithTag("update_install_status").assertIsDisplayed()
+        } finally {
+            com.example.ui.util.AppUpdateManagerHelper.customApkFetcher = null
+        }
+    }
 }
+
 
 

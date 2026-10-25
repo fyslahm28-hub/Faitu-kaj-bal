@@ -658,4 +658,69 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, firestoreEx?.code)
         }
     }
+
+    @Test
+    fun autoUpdateRelease_githubActionsAndAdminPublish_observedByClientAndValidatedByHelper() = runBlocking {
+        // 1. Authorized Admin (or CI pipeline) publishes a new APK release to /app_releases/latest
+        signInTestUser("foysalahamad102@gmail.com")
+        val adminRepo = QawmiRepository(firestore, auth)
+
+        val apkUrl = "https://github.com/qawmi-bd/qawmi-kormosangsthan/releases/download/v1.0.5/Qawmi-Kormosangsthan-Bangladesh.apk"
+        val publishRes = withTimeout(5000L) {
+            adminRepo.publishAppReleaseInfo(
+                versionCode = 105,
+                versionName = "1.0.5",
+                apkDownloadUrl = apkUrl,
+                releaseNotes = "নতুন অটো আপডেট ব্যবস্থা ও উন্নত ফিড যুক্ত করা হয়েছে।",
+                commitSha = "9f8e7d6c5b4a",
+                githubReleaseTag = "v1.0.5",
+                isMandatory = false,
+                publishedBy = "GitHub Actions Release Pipeline"
+            )
+        }
+        assertTrue("Admin publishAppReleaseInfo failed: ${publishRes.exceptionOrNull()}", publishRes.isSuccess)
+
+        // 2. Switch to a regular installed app user: observe /app_releases/latest in real time
+        val regularEmail = "user_${UUID.randomUUID()}@test.com"
+        signInTestUser(regularEmail)
+        val userRepo = QawmiRepository(firestore, auth)
+
+        val latestRelease = withTimeout(5000L) {
+            userRepo.observeLatestAppRelease().first { it != null && it.versionCode == 105 }
+        }
+        assertNotNull(latestRelease)
+        assertEquals(105, latestRelease?.versionCode)
+        assertEquals("1.0.5", latestRelease?.versionName)
+        assertEquals(apkUrl, latestRelease?.apkDownloadUrl)
+
+        // 3. Verify AppUpdateManagerHelper detects the update against installed version 1 ("1.0")
+        val isAvailable = com.example.ui.util.AppUpdateManagerHelper.isUpdateAvailable(
+            installedVersionCode = 1,
+            installedVersionName = "1.0",
+            remoteRelease = latestRelease,
+            dismissedVersionCode = null
+        )
+        assertTrue("Expected update to be detected for installed versionCode 1 vs remote 105", isAvailable)
+
+        // When user clicks "পরে করুন" (dismissedVersionCode = 105), prompt is suppressed for version 105
+        val isAvailableAfterDismiss = com.example.ui.util.AppUpdateManagerHelper.isUpdateAvailable(
+            installedVersionCode = 1,
+            installedVersionName = "1.0",
+            remoteRelease = latestRelease,
+            dismissedVersionCode = 105
+        )
+        assertTrue("Expected dismissed update 105 to be suppressed", !isAvailableAfterDismiss)
+
+        // 4. Verify regular non-admin user CANNOT overwrite /app_releases/latest
+        val unauthorizedPublish = withTimeout(5000L) {
+            userRepo.publishAppReleaseInfo(
+                versionCode = 999,
+                versionName = "9.9.9",
+                apkDownloadUrl = "https://malicious.example.com/fake.apk",
+                releaseNotes = "অননুমোদিত আপডেট"
+            )
+        }
+        assertTrue("Non-admin user must not be allowed to publish app release metadata", unauthorizedPublish.isFailure)
+    }
 }
+

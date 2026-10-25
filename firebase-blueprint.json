@@ -224,6 +224,22 @@
         "createdAt": { "type": "timestamp", "required": true },
         "updatedAt": { "type": "timestamp", "required": true }
       }
+    },
+    "AppReleaseInfo": {
+      "description": "Latest APK release metadata managed via Firebase and GitHub Actions for in-app auto-update detection and installation.",
+      "properties": {
+        "releaseId": { "type": "string", "required": true },
+        "versionCode": { "type": "number", "required": true },
+        "versionName": { "type": "string", "required": true },
+        "apkDownloadUrl": { "type": "string", "required": true },
+        "releaseNotes": { "type": "string", "required": true },
+        "commitSha": { "type": "string", "required": false },
+        "githubReleaseTag": { "type": "string", "required": false },
+        "isMandatory": { "type": "boolean", "required": false },
+        "publishedBy": { "type": "string", "required": true },
+        "publishedAt": { "type": "timestamp", "required": true },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
     }
   },
   "collections": [
@@ -286,6 +302,11 @@
       "path": "/telegram_notifications/{logId}",
       "entity": "TelegramNotificationLog",
       "access": "Authenticated users can enqueue event notifications for their own actions; only verified admins can read, list, or delete logs."
+    },
+    {
+      "path": "/app_releases/{releaseId}",
+      "entity": "AppReleaseInfo",
+      "access": "Authenticated users can read release metadata for auto-update detection; only verified admins or CI service account can create, update, or delete release records."
     }
   ]
 }

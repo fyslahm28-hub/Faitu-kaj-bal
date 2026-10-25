@@ -573,5 +573,59 @@ test("Facebook-Style Islamic Feed: multi-category Khedmot posts, GENERAL_POST, r
   );
 });
 
+test("App Releases Auto-Update: signed-in users can read /app_releases/latest; only admins can publish or update release metadata", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "regular_user@gmail.com",
+  }).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID_1, {
+    email: "foysalahamad102@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  const ts = nowDate();
+  const releasePayload = {
+    releaseId: "latest",
+    versionCode: 102,
+    versionName: "1.0.2",
+    apkDownloadUrl: "https://github.com/qawmi-bd/qawmi-kormosangsthan/releases/download/v1.0.2/Qawmi-Kormosangsthan-Bangladesh.apk",
+    releaseNotes: "নতুন ফিচার ও দ্রুততর পারফরম্যান্স যুক্ত করা হয়েছে।",
+    commitSha: "a1b2c3d4e5f6",
+    githubReleaseTag: "v1.0.2",
+    isMandatory: false,
+    publishedBy: "GitHub Actions CI / Super Admin",
+    publishedAt: ts,
+    updatedAt: ts,
+  };
+
+  // Non-admin cannot create or update /app_releases/latest
+  await assertFails(
+    aliceDb.collection("app_releases").doc("latest").set(releasePayload)
+  );
+
+  // Admin can publish /app_releases/latest
+  await assertSucceeds(
+    adminDb.collection("app_releases").doc("latest").set(releasePayload)
+  );
+
+  // Unauthenticated user cannot read /app_releases/latest
+  await assertFails(unauthDb.collection("app_releases").doc("latest").get());
+
+  // Authenticated user CAN read and list /app_releases/latest
+  await assertSucceeds(aliceDb.collection("app_releases").doc("latest").get());
+  await assertSucceeds(aliceDb.collection("app_releases").get());
+
+  // Non-admin still cannot overwrite or delete /app_releases/latest
+  await assertFails(
+    aliceDb.collection("app_releases").doc("latest").update({
+      versionCode: 999,
+      apkDownloadUrl: "https://malicious.example.com/fake.apk",
+      updatedAt: nowDate(),
+    })
+  );
+  await assertFails(aliceDb.collection("app_releases").doc("latest").delete());
+});
+
+
 
 

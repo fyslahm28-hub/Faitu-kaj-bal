@@ -501,3 +501,23 @@ data class NotificationReadReceipt(
     val notificationId: String = "",
     @ServerTimestamp val readAt: Timestamp? = null
 )
+
+@IgnoreExtraProperties
+data class AppReleaseInfo(
+    @DocumentId val id: String = "",
+    val releaseId: String = "latest",
+    val versionCode: Int = 1,
+    val versionName: String = "1.0",
+    val apkDownloadUrl: String = "",
+    val releaseNotes: String = "",
+    val commitSha: String = "",
+    val githubReleaseTag: String = "",
+    @field:PropertyName("isMandatory")
+    @get:PropertyName("isMandatory")
+    @set:PropertyName("isMandatory")
+    var isMandatory: Boolean = false,
+    val publishedBy: String = "",
+    @ServerTimestamp val publishedAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+

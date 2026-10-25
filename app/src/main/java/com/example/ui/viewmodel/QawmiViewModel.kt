@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.AppNotification
+import com.example.data.model.AppReleaseInfo
 import com.example.data.model.BookmarkItem
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
@@ -122,6 +123,21 @@ class QawmiViewModel(
 
     val smoronServerReceiptsState: StateFlow<Map<String, Long>> = repository.observeSmoronServerReceipts(currentUserId)
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    // Auto-Update System State (সর্বশেষ ভার্সন ও ডাউনলোড লিংক পরিচালনা)
+    val latestAppReleaseState: StateFlow<AppReleaseInfo?> = repository.observeLatestAppRelease()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private val _dismissedUpdateVersionCode = MutableStateFlow<Int?>(null)
+    val dismissedUpdateVersionCode: StateFlow<Int?> = _dismissedUpdateVersionCode.asStateFlow()
+
+    fun dismissCurrentUpdatePrompt(versionCode: Int) {
+        _dismissedUpdateVersionCode.value = versionCode
+    }
+
+    fun resetDismissedUpdatePrompt() {
+        _dismissedUpdateVersionCode.value = null
+    }
 
     // Server-side Admin Registry & Token Claim state
     private val _serverTokenVerifiedAdmin = MutableStateFlow(
@@ -1609,6 +1625,41 @@ class QawmiViewModel(
                 onSuccessReset()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "বার্তা পাঠানো যায়নি। অনুগ্রহ করে ইন্টারনেট সংযোগ যাচাই করে পুনরায় চেষ্টা করুন।"
+            }
+        }
+    }
+
+    fun adminPublishAppRelease(
+        versionCode: Int,
+        versionName: String,
+        apkDownloadUrl: String,
+        releaseNotes: String,
+        isMandatory: Boolean = false,
+        onComplete: () -> Unit = {}
+    ) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন নতুন অ্যাপ আপডেট রিলিজ তথ্য প্রকাশ করতে পারবেন।"
+            return
+        }
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.publishAppReleaseInfo(
+                versionCode = versionCode,
+                versionName = versionName,
+                apkDownloadUrl = apkDownloadUrl,
+                releaseNotes = releaseNotes,
+                isMandatory = isMandatory,
+                publishedBy = adminName
+            )
+            _isSubmitting.value = false
+            result.onSuccess {
+                _dismissedUpdateVersionCode.value = null
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, নতুন অ্যাপ সংস্করণ ($versionName / কোড $versionCode) ফায়ারবেসে প্রকাশিত হয়েছে।"
+                onComplete()
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "নতুন আপডেট তথ্য সংরক্ষণ করা যায়নি।"
             }
         }
     }

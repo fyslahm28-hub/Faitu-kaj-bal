@@ -1,110 +1,124 @@
-name: Build Android APK
+name: Build & Auto-Distribute Android APK
 
 on:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
+    branches:
+      - main
+      - master
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "নতুন আপডেটের বিবরণ (Release Notes)"
+        required: false
+        default: "নতুন ফিচার, উন্নত পারফরম্যান্স ও বাগ ফিক্স যুক্ত করা হয়েছে।"
+
+permissions:
+  contents: write
 
 jobs:
-  build-apk:
+  build-and-distribute:
+    name: Build APK, Create GitHub Release & Sync Firebase Auto-Update
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '17'
 
-      - name: Accept Android SDK Licenses
-        run: |
-          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
 
-      - name: Setup Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+      - name: Setup Node.js for Firebase Auto-Update Sync
+        uses: actions/setup-node@v4
         with:
-          gradle-version: '9.3.1'
+          node-version: '20'
 
-      - name: Restore Debug Keystore & Firebase Config for CI Build
+      - name: Compute Release Version Metadata
+        id: version_meta
         run: |
-          if [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > "${GITHUB_WORKSPACE}/debug.keystore"
-          else
-            cat << 'EOF' | base64 -d > "${GITHUB_WORKSPACE}/debug.keystore"
-          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
-          EOF
+          VERSION_CODE=$((100 + ${{ github.run_number }}))
+          VERSION_NAME="1.0.${{ github.run_number }}"
+          RELEASE_TAG="v${VERSION_NAME}"
+          APK_FILENAME="Qawmi-Kormosangsthan-Bangladesh.apk"
+          APK_DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${APK_FILENAME}"
+          echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
+          echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
+          echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "apk_filename=${APK_FILENAME}" >> $GITHUB_OUTPUT
+          echo "apk_download_url=${APK_DOWNLOAD_URL}" >> $GITHUB_OUTPUT
+
+      - name: Ensure debug.keystore is available
+        run: |
+          if [ ! -f "debug.keystore" ] && [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f "debug.keystore" ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          if [ ! -f app/google-services.json ]; then
-            cat << 'EOF' > app/google-services.json
-          {
-            "project_info": {
-              "project_number": "629586749547",
-              "project_id": "gen-lang-client-0048059944",
-              "storage_bucket": "gen-lang-client-0048059944.firebasestorage.app"
-            },
-            "client": [
-              {
-                "client_info": {
-                  "mobilesdk_app_id": "1:629586749547:android:7000d427f8ef952b29292e",
-                  "android_client_info": {
-                    "package_name": "com.aistudio.qawmikormo.khedmt"
-                  }
-                },
-                "oauth_client": [
-                  {
-                    "client_id": "629586749547-ia6cd950d81nioteuamgrlktof3pksqq.apps.googleusercontent.com",
-                    "client_type": 1,
-                    "android_info": {
-                      "package_name": "com.aistudio.qawmikormo.khedmt",
-                      "certificate_hash": "50a99a090dc181a418bb43bb4d1a56f0591fbc46"
-                    }
-                  },
-                  {
-                    "client_id": "629586749547-ubgo99u8c72n63t1pujt7dlof51mqn5e.apps.googleusercontent.com",
-                    "client_type": 3
-                  }
-                ],
-                "api_key": [
-                  {
-                    "current_key": "AIzaSyA741d3nFPja5GipgQ4oA0SWnrSysfAVTk"
-                  }
-                ],
-                "services": {
-                  "appinvite_service": {
-                    "other_platform_oauth_client": [
-                      {
-                        "client_id": "629586749547-ubgo99u8c72n63t1pujt7dlof51mqn5e.apps.googleusercontent.com",
-                        "client_type": 3
-                      }
-                    ]
-                  }
-                }
-              }
-            ],
-            "configuration_version": "1"
-          }
-          EOF
-          fi
+      - name: Build Debug APK with Release Version
+        run: |
+          gradle assembleDebug \
+            -PversionCode=${{ steps.version_meta.outputs.version_code }} \
+            -PversionName=${{ steps.version_meta.outputs.version_name }} \
+            --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ${{ steps.version_meta.outputs.apk_filename }}
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Upload APK Artifact
+      - name: Upload APK Artifact to GitHub Actions
         uses: actions/upload-artifact@v4
         with:
           name: Qawmi-Kormosangsthan-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
-      - name: Upload APK to Firebase App Distribution
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            ${{ steps.version_meta.outputs.apk_filename }}
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version_meta.outputs.release_tag }}
+          name: "কওমি কর্মসংস্থান বাংলাদেশ ${{ steps.version_meta.outputs.version_name }}"
+          body: |
+            ### কওমি কর্মসংস্থান বাংলাদেশ — নতুন সংস্করণ ${{ steps.version_meta.outputs.version_name }} (Build #${{ steps.version_meta.outputs.version_code }})
+            - **ভার্সন কোড**: `${{ steps.version_meta.outputs.version_code }}`
+            - **ভার্সন নাম**: `${{ steps.version_meta.outputs.version_name }}`
+            - **কমিট**: `${{ github.sha }}`
+            - **সরাসরি ডাউনলোড লিংক**: ${{ steps.version_meta.outputs.apk_download_url }}
+          files: |
+            ${{ steps.version_meta.outputs.apk_filename }}
+            app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Distribute APK to Firebase App Distribution (Optional)
+        if: ${{ secrets.FIREBASE_APP_ID != '' && secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
+        continue-on-error: true
         uses: wzieba/Firebase-Distribution-Github-Action@v1
         with:
           appId: ${{ secrets.FIREBASE_APP_ID }}
           serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          groups: testers
           file: app/build/outputs/apk/debug/app-debug.apk
-          releaseNotes: "Automatic build from GitHub Actions"
-          
+          releaseNotes: "কওমি কর্মসংস্থান বাংলাদেশ — সংস্করণ ${{ steps.version_meta.outputs.version_name }} (Commit: ${{ github.sha }})"
+
+      - name: Update Latest Version & Download Link in Firebase Firestore (/app_releases/latest)
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          RELEASE_VERSION_CODE: ${{ steps.version_meta.outputs.version_code }}
+          RELEASE_VERSION_NAME: ${{ steps.version_meta.outputs.version_name }}
+          RELEASE_APK_URL: ${{ steps.version_meta.outputs.apk_download_url }}
+          RELEASE_TAG: ${{ steps.version_meta.outputs.release_tag }}
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes || format('কওমি কর্মসংস্থান বাংলাদেশ নতুন সংস্করণ {0} প্রকাশিত হয়েছে। উন্নত ফিড, দ্রুততর পারফরম্যান্স ও বাগ ফিক্স যুক্ত করা হয়েছে।', steps.version_meta.outputs.version_name) }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          node scripts/publish-release-to-firebase.mjs \
+            --version-code "${RELEASE_VERSION_CODE}" \
+            --version-name "${RELEASE_VERSION_NAME}" \
+            --apk-url "${RELEASE_APK_URL}" \
+            --release-tag "${RELEASE_TAG}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --release-notes "${RELEASE_NOTES}"

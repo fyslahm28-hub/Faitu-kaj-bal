@@ -51,6 +51,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -86,6 +87,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.model.AppReleaseInfo
 import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.UserProfile
@@ -103,6 +105,7 @@ import com.example.ui.theme.QawmiSoftBg
 import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextSecondary
 import com.example.ui.util.AjkerSmoronHelper
+import com.example.ui.util.AppUpdateManagerHelper
 import com.example.ui.util.IslamicDateAndPrayerHelper
 import com.example.ui.util.QawmiNotificationHelper
 import com.example.ui.viewmodel.FeedFilterTab
@@ -191,6 +194,9 @@ fun MainAppScaffold(
     val chatPartnerProfiles by viewModel.chatPartnerProfilesState.collectAsStateWithLifecycle()
     val smoronServerReceipts by viewModel.smoronServerReceiptsState.collectAsStateWithLifecycle()
     val focusedSmoronId by viewModel.focusedSmoronId.collectAsStateWithLifecycle()
+    val latestAppRelease by viewModel.latestAppReleaseState.collectAsStateWithLifecycle()
+    val dismissedUpdateVersionCode by viewModel.dismissedUpdateVersionCode.collectAsStateWithLifecycle()
+    val installedVersion = remember(context) { AppUpdateManagerHelper.getInstalledVersion(context) }
 
     LaunchedEffect(viewModel.currentUserId, smoronServerReceipts) {
         val todayDateKey = AjkerSmoronHelper.currentBangladeshDateKey()
@@ -1089,6 +1095,30 @@ fun MainAppScaffold(
                             )
                         }
                     }
+
+                    // Auto-Update Prompt Overlay (“নতুন আপডেট এসেছে” বার্তাসহ “আপডেট নিন” ও “পরে করুন” বাটন)
+                    val shouldShowUpdatePrompt = remember(
+                        installedVersion,
+                        latestAppRelease,
+                        dismissedUpdateVersionCode
+                    ) {
+                        AppUpdateManagerHelper.isUpdateAvailable(
+                            installedVersionCode = installedVersion.versionCode,
+                            installedVersionName = installedVersion.versionName,
+                            remoteRelease = latestAppRelease,
+                            dismissedVersionCode = dismissedUpdateVersionCode
+                        )
+                    }
+                    if (shouldShowUpdatePrompt && latestAppRelease != null) {
+                        AppUpdatePromptOverlay(
+                            installedVersionCode = installedVersion.versionCode,
+                            installedVersionName = installedVersion.versionName,
+                            releaseInfo = latestAppRelease!!,
+                            onDismissLater = {
+                                viewModel.dismissCurrentUpdatePrompt(latestAppRelease!!.versionCode)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1503,3 +1533,241 @@ private fun PostDetailDialog(
         }
     )
 }
+
+@Composable
+fun AppUpdatePromptOverlay(
+    installedVersionCode: Int,
+    installedVersionName: String,
+    releaseInfo: AppReleaseInfo,
+    onDismissLater: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isDownloading by remember(releaseInfo.versionCode) { mutableStateOf(false) }
+    var downloadProgress by remember(releaseInfo.versionCode) { mutableStateOf(0) }
+    var statusMessage by remember(releaseInfo.versionCode) { mutableStateOf<String?>(null) }
+    var errorMessage by remember(releaseInfo.versionCode) { mutableStateOf<String?>(null) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.58f))
+            .padding(20.dp)
+            .testTag("update_prompt_overlay"),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .border(1.5.dp, QawmiGold, RoundedCornerShape(20.dp))
+                .testTag("update_prompt_dialog"),
+            shape = RoundedCornerShape(20.dp),
+            color = Color.White,
+            shadowElevation = 12.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(QawmiDarkGreen),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        IslamicStarEmblem(size = 24.dp)
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "নতুন আপডেট এসেছে",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = QawmiDeepGreen,
+                            modifier = Modifier.testTag("update_prompt_title")
+                        )
+                        Text(
+                            text = "কওমি কর্মসংস্থান বাংলাদেশ — নতুন সংস্করণ উপলব্ধ",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiTextSecondary
+                        )
+                    }
+                }
+
+                Surface(
+                    color = QawmiMintSurface,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(12.dp))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "বর্তমান ভার্সন: $installedVersionName (কোড $installedVersionCode)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiTextSecondary
+                        )
+                        Text(
+                            text = "নতুন ভার্সন: ${releaseInfo.versionName} (কোড ${releaseInfo.versionCode})",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = QawmiDeepGreen,
+                            modifier = Modifier.testTag("update_prompt_version_text")
+                        )
+                        if (releaseInfo.githubReleaseTag.isNotBlank()) {
+                            Text(
+                                text = "রিলিজ ট্যাগ: ${releaseInfo.githubReleaseTag}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiSeekerBlue
+                            )
+                        }
+                    }
+                }
+
+                if (releaseInfo.releaseNotes.isNotBlank()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "নতুন আপডেটে যা থাকছে:",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = QawmiTextDark
+                        )
+                        Text(
+                            text = releaseInfo.releaseNotes,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QawmiTextSecondary,
+                            modifier = Modifier.testTag("update_prompt_release_notes")
+                        )
+                    }
+                }
+
+                if (isDownloading || downloadProgress > 0) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        LinearProgressIndicator(
+                            progress = { (downloadProgress / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .testTag("update_download_progress"),
+                            color = QawmiDeepGreen,
+                            trackColor = QawmiMintSurface
+                        )
+                        Text(
+                            text = statusMessage ?: "APK ডাউনলোড হচ্ছে... $downloadProgress%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = QawmiDeepGreen,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.testTag("update_install_status")
+                        )
+                    }
+                }
+
+                if (errorMessage != null) {
+                    Surface(
+                        color = Color(0xFFFFEBEE),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = errorMessage.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFC62828),
+                            modifier = Modifier
+                                .padding(10.dp)
+                                .testTag("update_error_message")
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (!releaseInfo.isMandatory) {
+                        OutlinedButton(
+                            onClick = onDismissLater,
+                            enabled = !isDownloading,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("update_later_button")
+                        ) {
+                            Text(
+                                text = "পরে করুন",
+                                fontWeight = FontWeight.Bold,
+                                color = QawmiTextDark
+                            )
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            if (isDownloading) return@Button
+                            isDownloading = true
+                            errorMessage = null
+                            statusMessage = "APK ডাউনলোড শুরু হচ্ছে..."
+                            scope.launch {
+                                val downloadResult = AppUpdateManagerHelper.downloadApkWithProgress(
+                                    context = context,
+                                    releaseInfo = releaseInfo,
+                                    onProgress = { pct ->
+                                        downloadProgress = pct
+                                        statusMessage = "APK ডাউনলোড হচ্ছে... $pct%"
+                                    }
+                                )
+                                isDownloading = false
+                                downloadResult.onSuccess { apkFile ->
+                                    downloadProgress = 100
+                                    val installResult = AppUpdateManagerHelper.launchApkInstallation(
+                                        context = context,
+                                        apkFile = apkFile,
+                                        fallbackDownloadUrl = releaseInfo.apkDownloadUrl
+                                    )
+                                    installResult.onSuccess {
+                                        statusMessage = "APK ডাউনলোড সম্পন্ন হয়েছে। Android ইনস্টলার চালু করা হয়েছে।"
+                                    }.onFailure { err ->
+                                        errorMessage = err.localizedMessage
+                                            ?: "ইনস্টলার চালু করা যায়নি। পুনরায় চেষ্টা করুন।"
+                                    }
+                                }.onFailure { err ->
+                                    errorMessage = err.localizedMessage
+                                        ?: "APK ডাউনলোড ব্যর্থ হয়েছে। ইন্টারনেট সংযোগ যাচাই করুন।"
+                                }
+                            }
+                        },
+                        enabled = !isDownloading,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("update_now_button")
+                    ) {
+                        Text(
+                            text = if (isDownloading) "ডাউনলোড হচ্ছে..." else "আপডেট নিন",
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+

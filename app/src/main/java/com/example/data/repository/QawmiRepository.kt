@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.R
 import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.AppNotification
+import com.example.data.model.AppReleaseInfo
 import com.example.data.model.BookmarkItem
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
@@ -2703,6 +2704,125 @@ class QawmiRepository(
             Result.failure(e)
         }
     }
+
+    // --- 11. APP AUTO-UPDATE SYSTEM (সর্বশেষ ভার্সন ও ডাউনলোড লিংক পরিচালনা) ---
+
+    private fun DocumentSnapshot.toAppReleaseInfoOrNull(): AppReleaseInfo? {
+        if (!exists()) return null
+        val obj = toObject(AppReleaseInfo::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+        val resolvedVersionCode = (getLong("versionCode")?.toInt())
+            ?: (getString("versionCode")?.toIntOrNull())
+            ?: obj?.versionCode
+            ?: 1
+        val resolvedVersionName = getString("versionName")?.takeIf { it.isNotBlank() }
+            ?: obj?.versionName
+            ?: "1.0"
+        val resolvedApkUrl = getString("apkDownloadUrl")?.trim()
+            ?: obj?.apkDownloadUrl?.trim()
+            ?: ""
+        if (resolvedApkUrl.isBlank()) return null
+        val resolvedNotes = getString("releaseNotes") ?: obj?.releaseNotes ?: ""
+        val resolvedSha = getString("commitSha") ?: obj?.commitSha ?: ""
+        val resolvedTag = getString("githubReleaseTag") ?: obj?.githubReleaseTag ?: ""
+        val resolvedMandatory = getBoolean("isMandatory") ?: obj?.isMandatory ?: false
+        val resolvedPublishedBy = getString("publishedBy") ?: obj?.publishedBy ?: "GitHub Actions CI"
+        val resolvedPublishedAt = getTimestamp("publishedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            ?: obj?.publishedAt
+        val resolvedUpdatedAt = getTimestamp("updatedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            ?: obj?.updatedAt
+        return AppReleaseInfo(
+            id = id,
+            releaseId = getString("releaseId")?.ifBlank { id } ?: id,
+            versionCode = resolvedVersionCode,
+            versionName = resolvedVersionName,
+            apkDownloadUrl = resolvedApkUrl,
+            releaseNotes = resolvedNotes,
+            commitSha = resolvedSha,
+            githubReleaseTag = resolvedTag,
+            isMandatory = resolvedMandatory,
+            publishedBy = resolvedPublishedBy,
+            publishedAt = resolvedPublishedAt,
+            updatedAt = resolvedUpdatedAt
+        )
+    }
+
+    fun observeLatestAppRelease(): Flow<AppReleaseInfo?> {
+        val path = "app_releases/latest"
+        return db.collection("app_releases")
+            .document("latest")
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toAppReleaseInfoOrNull()
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.GET, path)
+                emit(null)
+            }
+    }
+
+    suspend fun publishAppReleaseInfo(
+        versionCode: Int,
+        versionName: String,
+        apkDownloadUrl: String,
+        releaseNotes: String,
+        commitSha: String = "",
+        githubReleaseTag: String = "",
+        isMandatory: Boolean = false,
+        publishedBy: String = "নাজিমে আলা (অ্যাডমিন)"
+    ): Result<Unit> {
+        requireUserId()
+        val trimmedUrl = apkDownloadUrl.trim()
+        val trimmedVersionName = versionName.trim()
+        if (versionCode < 1) {
+            return Result.failure(IllegalArgumentException("সঠিক ভার্সন কোড প্রদান করুন (ন্যূনতম ১)।"))
+        }
+        if (trimmedVersionName.isBlank()) {
+            return Result.failure(IllegalArgumentException("সঠিক ভার্সন নাম লিখুন (যেমন: 1.0.2)।"))
+        }
+        if (!trimmedUrl.startsWith("https://", ignoreCase = true) &&
+            !trimmedUrl.startsWith("http://", ignoreCase = true)
+        ) {
+            return Result.failure(IllegalArgumentException("সঠিক APK ডাউনলোড লিংক (https://...) প্রদান করুন।"))
+        }
+
+        val latestRef = db.collection("app_releases").document("latest")
+        val versionRef = db.collection("app_releases").document("v_$versionCode")
+        val safeNotes = releaseNotes.trim().ifBlank {
+            "কওমি কর্মসংস্থান বাংলাদেশ নতুন সংস্করণ ($trimmedVersionName) প্রকাশিত হয়েছে।"
+        }
+        val safePublisher = publishedBy.trim().ifBlank { "GitHub Actions CI" }
+        val safeTag = githubReleaseTag.trim().ifBlank { "v$trimmedVersionName" }
+
+        return try {
+            val latestPayload = mapOf(
+                "releaseId" to "latest",
+                "versionCode" to versionCode,
+                "versionName" to trimmedVersionName,
+                "apkDownloadUrl" to trimmedUrl,
+                "releaseNotes" to safeNotes,
+                "commitSha" to commitSha.trim(),
+                "githubReleaseTag" to safeTag,
+                "isMandatory" to isMandatory,
+                "publishedBy" to safePublisher,
+                "publishedAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            val versionPayload = latestPayload.toMutableMap().apply {
+                put("releaseId", "v_$versionCode")
+            }
+            val batch = db.batch()
+            batch.set(latestRef, latestPayload)
+            batch.set(versionRef, versionPayload)
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, latestRef.path)
+            Result.failure(e)
+        }
+    }
 }
+
 
 
