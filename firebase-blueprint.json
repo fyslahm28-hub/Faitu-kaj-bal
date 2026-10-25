@@ -59,6 +59,9 @@
         "khedmotCategories": { "type": "array", "required": false },
         "customCategory": { "type": "string", "required": false },
         "imageUrls": { "type": "array", "required": false },
+        "mediaTypes": { "type": "array", "required": false },
+        "mediaMetadata": { "type": "array", "required": false },
+        "attachmentDocId": { "type": "string", "required": false },
         "userReactions": { "type": "object", "required": false },
         "userReactionNames": { "type": "object", "required": false },
         "commentCount": { "type": "number", "required": false },
@@ -240,6 +243,23 @@
         "publishedAt": { "type": "timestamp", "required": true },
         "updatedAt": { "type": "timestamp", "required": true }
       }
+    },
+    "FeedPostExtendedAttachment": {
+      "description": "Separate document storing extended post text or large attachment metadata/payloads outside /feed_posts/{postId} so feed_posts documents always remain lightweight and well under 1 MiB.",
+      "properties": {
+        "postId": { "type": "string", "required": true },
+        "authorId": { "type": "string", "required": true },
+        "attachmentType": { "type": "string", "required": true, "enum": ["EXTENDED_CONTENT", "IMAGE", "VIDEO"] },
+        "mimeType": { "type": "string", "required": true },
+        "fileName": { "type": "string", "required": false },
+        "downloadUrl": { "type": "string", "required": false },
+        "extendedText": { "type": "string", "required": false },
+        "mediaDataUrl": { "type": "string", "required": false },
+        "sizeBytes": { "type": "number", "required": true },
+        "visibility": { "type": "string", "required": true, "enum": ["PUBLIC", "ARCHIVED"] },
+        "createdAt": { "type": "timestamp", "required": true },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
     }
   },
   "collections": [
@@ -267,6 +287,11 @@
       "path": "/feed_posts/{postId}",
       "entity": "FeedPost",
       "access": "Authenticated users can read public posts, create posts with their own authorId, and update reaction/comment/share counters; authors can update/delete their own posts; admins can moderate, verify, and boost."
+    },
+    {
+      "path": "/feed_post_attachments/{attachmentId}",
+      "entity": "FeedPostExtendedAttachment",
+      "access": "Authenticated users can read public post attachments; post authors can create, update, or delete their own attachment documents; admins can moderate."
     },
     {
       "path": "/post_comments/{commentId}",

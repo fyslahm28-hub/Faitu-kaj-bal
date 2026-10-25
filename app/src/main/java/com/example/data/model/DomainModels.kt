@@ -92,6 +92,9 @@ data class FeedPost(
     val khedmotCategories: List<String> = emptyList(),
     val customCategory: String = "",
     val imageUrls: List<String> = emptyList(),
+    val mediaTypes: List<String> = emptyList(), // e.g., ["IMAGE", "VIDEO"]
+    val mediaMetadata: List<Map<String, String>> = emptyList(), // url, mediaType, mimeType, sizeBytes, fileName, storagePath
+    val attachmentDocId: String = "", // Optional reference to /feed_post_attachments/{attachmentId}
     val userReactions: Map<String, String> = emptyMap(),
     val userReactionNames: Map<String, String> = emptyMap(),
     val commentCount: Int = 0,
@@ -107,6 +110,23 @@ data class FeedPost(
     var isEdited: Boolean = false,
     val visibility: String = "PUBLIC", // "PUBLIC" or "ARCHIVED"
     val approvalStatus: String = "APPROVED", // "APPROVED", "PENDING", "REJECTED"
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class FeedPostExtendedAttachment(
+    @DocumentId val id: String = "",
+    val postId: String = "",
+    val authorId: String = "",
+    val attachmentType: String = "EXTENDED_CONTENT", // "EXTENDED_CONTENT", "IMAGE", "VIDEO"
+    val mimeType: String = "text/plain",
+    val fileName: String = "",
+    val downloadUrl: String = "",
+    val extendedText: String = "",
+    val mediaDataUrl: String = "",
+    val sizeBytes: Int = 0,
+    val visibility: String = "PUBLIC",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )

@@ -10,6 +10,7 @@ import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
 import com.example.data.model.FeedComment
 import com.example.data.model.FeedPost
+import com.example.data.model.FeedPostExtendedAttachment
 import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
@@ -288,8 +289,13 @@ class QawmiRepository(
                 docRef.update(updatePayload).await()
             }
 
-            // Propagate updated author photo and name to user's authored feed posts
+            // Propagate updated author photo (compacted/uploaded for feed) and name to user's authored feed posts
             try {
+                val safeFeedPhoto = if (resolvedPhoto.isNotBlank()) {
+                    ProfilePhotoHelper.uploadOrCompactAuthorPhotoForFeedPost(resolvedPhoto, uid)
+                } else {
+                    ""
+                }
                 val myPostsSnap = db.collection("feed_posts")
                     .whereEqualTo("authorId", uid)
                     .get()
@@ -301,8 +307,8 @@ class QawmiRepository(
                             "authorName" to resolvedName,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                        if (resolvedPhoto.isNotBlank()) {
-                            updates["authorPhotoUrl"] = resolvedPhoto
+                        if (safeFeedPhoto.isNotBlank()) {
+                            updates["authorPhotoUrl"] = safeFeedPhoto
                         }
                         batch.update(postDoc.reference, updates)
                     }
@@ -359,6 +365,7 @@ class QawmiRepository(
             }
 
             try {
+                val safeFeedPhoto = ProfilePhotoHelper.uploadOrCompactAuthorPhotoForFeedPost(photoUrl, uid)
                 val myPostsSnap = db.collection("feed_posts")
                     .whereEqualTo("authorId", uid)
                     .get()
@@ -369,7 +376,7 @@ class QawmiRepository(
                         batch.update(
                             postDoc.reference,
                             mapOf(
-                                "authorPhotoUrl" to photoUrl,
+                                "authorPhotoUrl" to safeFeedPhoto,
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
                         )
@@ -542,13 +549,93 @@ class QawmiRepository(
         val collectionRef = db.collection("feed_posts")
         val docRef = collectionRef.document()
         return try {
-            val cleanedCategories = khedmotCategories.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
-            val cleanedCustomCategory = if (KhedmotCategoryHelper.CAT_OTHER in cleanedCategories) {
-                customCategory.trim().take(150)
-            } else {
-                customCategory.trim().take(150)
+            val trimmedDesc = description.trim()
+            if (trimmedDesc.toByteArray(Charsets.UTF_8).size > 140_000) {
+                return Result.failure(IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA))
             }
-            val cleanedImages = imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5)
+            if (imageUrls.size > ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
+                return Result.failure(
+                    IllegalArgumentException("একটি পোস্টে সর্বোচ্চ ৫টি ছবি বা ভিডিও যুক্ত করা যাবে।")
+                )
+            }
+
+            val cleanedCategories = khedmotCategories.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
+            val cleanedCustomCategory = customCategory.trim().take(150)
+            val rawMediaItems = imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5)
+
+            // 1. Upload images/videos to Firebase Storage and extract compact metadata
+            val mediaUploadRes = ProfilePhotoHelper.uploadFeedMediaToFirebaseStorage(
+                mediaItems = rawMediaItems,
+                authorId = uid,
+                postId = docRef.id
+            )
+            if (mediaUploadRes.isFailure) {
+                return Result.failure(
+                    mediaUploadRes.exceptionOrNull()
+                        ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
+                )
+            }
+            val uploadedMedia = mediaUploadRes.getOrThrow()
+
+            // 2. Store any large attachment or extended text (> 2000 chars) in separate /feed_post_attachments documents
+            var primaryAttachmentDocId = ""
+            val metadataMaps = mutableListOf<Map<String, String>>()
+
+            if (trimmedDesc.length > 2000) {
+                val extDocId = "${docRef.id}_ext_text"
+                val extRef = db.collection("feed_post_attachments").document(extDocId)
+                val extPayload = mapOf(
+                    "postId" to docRef.id,
+                    "authorId" to uid,
+                    "attachmentType" to "EXTENDED_CONTENT",
+                    "mimeType" to "text/plain",
+                    "fileName" to "extended_description.txt",
+                    "downloadUrl" to "",
+                    "extendedText" to trimmedDesc.take(140_000),
+                    "mediaDataUrl" to "",
+                    "sizeBytes" to trimmedDesc.toByteArray(Charsets.UTF_8).size,
+                    "visibility" to "PUBLIC",
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                extRef.set(extPayload).await()
+                primaryAttachmentDocId = extDocId
+            }
+
+            uploadedMedia.forEachIndexed { idx, mediaItem ->
+                var itemAttachmentDocId = ""
+                if (mediaItem.separateAttachmentDataUrl.isNotBlank()) {
+                    val mediaDocId = "${docRef.id}_media_$idx"
+                    val mediaRef = db.collection("feed_post_attachments").document(mediaDocId)
+                    val mediaPayload = mapOf(
+                        "postId" to docRef.id,
+                        "authorId" to uid,
+                        "attachmentType" to mediaItem.mediaType,
+                        "mimeType" to mediaItem.mimeType,
+                        "fileName" to mediaItem.fileName,
+                        "downloadUrl" to mediaItem.url,
+                        "extendedText" to "",
+                        "mediaDataUrl" to mediaItem.separateAttachmentDataUrl,
+                        "sizeBytes" to mediaItem.sizeBytes,
+                        "visibility" to "PUBLIC",
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    mediaRef.set(mediaPayload).await()
+                    itemAttachmentDocId = mediaDocId
+                    if (primaryAttachmentDocId.isBlank()) {
+                        primaryAttachmentDocId = mediaDocId
+                    }
+                }
+                metadataMaps.add(mediaItem.toMetadataMap(itemAttachmentDocId))
+            }
+
+            // 3. Ensure authorPhotoUrl on feed_posts is compact or a Storage URL
+            val safeAuthorPhotoUrl = ProfilePhotoHelper.uploadOrCompactAuthorPhotoForFeedPost(
+                authorPhotoUrl = authorPhotoUrl,
+                authorId = uid
+            )
+
             // Never auto-claim user general or seeker posts as verified madrasa content
             val safeVerified = if (postType == "JOB_CIRCULAR") isVerifiedMadrasa else false
             val resolvedDesignation = KhedmotCategoryHelper.buildCombinedDesignation(
@@ -561,40 +648,56 @@ class QawmiRepository(
 
             val payload = mutableMapOf<String, Any>(
                 "authorId" to uid,
-                "authorName" to authorName.trim().ifBlank { title.trim() },
-                "authorPhotoUrl" to authorPhotoUrl.trim(),
+                "authorName" to authorName.trim().ifBlank { title.trim() }.take(200),
+                "authorPhotoUrl" to safeAuthorPhotoUrl,
                 "postType" to postType,
-                "title" to title.trim(),
-                "district" to district.trim(),
-                "upazilaOrLocation" to upazilaOrLocation.trim(),
+                "title" to title.trim().take(200),
+                "district" to district.trim().take(100),
+                "upazilaOrLocation" to upazilaOrLocation.trim().take(200),
                 "designation" to resolvedDesignation.take(150),
-                "qualification" to qualification.trim(),
-                "salaryOrExperience" to salaryOrExperience.trim(),
-                "deadlineOrPreferredDistricts" to deadlineOrPreferredDistricts.trim(),
-                "description" to description.trim().take(2000),
-                "contactNumber" to contactNumber.trim(),
-                "madrasaId" to madrasaId,
+                "qualification" to qualification.trim().take(200),
+                "salaryOrExperience" to salaryOrExperience.trim().take(150),
+                "deadlineOrPreferredDistricts" to deadlineOrPreferredDistricts.trim().take(250),
+                "description" to trimmedDesc.take(2000),
+                "contactNumber" to contactNumber.trim().take(100),
+                "madrasaId" to madrasaId.take(128),
                 "isVerifiedMadrasa" to safeVerified,
                 "isBoosted" to false,
                 "khedmotCategories" to cleanedCategories,
                 "customCategory" to cleanedCustomCategory,
-                "imageUrls" to cleanedImages,
+                "imageUrls" to uploadedMedia.map { it.url },
+                "mediaTypes" to uploadedMedia.map { it.mediaType },
+                "mediaMetadata" to metadataMaps,
+                "attachmentDocId" to primaryAttachmentDocId,
                 "userReactions" to emptyMap<String, String>(),
                 "userReactionNames" to emptyMap<String, String>(),
                 "commentCount" to 0,
                 "shareCount" to 0,
-                "sharedPostId" to sharedPostId.trim(),
-                "sharedAuthorId" to sharedAuthorId.trim(),
-                "sharedAuthorName" to sharedAuthorName.trim(),
+                "sharedPostId" to sharedPostId.trim().take(128),
+                "sharedAuthorId" to sharedAuthorId.trim().take(128),
+                "sharedAuthorName" to sharedAuthorName.trim().take(200),
                 "sharedTitle" to sharedTitle.trim().take(200),
                 "sharedDescription" to sharedDescription.trim().take(2000),
-                "sharedPostType" to sharedPostType.trim(),
+                "sharedPostType" to sharedPostType.trim().take(50),
                 "isEdited" to false,
                 "visibility" to "PUBLIC",
                 "approvalStatus" to "APPROVED",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
+
+            // 4. Pre-write document size validation (strictly before docRef.set)
+            val sizeValidation = ProfilePhotoHelper.validateFirestoreDocumentSizeBeforeWrite(
+                documentPath = docRef.path,
+                data = payload
+            )
+            if (sizeValidation.isFailure) {
+                return Result.failure(
+                    sizeValidation.exceptionOrNull()
+                        ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
+                )
+            }
+
             docRef.set(payload).await()
 
             // Deliver community notification to other users (observeNotifications excludes senderId == uid)
@@ -634,7 +737,7 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -659,6 +762,16 @@ class QawmiRepository(
         }
         val docRef = db.collection("feed_posts").document(post.id)
         return try {
+            val trimmedDesc = description.trim()
+            if (trimmedDesc.toByteArray(Charsets.UTF_8).size > 140_000) {
+                return Result.failure(IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA))
+            }
+            if (imageUrls.size > ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
+                return Result.failure(
+                    IllegalArgumentException("একটি পোস্টে সর্বোচ্চ ৫টি ছবি বা ভিডিও যুক্ত করা যাবে।")
+                )
+            }
+
             val cleanedCategories = khedmotCategories.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
             val cleanedCustom = customCategory.trim().take(150)
             val resolvedDesignation = KhedmotCategoryHelper.buildCombinedDesignation(
@@ -668,6 +781,73 @@ class QawmiRepository(
             ).ifBlank {
                 if (post.postType == "GENERAL_POST") "দ্বীনি আলোচনা ও খেদমত" else designation.trim()
             }
+
+            val rawMediaItems = imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5)
+            val mediaUploadRes = ProfilePhotoHelper.uploadFeedMediaToFirebaseStorage(
+                mediaItems = rawMediaItems,
+                authorId = uid,
+                postId = post.id
+            )
+            if (mediaUploadRes.isFailure) {
+                return Result.failure(
+                    mediaUploadRes.exceptionOrNull()
+                        ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
+                )
+            }
+            val uploadedMedia = mediaUploadRes.getOrThrow()
+
+            var primaryAttachmentDocId = post.attachmentDocId
+            val metadataMaps = mutableListOf<Map<String, String>>()
+
+            if (trimmedDesc.length > 2000) {
+                val extDocId = "${post.id}_ext_text"
+                val extRef = db.collection("feed_post_attachments").document(extDocId)
+                val extPayload = mapOf(
+                    "postId" to post.id,
+                    "authorId" to uid,
+                    "attachmentType" to "EXTENDED_CONTENT",
+                    "mimeType" to "text/plain",
+                    "fileName" to "extended_description.txt",
+                    "downloadUrl" to "",
+                    "extendedText" to trimmedDesc.take(140_000),
+                    "mediaDataUrl" to "",
+                    "sizeBytes" to trimmedDesc.toByteArray(Charsets.UTF_8).size,
+                    "visibility" to "PUBLIC",
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                extRef.set(extPayload).await()
+                primaryAttachmentDocId = extDocId
+            }
+
+            uploadedMedia.forEachIndexed { idx, mediaItem ->
+                var itemAttachmentDocId = ""
+                if (mediaItem.separateAttachmentDataUrl.isNotBlank()) {
+                    val mediaDocId = "${post.id}_media_$idx"
+                    val mediaRef = db.collection("feed_post_attachments").document(mediaDocId)
+                    val mediaPayload = mapOf(
+                        "postId" to post.id,
+                        "authorId" to uid,
+                        "attachmentType" to mediaItem.mediaType,
+                        "mimeType" to mediaItem.mimeType,
+                        "fileName" to mediaItem.fileName,
+                        "downloadUrl" to mediaItem.url,
+                        "extendedText" to "",
+                        "mediaDataUrl" to mediaItem.separateAttachmentDataUrl,
+                        "sizeBytes" to mediaItem.sizeBytes,
+                        "visibility" to "PUBLIC",
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    mediaRef.set(mediaPayload).await()
+                    itemAttachmentDocId = mediaDocId
+                    if (primaryAttachmentDocId.isBlank()) {
+                        primaryAttachmentDocId = mediaDocId
+                    }
+                }
+                metadataMaps.add(mediaItem.toMetadataMap(itemAttachmentDocId))
+            }
+
             val updates = mapOf(
                 "title" to title.trim().take(200),
                 "district" to district.trim().take(100),
@@ -676,20 +856,163 @@ class QawmiRepository(
                 "qualification" to qualification.trim().take(200),
                 "salaryOrExperience" to salaryOrExperience.trim().take(150),
                 "deadlineOrPreferredDistricts" to deadlineOrPreferredDistricts.trim().take(250),
-                "description" to description.trim().take(2000),
+                "description" to trimmedDesc.take(2000),
                 "contactNumber" to contactNumber.trim().take(100),
                 "khedmotCategories" to cleanedCategories,
                 "customCategory" to cleanedCustom,
-                "imageUrls" to imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5),
+                "imageUrls" to uploadedMedia.map { it.url },
+                "mediaTypes" to uploadedMedia.map { it.mediaType },
+                "mediaMetadata" to metadataMaps,
+                "attachmentDocId" to primaryAttachmentDocId,
                 "isEdited" to true,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
+
+            // Pre-write document size validation (projected post-update document state)
+            val projectedPayload = mapOf(
+                "authorId" to post.authorId,
+                "authorName" to post.authorName,
+                "authorPhotoUrl" to post.authorPhotoUrl,
+                "postType" to post.postType,
+                "title" to updates["title"],
+                "district" to updates["district"],
+                "upazilaOrLocation" to updates["upazilaOrLocation"],
+                "designation" to updates["designation"],
+                "qualification" to updates["qualification"],
+                "salaryOrExperience" to updates["salaryOrExperience"],
+                "deadlineOrPreferredDistricts" to updates["deadlineOrPreferredDistricts"],
+                "description" to updates["description"],
+                "contactNumber" to updates["contactNumber"],
+                "khedmotCategories" to updates["khedmotCategories"],
+                "customCategory" to updates["customCategory"],
+                "imageUrls" to updates["imageUrls"],
+                "mediaTypes" to updates["mediaTypes"],
+                "mediaMetadata" to updates["mediaMetadata"],
+                "attachmentDocId" to updates["attachmentDocId"],
+                "userReactions" to post.userReactions,
+                "userReactionNames" to post.userReactionNames
+            )
+            val sizeValidation = ProfilePhotoHelper.validateFirestoreDocumentSizeBeforeWrite(
+                documentPath = docRef.path,
+                data = projectedPayload
+            )
+            if (sizeValidation.isFailure) {
+                return Result.failure(
+                    sizeValidation.exceptionOrNull()
+                        ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
+                )
+            }
+
             docRef.update(updates).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(translateFirestoreExceptionToBangla(e))
+        }
+    }
+
+    /**
+     * Fetches a separate extended attachment document (`/feed_post_attachments/{attachmentId}`)
+     * for posts that offloaded extended text or large attachment payloads outside `/feed_posts/{postId}`.
+     */
+    suspend fun getFeedPostExtendedAttachment(attachmentId: String): FeedPostExtendedAttachment? {
+        if (attachmentId.isBlank()) return null
+        val path = "feed_post_attachments/$attachmentId"
+        return try {
+            val snap = db.collection("feed_post_attachments").document(attachmentId).get().await()
+            if (snap.exists()) {
+                snap.toObject(FeedPostExtendedAttachment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            } else {
+                null
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, path)
+            null
+        }
+    }
+
+    /**
+     * Non-destructively inspects existing `feed_posts` authored by the signed-in user and
+     * migrates any oversized inline Base64 images/videos or oversized `authorPhotoUrl` to
+     * Firebase Storage / separate `/feed_post_attachments/{attachmentId}` documents.
+     * Never deletes existing posts or resets data.
+     */
+    suspend fun inspectAndSanitizeExistingFeedPosts(): Result<Int> {
+        val uid = auth.currentUser?.uid ?: return Result.success(0)
+        return try {
+            val snap = db.collection("feed_posts")
+                .whereEqualTo("authorId", uid)
+                .get()
+                .await()
+            var sanitizedCount = 0
+            for (doc in snap.documents) {
+                val post = doc.toObject(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    ?: continue
+                val hasLargeInlineImage = post.imageUrls.any {
+                    it.length > ProfilePhotoHelper.MAX_INLINE_FEED_IMAGE_PREVIEW_CHARS ||
+                        it.startsWith("data:video/", ignoreCase = true)
+                }
+                val hasLargeAvatar = post.authorPhotoUrl.length > ProfilePhotoHelper.MAX_INLINE_AVATAR_CHARS_IN_POST
+                if (!hasLargeInlineImage && !hasLargeAvatar) continue
+
+                val uploadedMedia = ProfilePhotoHelper.uploadFeedMediaToFirebaseStorage(
+                    mediaItems = post.imageUrls,
+                    authorId = uid,
+                    postId = doc.id
+                ).getOrNull() ?: continue
+
+                var primaryAttachId = post.attachmentDocId
+                val metadataMaps = mutableListOf<Map<String, String>>()
+                uploadedMedia.forEachIndexed { idx, item ->
+                    var itemDocId = ""
+                    if (item.separateAttachmentDataUrl.isNotBlank()) {
+                        val attachDocId = "${doc.id}_media_$idx"
+                        db.collection("feed_post_attachments").document(attachDocId).set(
+                            mapOf(
+                                "postId" to doc.id,
+                                "authorId" to uid,
+                                "attachmentType" to item.mediaType,
+                                "mimeType" to item.mimeType,
+                                "fileName" to item.fileName,
+                                "downloadUrl" to item.url,
+                                "extendedText" to "",
+                                "mediaDataUrl" to item.separateAttachmentDataUrl,
+                                "sizeBytes" to item.sizeBytes,
+                                "visibility" to "PUBLIC",
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                        itemDocId = attachDocId
+                        if (primaryAttachId.isBlank()) primaryAttachId = attachDocId
+                    }
+                    metadataMaps.add(item.toMetadataMap(itemDocId))
+                }
+
+                val safeAvatar = ProfilePhotoHelper.uploadOrCompactAuthorPhotoForFeedPost(
+                    authorPhotoUrl = post.authorPhotoUrl,
+                    authorId = uid
+                )
+                doc.reference.update(
+                    mapOf(
+                        "authorPhotoUrl" to safeAvatar,
+                        "imageUrls" to uploadedMedia.map { it.url },
+                        "mediaTypes" to uploadedMedia.map { it.mediaType },
+                        "mediaMetadata" to metadataMaps,
+                        "attachmentDocId" to primaryAttachId,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+                sanitizedCount++
+            }
+            Result.success(sanitizedCount)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }

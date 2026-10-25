@@ -146,6 +146,9 @@ service cloud.firestore {
              (!('khedmotCategories' in data) || (data.khedmotCategories is list && data.khedmotCategories.size() <= 20)) &&
              (!('customCategory' in data) || (data.customCategory is string && data.customCategory.size() <= 150)) &&
              (!('imageUrls' in data) || (data.imageUrls is list && data.imageUrls.size() <= 5)) &&
+             (!('mediaTypes' in data) || (data.mediaTypes is list && data.mediaTypes.size() <= 5)) &&
+             (!('mediaMetadata' in data) || (data.mediaMetadata is list && data.mediaMetadata.size() <= 5)) &&
+             (!('attachmentDocId' in data) || (data.attachmentDocId is string && data.attachmentDocId.size() <= 128)) &&
              (!('userReactions' in data) || (data.userReactions is map && data.userReactions.size() <= 500)) &&
              (!('userReactionNames' in data) || (data.userReactionNames is map && data.userReactionNames.size() <= 500)) &&
              (!('commentCount' in data) || (data.commentCount is int && data.commentCount >= 0 && data.commentCount <= 100000)) &&
@@ -159,6 +162,25 @@ service cloud.firestore {
              (!('isEdited' in data) || data.isEdited is bool) &&
              data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'ARCHIVED') &&
              data.approvalStatus is string && (data.approvalStatus == 'APPROVED' || data.approvalStatus == 'PENDING' || data.approvalStatus == 'REJECTED') &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidFeedPostExtendedAttachment(data) {
+      return data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.attachmentType is string && (
+               data.attachmentType == 'EXTENDED_CONTENT' ||
+               data.attachmentType == 'IMAGE' ||
+               data.attachmentType == 'VIDEO'
+             ) &&
+             data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 100 &&
+             (!('fileName' in data) || (data.fileName is string && data.fileName.size() <= 250)) &&
+             (!('downloadUrl' in data) || (data.downloadUrl is string && data.downloadUrl.size() <= 2000)) &&
+             (!('extendedText' in data) || (data.extendedText is string && data.extendedText.size() <= 150000)) &&
+             (!('mediaDataUrl' in data) || (data.mediaDataUrl is string && data.mediaDataUrl.size() <= 750000)) &&
+             data.sizeBytes is int && data.sizeBytes >= 0 && data.sizeBytes <= 50000000 &&
+             data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'ARCHIVED') &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
     }
@@ -477,6 +499,7 @@ service cloud.firestore {
                          'description', 'contactNumber', 'madrasaId',
                          'isVerifiedMadrasa', 'isBoosted',
                          'khedmotCategories', 'customCategory', 'imageUrls',
+                         'mediaTypes', 'mediaMetadata', 'attachmentDocId',
                          'userReactions', 'userReactionNames', 'commentCount', 'shareCount',
                          'sharedPostId', 'sharedAuthorId', 'sharedAuthorName',
                          'sharedTitle', 'sharedDescription', 'sharedPostType', 'isEdited',
@@ -500,7 +523,8 @@ service cloud.firestore {
                     'designation', 'qualification', 'salaryOrExperience',
                     'deadlineOrPreferredDistricts', 'description',
                     'contactNumber', 'khedmotCategories', 'customCategory',
-                    'imageUrls', 'isEdited', 'visibility', 'updatedAt'
+                    'imageUrls', 'mediaTypes', 'mediaMetadata', 'attachmentDocId',
+                    'isEdited', 'visibility', 'updatedAt'
                   ])) ||
                  (statusUnchanged &&
                   diffKeys.hasOnly([
@@ -523,6 +547,50 @@ service cloud.firestore {
                        canUpdateFeedPost(incoming(), existing());
 
       allow delete: if isSignedIn() && isValidId(postId) && (existing().authorId == request.auth.uid || isAdmin());
+    }
+
+    // Separate Extended Attachments & Long Text for Feed Posts (বড় টেক্সট ও অ্যাটাচমেন্ট আলাদা ডকুমেন্টে সংরক্ষণ)
+    match /feed_post_attachments/{attachmentId} {
+      allow get: if isSignedIn() && isValidId(attachmentId) && (
+        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(attachmentId) &&
+                       incoming().authorId == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'postId', 'authorId', 'attachmentType', 'mimeType',
+                         'sizeBytes', 'visibility', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'postId', 'authorId', 'attachmentType', 'mimeType',
+                         'fileName', 'downloadUrl', 'extendedText', 'mediaDataUrl',
+                         'sizeBytes', 'visibility', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidFeedPostExtendedAttachment(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(attachmentId) &&
+                       isValidFeedPostExtendedAttachment(incoming()) &&
+                       incoming().postId == existing().postId &&
+                       incoming().authorId == existing().authorId &&
+                       incoming().createdAt == existing().createdAt && (
+                         (request.auth.uid == existing().authorId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'attachmentType', 'mimeType', 'fileName', 'downloadUrl',
+                            'extendedText', 'mediaDataUrl', 'sizeBytes',
+                            'visibility', 'updatedAt'
+                          ])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'visibility', 'updatedAt'
+                          ]))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(attachmentId) && (existing().authorId == request.auth.uid || isAdmin());
     }
 
     // Feed Post Comments & Replies (কমেন্ট ও রিপ্লাই)

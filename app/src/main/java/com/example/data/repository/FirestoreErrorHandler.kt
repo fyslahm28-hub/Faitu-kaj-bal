@@ -48,3 +48,19 @@ fun handleFirestoreError(exception: Exception, operationType: OperationType, pat
     Log.e("FirestoreError", "Firestore Error: $jsonString")
     return jsonString
 }
+
+fun translateFirestoreExceptionToBangla(exception: Exception): Exception {
+    val msg = exception.message.orEmpty()
+    if (msg.contains("exceeds", ignoreCase = true) ||
+        msg.contains("1 MiB", ignoreCase = true) ||
+        msg.contains("1048576", ignoreCase = true) ||
+        msg.contains("maximum size", ignoreCase = true) ||
+        (msg.contains("INVALID_ARGUMENT", ignoreCase = true) && msg.contains("feed_posts", ignoreCase = true))
+    ) {
+        return IllegalArgumentException(
+            com.example.ui.util.ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA,
+            exception
+        )
+    }
+    return exception
+}

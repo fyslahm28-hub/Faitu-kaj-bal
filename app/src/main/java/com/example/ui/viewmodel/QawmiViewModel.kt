@@ -418,6 +418,13 @@ class QawmiViewModel(
     init {
         setUserOnlineStatus(true)
         verifyAndSyncAdminIdentity()
+        sanitizeExistingFeedPostsIfNeeded()
+    }
+
+    private fun sanitizeExistingFeedPostsIfNeeded() {
+        viewModelScope.launch {
+            repository.inspectAndSanitizeExistingFeedPosts()
+        }
     }
 
     private fun verifyAndSyncAdminIdentity() {

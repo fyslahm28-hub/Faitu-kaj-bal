@@ -626,6 +626,78 @@ test("App Releases Auto-Update: signed-in users can read /app_releases/latest; o
   await assertFails(aliceDb.collection("app_releases").doc("latest").delete());
 });
 
+test("Feed Post Storage Metadata & Extended Attachments: prevents 1 MiB limit and secures /feed_post_attachments", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = nowDate();
 
+  // 1. Alice creates an extended attachment document in /feed_post_attachments
+  await assertSucceeds(
+    aliceDb.collection("feed_post_attachments").doc("att_post_1").set({
+      postId: "post_storage_1",
+      authorId: ALICE_UID,
+      attachmentType: "EXTENDED_CONTENT",
+      mimeType: "text/plain",
+      fileName: "extended_description.txt",
+      downloadUrl: "https://firebasestorage.googleapis.com/v0/b/demo/o/post_storage_1_media_0.jpg?alt=media",
+      extendedText: "বিস্তারিত নিয়োগ বিজ্ঞপ্তি ও মাদরাসার তথ্যাবলি।",
+      mediaDataUrl: "",
+      sizeBytes: 245000,
+      visibility: "PUBLIC",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
 
+  // 2. Alice creates a feed_posts document referencing Firebase Storage URLs, mediaTypes, mediaMetadata, and attachmentDocId
+  await assertSucceeds(
+    aliceDb.collection("feed_posts").doc("post_storage_1").set({
+      authorId: ALICE_UID,
+      authorName: "জামিয়া রাহমানিয়া আরাবিয়া",
+      postType: "GENERAL_POST",
+      title: "দাওরায়ে হাদীস পরীক্ষার রুটিন ও বিজ্ঞপ্তি",
+      district: "ঢাকা",
+      upazilaOrLocation: "মোহাম্মদপুর",
+      designation: "দ্বীনি খেদমত ও সাধারণ পোস্ট",
+      qualification: "সর্বসাধারণের জন্য উন্মুক্ত",
+      salaryOrExperience: "",
+      deadlineOrPreferredDistricts: "ঢাকা",
+      description: "সংযুক্ত ছবিতে বিস্তারিত রুটিন দেওয়া হলো।",
+      contactNumber: "দেওয়া হয়নি",
+      madrasaId: "",
+      isVerifiedMadrasa: false,
+      isBoosted: false,
+      imageUrls: [
+        "https://firebasestorage.googleapis.com/v0/b/demo/o/post_storage_1_media_0.jpg?alt=media",
+      ],
+      mediaTypes: ["IMAGE"],
+      mediaMetadata: [
+        {
+          url: "https://firebasestorage.googleapis.com/v0/b/demo/o/post_storage_1_media_0.jpg?alt=media",
+          mediaType: "IMAGE",
+          mimeType: "image/jpeg",
+          fileName: "post_storage_1_media_0.jpg",
+          sizeBytes: "245000",
+          storagePath: "feed_posts/alice_uid_123/post_storage_1/post_storage_1_media_0.jpg",
+          attachmentDocId: "att_post_1",
+        },
+      ],
+      attachmentDocId: "att_post_1",
+      visibility: "PUBLIC",
+      approvalStatus: "APPROVED",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
 
+  // 3. Bob can read the feed post and its extended attachment, but cannot overwrite or delete Alice's attachment
+  await assertSucceeds(bobDb.collection("feed_posts").doc("post_storage_1").get());
+  await assertSucceeds(bobDb.collection("feed_post_attachments").doc("att_post_1").get());
+  await assertFails(
+    bobDb.collection("feed_post_attachments").doc("att_post_1").update({
+      extendedText: "অননুমোদিত পরিবর্তন",
+      updatedAt: nowDate(),
+    })
+  );
+  await assertFails(bobDb.collection("feed_post_attachments").doc("att_post_1").delete());
+});

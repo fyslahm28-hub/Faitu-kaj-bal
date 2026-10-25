@@ -722,5 +722,96 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("Non-admin user must not be allowed to publish app release metadata", unauthorizedPublish.isFailure)
     }
+
+    @Test
+    fun createFeedPost_withLargeImagesAndLongText_offloadsData_prevents1MiBLimit_andValidatesSizeBeforeWrite() = runBlocking {
+        val authorEmail = "muhtamim_media_${UUID.randomUUID()}@test.com"
+        val authorUid = signInTestUser(authorEmail)
+        val repo = QawmiRepository(firestore, auth)
+
+        // Generate 3 large Base64 images (~400 KB each -> ~1.2 MB total raw, which previously failed with INVALID_ARGUMENT: exceeds 1 MiB limit)
+        val largeChunk = "A".repeat(390_000)
+        val rawLargeImages = listOf(
+            "data:image/jpeg;base64,$largeChunk",
+            "data:image/jpeg;base64,$largeChunk",
+            "data:image/jpeg;base64,$largeChunk"
+        )
+        val veryLongDescription = "বিসমিল্লাহির রাহমানির রাহীম। কওমি মাদরাসার বিস্তারিত নিয়োগ বিজ্ঞপ্তি ও শিক্ষাকার্যক্রম বিবরণী। ".repeat(80)
+
+        // 1. Verify raw un-compacted payload would exceed SAFE_FEED_POST_MAX_BYTES and fail pre-write size check with clear Bengali message
+        val rawUnsanitizedMap = mapOf(
+            "authorId" to authorUid,
+            "title" to "অতিরিক্ত বড় পোস্ট",
+            "description" to veryLongDescription,
+            "imageUrls" to rawLargeImages
+        )
+        val preWriteValidation = com.example.ui.util.ProfilePhotoHelper.validateFirestoreDocumentSizeBeforeWrite(
+            documentPath = "feed_posts/test_post_oversized",
+            data = rawUnsanitizedMap
+        )
+        assertTrue("Raw 1.2 MB payload must be caught by pre-write size validation", preWriteValidation.isFailure)
+        assertEquals(
+            com.example.ui.util.ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA,
+            preWriteValidation.exceptionOrNull()?.message
+        )
+
+        // 2. Now create the post via QawmiRepository.createFeedPost — it uploads/offloads media and extended text automatically
+        val createRes = withTimeout(10_000L) {
+            repo.createFeedPost(
+                authorName = "জামিয়া ইসলামিয়া দারুল উলুম",
+                postType = "GENERAL_POST",
+                title = "বার্ষিক ইমতিহান ও নতুন শিক্ষাবর্ষের বিজ্ঞপ্তি",
+                district = "ঢাকা",
+                upazilaOrLocation = "মিরপুর",
+                designation = "দ্বীনি খেদমত ও সাধারণ পোস্ট",
+                qualification = "সর্বসাধারণের জন্য উন্মুক্ত",
+                salaryOrExperience = "",
+                deadlineOrPreferredDistricts = "ঢাকা",
+                description = veryLongDescription,
+                contactNumber = "01711223344",
+                khedmotCategories = listOf("কিতাব বিভাগ", "হিফজ বিভাগ"),
+                imageUrls = rawLargeImages
+            )
+        }
+        assertTrue("createFeedPost with 3 large images and long text should succeed: ${createRes.exceptionOrNull()}", createRes.isSuccess)
+        val postId = createRes.getOrThrow()
+
+        // 3. Observe the created post in the feed and verify its size and metadata
+        val observedPosts = withTimeout(5000L) {
+            repo.observePublicFeedPosts().first { list -> list.any { it.id == postId } }
+        }
+        val savedPost = observedPosts.first { it.id == postId }
+        assertEquals(3, savedPost.imageUrls.size)
+        assertEquals(listOf("IMAGE", "IMAGE", "IMAGE"), savedPost.mediaTypes)
+        assertEquals(3, savedPost.mediaMetadata.size)
+        assertTrue("Long description should be offloaded to attachmentDocId", savedPost.attachmentDocId.isNotBlank())
+
+        // Verify the stored feed_posts document is well below the 1 MiB limit
+        val projectedSavedDocMap = mapOf(
+            "authorId" to savedPost.authorId,
+            "authorName" to savedPost.authorName,
+            "title" to savedPost.title,
+            "description" to savedPost.description,
+            "imageUrls" to savedPost.imageUrls,
+            "mediaTypes" to savedPost.mediaTypes,
+            "mediaMetadata" to savedPost.mediaMetadata,
+            "attachmentDocId" to savedPost.attachmentDocId
+        )
+        val estimatedSavedBytes = com.example.ui.util.ProfilePhotoHelper.estimateFirestoreDocumentBytes(
+            documentPath = "feed_posts/$postId",
+            data = projectedSavedDocMap
+        )
+        assertTrue(
+            "Saved feed_posts document must be well under 850 KB (was $estimatedSavedBytes bytes)",
+            estimatedSavedBytes < com.example.ui.util.ProfilePhotoHelper.SAFE_FEED_POST_MAX_BYTES
+        )
+
+        // 4. Verify extended text was stored in /feed_post_attachments/{attachmentDocId} and can be retrieved
+        val textAttachment = withTimeout(5000L) {
+            repo.getFeedPostExtendedAttachment("${postId}_ext_text")
+        }
+        assertNotNull("Expected extended text attachment to exist", textAttachment)
+        assertEquals(veryLongDescription.trim(), textAttachment?.extendedText)
+    }
 }
 

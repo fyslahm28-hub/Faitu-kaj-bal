@@ -105,6 +105,7 @@ import com.example.data.model.FeedComment
 import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.UserProfile
+import com.example.ui.components.ChatAttachmentImage
 import com.example.ui.components.UserAvatarImage
 import com.example.ui.theme.QawmiCardWhite
 import com.example.ui.theme.QawmiDarkGreen
@@ -1381,29 +1382,51 @@ fun FacebookStyleIslamicPostCard(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                // Attached Images (if any)
+                // Attached Media (Images / Videos uploaded to Firebase Storage or compact preview URLs)
                 if (post.imageUrls.isNotEmpty()) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .horizontalScroll(rememberScrollState())
-                            .padding(vertical = 4.dp),
+                            .padding(vertical = 4.dp)
+                            .testTag("post_media_row_${post.id}"),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        post.imageUrls.forEach { imgUrl ->
-                            val bitmap = remember(imgUrl) {
-                                ProfilePhotoHelper.decodeDataUrlToImageBitmap(imgUrl)
-                            }
-                            if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap,
-                                    contentDescription = "পোস্টের ছবি",
-                                    modifier = Modifier
-                                        .height(170.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(12.dp)),
-                                    contentScale = ContentScale.Crop
+                        post.imageUrls.forEachIndexed { index, mediaUrl ->
+                            val mediaType = post.mediaTypes.getOrNull(index)
+                                ?: if (mediaUrl.startsWith("data:video/", ignoreCase = true) ||
+                                    mediaUrl.contains(".mp4", ignoreCase = true)
+                                ) "VIDEO" else "IMAGE"
+                            Box(
+                                modifier = Modifier
+                                    .height(170.dp)
+                                    .width(220.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(12.dp))
+                                    .testTag("post_media_item_${post.id}_$index")
+                            ) {
+                                ChatAttachmentImage(
+                                    imageUrl = mediaUrl,
+                                    contentDescription = if (mediaType == "VIDEO") "পোস্টের ভিডিও" else "পোস্টের ছবি",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
                                 )
+                                Surface(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(6.dp),
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = QawmiDeepGreen.copy(alpha = 0.82f)
+                                ) {
+                                    Text(
+                                        text = if (mediaType == "VIDEO") "ভিডিও" else "ছবি",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -2125,10 +2148,22 @@ private fun QuickDeeniPostComposerDialog(
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        if (uri != null && attachedImages.size < 3) {
-            val encoded = ProfilePhotoHelper.encodeChatAttachmentUriToDataUrl(context, uri)
-            if (!encoded.isNullOrBlank()) {
-                attachedImages = attachedImages + encoded
+        if (uri != null) {
+            if (attachedImages.size >= 3) {
+                errorMsg = "একটি পোস্টে সর্বোচ্চ ৩টি ছবি বা মিডিয়া যুক্ত করা যাবে।"
+            } else {
+                val encodeRes = ProfilePhotoHelper.encodeFeedMediaUri(
+                    context = context,
+                    uri = uri,
+                    existingCount = attachedImages.size
+                )
+                encodeRes.onSuccess { encoded ->
+                    attachedImages = attachedImages + encoded
+                    errorMsg = null
+                }.onFailure { err ->
+                    errorMsg = err.localizedMessage
+                        ?: "নির্বাচিত ফাইলটি অনেক বড় বা অসমর্থিত। অনুগ্রহ করে ছোট আকারের ছবি বা ভিডিও নির্বাচন করুন।"
+                }
             }
         }
     }
@@ -2224,13 +2259,54 @@ private fun QuickDeeniPostComposerDialog(
                     OutlinedButton(
                         onClick = {
                             photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                             )
-                        }
+                        },
+                        modifier = Modifier.testTag("quick_post_attach_media_btn")
                     ) {
                         Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("ছবি যুক্ত করুন (${attachedImages.size}/৩)", fontSize = 12.sp)
+                    }
+                }
+
+                if (attachedImages.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        attachedImages.forEachIndexed { idx, img ->
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(8.dp))
+                            ) {
+                                ChatAttachmentImage(
+                                    imageUrl = img,
+                                    contentDescription = "সংযুক্ত ছবি",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                IconButton(
+                                    onClick = {
+                                        attachedImages = attachedImages.filterIndexed { i, _ -> i != idx }
+                                    },
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .size(22.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "মুছুন",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 

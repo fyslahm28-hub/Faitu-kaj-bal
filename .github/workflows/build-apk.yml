@@ -93,8 +93,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check Firebase App Distribution Configuration
+        id: check_firebase_distribution
+        env:
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "${FIREBASE_APP_ID}" ] && [ -n "${FIREBASE_SERVICE_ACCOUNT}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Distribute APK to Firebase App Distribution (Optional)
-        if: ${{ secrets.FIREBASE_APP_ID != '' && secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
+        if: steps.check_firebase_distribution.outputs.configured == 'true'
         continue-on-error: true
         uses: wzieba/Firebase-Distribution-Github-Action@v1
         with:

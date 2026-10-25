@@ -1607,7 +1607,117 @@ class ExampleRobolectricTest {
             com.example.ui.util.AppUpdateManagerHelper.customApkFetcher = null
         }
     }
+
+    @Test
+    fun `FeedScreen renders posts with Firebase Storage download URLs and compact image previews and validates 1 MiB limit`() {
+        // 1. Verify pre-write size check blocks >1 MiB documents with a clear Bengali message
+        val oversizedMap = mapOf(
+            "authorId" to "user_1",
+            "title" to "অতিরিক্ত বড় ছবি সহ পোস্ট",
+            "imageUrls" to listOf("data:image/jpeg;base64," + "A".repeat(900_000))
+        )
+        val validationResult = ProfilePhotoHelper.validateFirestoreDocumentSizeBeforeWrite(
+            documentPath = "feed_posts/post_oversized_1",
+            data = oversizedMap
+        )
+        assertTrue("Expected oversized document map to fail validation", validationResult.isFailure)
+        assertEquals(
+            ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA,
+            validationResult.exceptionOrNull()?.message
+        )
+
+        // 2. Create a valid compact bitmap preview + Firebase Storage download URL post and verify FeedScreen renders both
+        val bitmap = Bitmap.createBitmap(80, 80, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(Color.rgb(11, 93, 67))
+        val output = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 75, output)
+        val compactDataUrl = "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+        val storageDownloadUrl = "https://firebasestorage.googleapis.com/v0/b/qawmi-bd.appspot.com/o/feed_posts%2Fuser_1%2Fpost_media_1%2Fphoto_0.jpg?alt=media"
+
+        val postWithMedia = com.example.data.model.FeedPost(
+            id = "post_media_1",
+            authorId = "user_1",
+            authorName = "জামিয়া দারুল উলুম ঢাকা",
+            postType = "GENERAL_POST",
+            title = "বার্ষিক মাহফিল ও দস্তারবন্দী সম্মেলন",
+            district = "ঢাকা",
+            designation = "দ্বীনি খেদমত ও সাধারণ পোস্ট",
+            description = "আগামী শুক্রবার বাদ মাগরিব বার্ষিক দস্তারবন্দী সম্মেলন অনুষ্ঠিত হবে ইনশাআল্লাহ।",
+            imageUrls = listOf(storageDownloadUrl, compactDataUrl),
+            mediaTypes = listOf("IMAGE", "IMAGE"),
+            mediaMetadata = listOf(
+                mapOf(
+                    "url" to storageDownloadUrl,
+                    "mediaType" to "IMAGE",
+                    "mimeType" to "image/jpeg",
+                    "fileName" to "photo_0.jpg",
+                    "sizeBytes" to "124000"
+                ),
+                mapOf(
+                    "url" to compactDataUrl,
+                    "mediaType" to "IMAGE",
+                    "mimeType" to "image/jpeg",
+                    "fileName" to "photo_1.jpg",
+                    "sizeBytes" to "1800"
+                )
+            ),
+            createdAt = Timestamp.now()
+        )
+
+        var createdTitle = ""
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1100.dp)) {
+                    com.example.ui.screens.FeedScreen(
+                        feedPostsState = UiState.Success(listOf(postWithMedia)),
+                        postCommentsState = UiState.Success(emptyList()),
+                        bookmarksState = UiState.Success(emptyList()),
+                        selectedFilter = com.example.ui.viewmodel.FeedFilterTab.ALL,
+                        selectedKhedmotCategory = "সকল বিভাগ",
+                        selectedDistrict = "সকল জেলা",
+                        searchQuery = "",
+                        currentUserId = "user_1",
+                        isAdmin = false,
+                        currentUserProfile = UserProfile(id = "user_1", fullName = "জামিয়া দারুল উলুম ঢাকা"),
+                        onSelectFilter = {},
+                        onSelectKhedmotCategory = {},
+                        onSelectDistrict = {},
+                        onSearchQueryChange = {},
+                        onApplyClick = {},
+                        onViewProfileOrDetailClick = {},
+                        onToggleBookmark = { _, _ -> },
+                        onPublishQuickDeeniPost = { title, _, _, _, _, _ ->
+                            createdTitle = title
+                        },
+                        onReactToPost = { _, _ -> },
+                        onAddComment = { _, _, _, _ -> },
+                        onEditComment = { _, _ -> },
+                        onDeleteComment = { _, _, _ -> },
+                        onSharePostInApp = { _, _ -> },
+                        onToggleBoostPost = { _, _ -> },
+                        onDeletePost = {},
+                        onNavigate = {}
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+
+        // Verify the post card and both attached media items (Firebase Storage URL + compact data URL) are rendered
+        composeTestRule.onNodeWithTag("feed_post_card_post_media_1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("post_media_row_post_media_1", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("post_media_item_post_media_1_0", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("post_media_item_post_media_1_1", useUnmergedTree = true).assertExists()
+
+        // Open quick post composer dialog, enter a post title & description, and publish
+        composeTestRule.onNodeWithTag("composer_quick_deeni_post_btn").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("quick_deeni_post_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("quick_post_title_input").performTextInput("নতুন হিফজ বিভাগ উদ্বোধন")
+        composeTestRule.onNodeWithTag("quick_post_desc_input").performTextInput("আমাদের মাদরাসায় নতুন শিক্ষাবর্ষে ভর্তি চলছে।")
+        composeTestRule.onNodeWithTag("confirm_quick_post_submit_btn").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("নতুন হিফজ বিভাগ উদ্বোধন", createdTitle)
+    }
 }
-
-
-
