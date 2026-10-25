@@ -24,13 +24,18 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.WorkspacePremium
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +44,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -570,23 +576,57 @@ fun ChatAttachmentImage(
     contentScale: ContentScale = ContentScale.Crop,
     modifier: Modifier = Modifier
 ) {
-    val decodedBitmap = remember(imageUrl) {
+    val attachmentDocId = remember(imageUrl) {
+        ProfilePhotoHelper.extractAttachmentDocId(imageUrl)
+    }
+    val initialBitmap = remember(imageUrl) {
         ProfilePhotoHelper.decodeDataUrlToImageBitmap(imageUrl)
     }
+    var fetchedAttachmentBitmap by remember(imageUrl) {
+        mutableStateOf<ImageBitmap?>(initialBitmap)
+    }
+    var isFetchingAttachment by remember(imageUrl) {
+        mutableStateOf(initialBitmap == null && !attachmentDocId.isNullOrBlank())
+    }
+
+    LaunchedEffect(attachmentDocId, imageUrl) {
+        if (fetchedAttachmentBitmap == null && !attachmentDocId.isNullOrBlank()) {
+            isFetchingAttachment = true
+            val resolved = ProfilePhotoHelper.fetchAndDecodeAttachmentBitmap(attachmentDocId)
+            fetchedAttachmentBitmap = resolved
+            isFetchingAttachment = false
+        }
+    }
+
+    val activeBitmap = fetchedAttachmentBitmap ?: initialBitmap
+
     when {
-        decodedBitmap != null -> {
+        activeBitmap != null -> {
             Image(
-                bitmap = decodedBitmap,
+                bitmap = activeBitmap,
                 contentDescription = contentDescription,
                 contentScale = contentScale,
                 filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
                 modifier = modifier
             )
         }
-        imageUrl.startsWith("http://", ignoreCase = true) ||
+        isFetchingAttachment -> {
+            Box(
+                modifier = modifier.background(QawmiMintSurface),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = QawmiDeepGreen,
+                    strokeWidth = 2.dp
+                )
+            }
+        }
+        (imageUrl.startsWith("http://", ignoreCase = true) ||
             imageUrl.startsWith("https://", ignoreCase = true) ||
             imageUrl.startsWith("content://", ignoreCase = true) ||
-            imageUrl.startsWith("file://", ignoreCase = true) -> {
+            imageUrl.startsWith("file://", ignoreCase = true)) &&
+            attachmentDocId.isNullOrBlank() -> {
             coil.compose.AsyncImage(
                 model = imageUrl,
                 contentDescription = contentDescription,

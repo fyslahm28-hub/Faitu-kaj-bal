@@ -621,7 +621,18 @@ class QawmiRepository(
                         "createdAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
+                    val attachmentValidation = ProfilePhotoHelper.validateAttachmentDocumentSizeBeforeWrite(
+                        documentPath = mediaRef.path,
+                        data = mediaPayload
+                    )
+                    if (attachmentValidation.isFailure) {
+                        return Result.failure(
+                            attachmentValidation.exceptionOrNull()
+                                ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
+                        )
+                    }
                     mediaRef.set(mediaPayload).await()
+                    ProfilePhotoHelper.cacheAttachmentDataUrl(mediaDocId, mediaItem.separateAttachmentDataUrl)
                     itemAttachmentDocId = mediaDocId
                     if (primaryAttachmentDocId.isBlank()) {
                         primaryAttachmentDocId = mediaDocId
@@ -839,7 +850,18 @@ class QawmiRepository(
                         "createdAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
+                    val attachmentValidation = ProfilePhotoHelper.validateAttachmentDocumentSizeBeforeWrite(
+                        documentPath = mediaRef.path,
+                        data = mediaPayload
+                    )
+                    if (attachmentValidation.isFailure) {
+                        return Result.failure(
+                            attachmentValidation.exceptionOrNull()
+                                ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
+                        )
+                    }
                     mediaRef.set(mediaPayload).await()
+                    ProfilePhotoHelper.cacheAttachmentDataUrl(mediaDocId, mediaItem.separateAttachmentDataUrl)
                     itemAttachmentDocId = mediaDocId
                     if (primaryAttachmentDocId.isBlank()) {
                         primaryAttachmentDocId = mediaDocId
@@ -923,7 +945,11 @@ class QawmiRepository(
         return try {
             val snap = db.collection("feed_post_attachments").document(attachmentId).get().await()
             if (snap.exists()) {
-                snap.toObject(FeedPostExtendedAttachment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                val obj = snap.toObject(FeedPostExtendedAttachment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                if (obj != null && obj.mediaDataUrl.isNotBlank()) {
+                    ProfilePhotoHelper.cacheAttachmentDataUrl(attachmentId, obj.mediaDataUrl)
+                }
+                obj
             } else {
                 null
             }

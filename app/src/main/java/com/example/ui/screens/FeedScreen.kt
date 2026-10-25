@@ -203,6 +203,21 @@ fun FeedScreen(
         khedmotCategories: List<String>,
         customCategory: String
     ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
+    onEditOwnPostWithMedia: ((
+        post: FeedPost,
+        title: String,
+        district: String,
+        upazilaOrLocation: String,
+        designation: String,
+        qualification: String,
+        salaryOrExperience: String,
+        deadlineOrPreferredDistricts: String,
+        description: String,
+        contactNumber: String,
+        khedmotCategories: List<String>,
+        customCategory: String,
+        imageUrls: List<String>
+    ) -> Unit)? = null,
     onReportPost: (post: FeedPost, reason: String) -> Unit = { _, _ -> },
     onRetryFeed: () -> Unit = {},
     onShowFeedback: (String) -> Unit = {}
@@ -594,22 +609,40 @@ fun FeedScreen(
         EditOwnFeedPostDialog(
             post = editingPost,
             onDismiss = { activeEditPost = null },
-            onSave = { title, dist, loc, desig, qual, salExp, deadlPref, desc, phone, cats, customCat ->
+            onSave = { title, dist, loc, desig, qual, salExp, deadlPref, desc, phone, cats, customCat, images ->
                 activeEditPost = null
-                onEditOwnPost(
-                    editingPost,
-                    title,
-                    dist,
-                    loc,
-                    desig,
-                    qual,
-                    salExp,
-                    deadlPref,
-                    desc,
-                    phone,
-                    cats,
-                    customCat
-                )
+                if (onEditOwnPostWithMedia != null) {
+                    onEditOwnPostWithMedia(
+                        editingPost,
+                        title,
+                        dist,
+                        loc,
+                        desig,
+                        qual,
+                        salExp,
+                        deadlPref,
+                        desc,
+                        phone,
+                        cats,
+                        customCat,
+                        images
+                    )
+                } else {
+                    onEditOwnPost(
+                        editingPost,
+                        title,
+                        dist,
+                        loc,
+                        desig,
+                        qual,
+                        salExp,
+                        deadlPref,
+                        desc,
+                        phone,
+                        cats,
+                        customCat
+                    )
+                }
             }
         )
     }
@@ -2149,8 +2182,8 @@ private fun QuickDeeniPostComposerDialog(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            if (attachedImages.size >= 3) {
-                errorMsg = "একটি পোস্টে সর্বোচ্চ ৩টি ছবি বা মিডিয়া যুক্ত করা যাবে।"
+            if (attachedImages.size >= ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
+                errorMsg = "একটি পোস্টে সর্বোচ্চ ৫টি ছবি বা মিডিয়া যুক্ত করা যাবে।"
             } else {
                 val encodeRes = ProfilePhotoHelper.encodeFeedMediaUri(
                     context = context,
@@ -2266,7 +2299,10 @@ private fun QuickDeeniPostComposerDialog(
                     ) {
                         Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("ছবি যুক্ত করুন (${attachedImages.size}/৩)", fontSize = 12.sp)
+                        Text(
+                            text = "ছবি যুক্ত করুন (${IslamicDateAndPrayerHelper.toBanglaDigits(attachedImages.size.toString())}/৫)",
+                            fontSize = 12.sp
+                        )
                     }
                 }
 
@@ -2533,9 +2569,11 @@ private fun EditOwnFeedPostDialog(
         description: String,
         contactNumber: String,
         khedmotCategories: List<String>,
-        customCategory: String
+        customCategory: String,
+        imageUrls: List<String>
     ) -> Unit
 ) {
+    val context = LocalContext.current
     var title by remember { mutableStateOf(post.title) }
     var district by remember { mutableStateOf(post.district) }
     var location by remember { mutableStateOf(post.upazilaOrLocation) }
@@ -2547,6 +2585,30 @@ private fun EditOwnFeedPostDialog(
     var contactNumber by remember { mutableStateOf(post.contactNumber) }
     var selectedCategories by remember { mutableStateOf(post.khedmotCategories) }
     var customCategory by remember { mutableStateOf(post.customCategory) }
+    var attachedImages by remember { mutableStateOf(post.imageUrls) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            if (attachedImages.size >= ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
+                errorMsg = "একটি পোস্টে সর্বোচ্চ ৫টি ছবি যুক্ত করা যাবে।"
+            } else {
+                val encodeRes = ProfilePhotoHelper.encodeFeedMediaUri(
+                    context = context,
+                    uri = uri,
+                    existingCount = attachedImages.size
+                )
+                encodeRes.onSuccess { encoded ->
+                    attachedImages = attachedImages + encoded
+                    errorMsg = null
+                }.onFailure { err ->
+                    errorMsg = err.localizedMessage ?: "ছবি যুক্ত করা সম্ভব হয়নি।"
+                }
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2628,6 +2690,72 @@ private fun EditOwnFeedPostDialog(
                         .height(100.dp)
                         .testTag("edit_post_desc_input")
                 )
+
+                OutlinedButton(
+                    onClick = {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    enabled = attachedImages.size < ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE,
+                    modifier = Modifier.testTag("edit_post_attach_media_btn")
+                ) {
+                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "ছবি যুক্ত করুন (${IslamicDateAndPrayerHelper.toBanglaDigits(attachedImages.size.toString())}/৫)",
+                        fontSize = 12.sp
+                    )
+                }
+
+                if (attachedImages.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        attachedImages.forEachIndexed { idx, img ->
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(8.dp))
+                            ) {
+                                ChatAttachmentImage(
+                                    imageUrl = img,
+                                    contentDescription = "সংযুক্ত ছবি",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                IconButton(
+                                    onClick = {
+                                        attachedImages = attachedImages.filterIndexed { i, _ -> i != idx }
+                                    },
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .size(22.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "মুছুন",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (errorMsg != null) {
+                    Text(
+                        text = errorMsg.orEmpty(),
+                        color = Color(0xFFC62828),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         },
         confirmButton = {
@@ -2644,7 +2772,8 @@ private fun EditOwnFeedPostDialog(
                         description,
                         contactNumber,
                         selectedCategories,
-                        customCategory
+                        customCategory,
+                        attachedImages
                     )
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),

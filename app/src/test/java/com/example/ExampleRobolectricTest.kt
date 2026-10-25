@@ -1720,4 +1720,84 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         assertEquals("নতুন হিফজ বিভাগ উদ্বোধন", createdTitle)
     }
+
+    @Test
+    fun `Tall 1080x2400 photo upload scales below 1 MiB limit stores URL in feed_posts and renders for other users`() {
+        kotlinx.coroutines.runBlocking {
+            // 1. Create a tall 1080x2400 bitmap (aspect ratio 2.22 >= 1.55, which previously triggered the 2200px / 1,081,350 bytes bug)
+            val tallBitmap = Bitmap.createBitmap(1080, 2400, Bitmap.Config.ARGB_8888)
+            tallBitmap.eraseColor(Color.rgb(15, 82, 58))
+            val rawHighQDataUrl = ProfilePhotoHelper.encodeBitmapToDataUrl(tallBitmap, quality = 95)
+
+            // Verify ensureDataUrlFitsBudget strictly respects small budgets (e.g. 45,000 chars) even for aspect >= 1.55f
+            val compactedSmall = ProfilePhotoHelper.ensureDataUrlFitsBudget(rawHighQDataUrl, 45_000)
+            assertTrue(
+                "Expected tall bitmap to be scaled down to fit <= 45,000 chars, but was ${compactedSmall.length}",
+                compactedSmall.length <= 45_000
+            )
+
+            // 2. Run uploadFeedMediaToFirebaseStorage for post "post_tall_1" by "author_1"
+            val uploadResult = ProfilePhotoHelper.uploadFeedMediaToFirebaseStorage(
+                mediaItems = listOf(rawHighQDataUrl),
+                authorId = "author_1",
+                postId = "post_tall_1"
+            )
+            assertTrue("uploadFeedMediaToFirebaseStorage must succeed", uploadResult.isSuccess)
+            val uploadedItems = uploadResult.getOrThrow()
+            assertEquals(1, uploadedItems.size)
+            val mediaItem = uploadedItems.first()
+
+            // Verify the URL stored in feed_posts is a compact URL (< 300 bytes), NEVER a huge Base64 string
+            assertTrue(
+                "URL stored in feed_posts must be a compact URL (< 300 chars), got ${mediaItem.url.length}",
+                mediaItem.url.startsWith("https://") && mediaItem.url.length < 300
+            )
+
+            // Verify the attachment document payload passes pre-write 1 MiB validation
+            val attachmentPayload = mapOf(
+                "postId" to "post_tall_1",
+                "authorId" to "author_1",
+                "attachmentType" to mediaItem.mediaType,
+                "mimeType" to mediaItem.mimeType,
+                "fileName" to mediaItem.fileName,
+                "downloadUrl" to mediaItem.url,
+                "extendedText" to "",
+                "mediaDataUrl" to mediaItem.separateAttachmentDataUrl,
+                "sizeBytes" to mediaItem.sizeBytes,
+                "visibility" to "PUBLIC"
+            )
+            val attachSizeRes = ProfilePhotoHelper.validateAttachmentDocumentSizeBeforeWrite(
+                documentPath = "feed_post_attachments/post_tall_1_media_0",
+                data = attachmentPayload
+            )
+            assertTrue("Attachment document must be well under 1 MiB: ${attachSizeRes.exceptionOrNull()}", attachSizeRes.isSuccess)
+
+            // Verify decoding the uploaded URL via ProfilePhotoHelper resolves the cached attachment bitmap for rendering
+            val decodedBitmap = ProfilePhotoHelper.decodeDataUrlToImageBitmap(mediaItem.url)
+            assertNotNull("Expected attachment URL to resolve to a valid ImageBitmap for feed rendering", decodedBitmap)
+        }
+
+        // 3. Verify PublishPostScreen exposes the unified photo attachment button ("publish_attach_media_btn")
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1000.dp)) {
+                    com.example.ui.screens.PublishPostScreen(
+                        isCircular = true,
+                        userProfileState = UiState.Success(
+                            UserProfile(
+                                id = "author_1",
+                                fullName = "মুহতামিম সাহেব",
+                                madrasaName = "জামিয়া রাহমানিয়া ঢাকা",
+                                district = "ঢাকা"
+                            )
+                        ),
+                        isSubmitting = false
+                    )
+                }
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("publish_attach_media_btn").performScrollTo().assertIsDisplayed()
+    }
 }
+

@@ -806,12 +806,27 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             estimatedSavedBytes < com.example.ui.util.ProfilePhotoHelper.SAFE_FEED_POST_MAX_BYTES
         )
 
-        // 4. Verify extended text was stored in /feed_post_attachments/{attachmentDocId} and can be retrieved
+        // 4. Switch to another authenticated user (reader) and verify they see the post, its compact URLs, and can read the uploaded image attachment
+        signInTestUser("reader_media_${UUID.randomUUID()}@test.com")
+        val readerRepo = QawmiRepository(firestore, auth)
+
         val textAttachment = withTimeout(5000L) {
-            repo.getFeedPostExtendedAttachment("${postId}_ext_text")
+            readerRepo.getFeedPostExtendedAttachment("${postId}_ext_text")
         }
-        assertNotNull("Expected extended text attachment to exist", textAttachment)
+        assertNotNull("Expected extended text attachment to be readable by another user", textAttachment)
         assertEquals(veryLongDescription.trim(), textAttachment?.extendedText)
+
+        val firstMediaAttachment = withTimeout(5000L) {
+            readerRepo.getFeedPostExtendedAttachment("${postId}_media_0")
+        }
+        assertNotNull("Expected uploaded image attachment to be readable by another user", firstMediaAttachment)
+        assertEquals("IMAGE", firstMediaAttachment?.attachmentType)
+        assertTrue("Expected mediaDataUrl to be stored in attachment doc", firstMediaAttachment?.mediaDataUrl?.isNotBlank() == true)
+        assertTrue(
+            "Expected feed_posts.imageUrls to contain only compact URLs (< 300 chars), not raw Base64",
+            savedPost.imageUrls.all { it.startsWith("https://") && it.length < 300 }
+        )
     }
 }
+
 

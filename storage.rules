@@ -1,0 +1,65 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidImageUpload(maxSizeBytes) {
+      return request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= maxSizeBytes
+        && request.resource.contentType.matches('image/(jpeg|jpg|png|webp|gif)');
+    }
+
+    function isValidMediaUpload(maxSizeBytes) {
+      return request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= maxSizeBytes
+        && (
+          request.resource.contentType.matches('image/(jpeg|jpg|png|webp|gif)') ||
+          request.resource.contentType.matches('video/(mp4|webm|quicktime|3gpp)')
+        );
+    }
+
+    // 1. Feed Post Media (Job Circulars, Seeker Applications, Deeni Posts)
+    // Authenticated users can view; only the authenticated post author can upload/delete under their own UID path.
+    match /feed_posts/{userId}/{postId}/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId)
+        && postId.size() > 0 && postId.size() <= 128
+        && fileName.size() > 0 && fileName.size() <= 200
+        && isValidMediaUpload(15 * 1024 * 1024);
+      allow delete: if isOwner(userId);
+    }
+
+    // 2. Profile Photos
+    match /profile_photos/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId)
+        && fileName.size() > 0 && fileName.size() <= 200
+        && isValidImageUpload(5 * 1024 * 1024);
+      allow delete: if isOwner(userId);
+    }
+
+    // 3. Direct & Group Chat Images (Paygam)
+    match /chat_images/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId)
+        && fileName.size() > 0 && fileName.size() <= 200
+        && isValidImageUpload(10 * 1024 * 1024);
+      allow delete: if isOwner(userId);
+    }
+
+    // Default deny for all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

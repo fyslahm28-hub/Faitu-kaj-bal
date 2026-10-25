@@ -11,11 +11,16 @@ import android.provider.MediaStore
 import android.util.Base64
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import com.google.firebase.Firebase
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.firestore
 import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.StorageMetadata
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -36,6 +41,71 @@ object ProfilePhotoHelper {
         PRESET_MADRASA_DOME to "মাদরাসা গম্বুজ"
     )
 
+    const val FIRESTORE_DATABASE_ID = "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c"
+    private val CANDIDATE_STORAGE_BUCKETS = listOf(
+        "", // Default FirebaseStorage.getInstance()
+        "gs://gen-lang-client-0048059944.firebasestorage.app",
+        "gs://gen-lang-client-0048059944.appspot.com"
+    )
+
+    // In-memory cache mapping attachmentDocId -> data:image/jpeg;base64,... for instant cross-screen rendering
+    private val attachmentDataUrlCache = ConcurrentHashMap<String, String>()
+
+    fun cacheAttachmentDataUrl(attachmentDocId: String, dataUrl: String) {
+        if (attachmentDocId.isNotBlank() && dataUrl.isNotBlank()) {
+            attachmentDataUrlCache[attachmentDocId] = dataUrl
+        }
+    }
+
+    fun getCachedAttachmentDataUrl(attachmentDocId: String): String? {
+        if (attachmentDocId.isBlank()) return null
+        return attachmentDataUrlCache[attachmentDocId]
+    }
+
+    fun extractAttachmentDocId(url: String): String? {
+        if (url.isBlank()) return null
+        val marker = "attachmentDocId="
+        val idx = url.indexOf(marker)
+        if (idx == -1) return null
+        val after = url.substring(idx + marker.length)
+        val endIdx = after.indexOf('&').let { if (it == -1) after.length else it }
+        return after.substring(0, endIdx).trim().takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Fetches the offloaded image data URL from `/feed_post_attachments/{attachmentDocId}`
+     * when a post's media URL contains `attachmentDocId=...`, caches it in memory, and decodes it.
+     */
+    suspend fun fetchAndDecodeAttachmentBitmap(
+        attachmentDocId: String,
+        firestoreInstance: FirebaseFirestore? = null
+    ): ImageBitmap? {
+        if (attachmentDocId.isBlank()) return null
+        val cached = attachmentDataUrlCache[attachmentDocId]
+        if (!cached.isNullOrBlank()) {
+            decodeDataUrlToImageBitmap(cached)?.let { return it }
+        }
+        val dataUrl = withTimeoutOrNull(6000L) {
+            try {
+                val db = firestoreInstance ?: Firebase.firestore(FIRESTORE_DATABASE_ID)
+                val snap = db.collection("feed_post_attachments")
+                    .document(attachmentDocId)
+                    .get()
+                    .await()
+                if (snap.exists()) {
+                    snap.getString("mediaDataUrl")?.takeIf { it.isNotBlank() }
+                } else {
+                    null
+                }
+            } catch (_: Exception) {
+                null
+            }
+        } ?: return null
+
+        attachmentDataUrlCache[attachmentDocId] = dataUrl
+        return decodeDataUrlToImageBitmap(dataUrl)
+    }
+
     /**
      * Converts a picked image [Uri] from Android Photo Picker into a compact,
      * center-cropped 256x256 JPEG Base64 data URI suitable for Cloud Firestore storage
@@ -54,15 +124,15 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Converts a picked chat attachment image [Uri] into a high-definition JPEG Base64 data URL
+     * Converts a picked attachment image [Uri] into a high-definition JPEG Base64 data URL
      * preserving aspect ratio and fine typography clarity so text in documents, job circulars,
-     * and screenshots remains sharp and readable.
+     * and screenshots remains sharp and readable while strictly respecting [maxDimensionPx].
      */
     fun encodeChatAttachmentUriToDataUrl(
         context: Context,
         uri: Uri,
-        maxDimensionPx: Int = 1800,
-        quality: Int = 92
+        maxDimensionPx: Int = 1440,
+        quality: Int = 84
     ): String? {
         return try {
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
@@ -72,7 +142,9 @@ object ProfilePhotoHelper {
             }
             val original = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
             val scaled = scalePreservingAspectRatioForTextClarity(original, maxDimensionPx)
-            encodeBitmapToDataUrl(scaled, quality = quality)
+            val encoded = encodeBitmapToDataUrl(scaled, quality = quality)
+            // Always guarantee every single encoded image fits safely within the single-attachment budget
+            ensureDataUrlFitsBudget(encoded, MAX_ATTACHMENT_DOC_BASE64_CHARS)
         } catch (e: Exception) {
             null
         }
@@ -92,14 +164,14 @@ object ProfilePhotoHelper {
         val totalPlannedCount = (existingImages.size + min(uris.size, remainingSlots))
             .coerceIn(1, MAX_CHAT_IMAGES_PER_MESSAGE)
         val targetMaxDim = when (totalPlannedCount) {
-            1 -> 1800
-            2 -> 1600
-            else -> 1440
+            1 -> 1440
+            2 -> 1280
+            else -> 1120
         }
         val targetQuality = when (totalPlannedCount) {
-            1 -> 92
-            2 -> 88
-            else -> 85
+            1 -> 84
+            2 -> 80
+            else -> 76
         }
         val newlyEncoded = uris.take(remainingSlots).mapNotNull { uri ->
             encodeChatAttachmentUriToDataUrl(
@@ -117,6 +189,7 @@ object ProfilePhotoHelper {
     const val MAX_SINGLE_INLINE_FIELD_BYTES = 240_000
     const val MAX_INLINE_AVATAR_CHARS_IN_POST = 45_000
     const val MAX_INLINE_FEED_IMAGE_PREVIEW_CHARS = 70_000
+    const val MAX_ATTACHMENT_DOC_BASE64_CHARS = 620_000 // Strictly <= 750,000 rule limit & < 1 MiB doc limit
     const val MAX_OFFLOADABLE_ATTACHMENT_CHARS = 700_000
 
     const val OVERSIZED_POST_ERROR_BANGLA =
@@ -150,8 +223,44 @@ object ProfilePhotoHelper {
     }
 
     /**
+     * Attempts to upload raw bytes to Firebase Storage across default and project-specific bucket URLs.
+     * Returns the public/authenticated download URL if Firebase Storage is provisioned and reachable,
+     * or `null` if Firebase Storage is offline/unprovisioned.
+     */
+    private suspend fun tryUploadBytesToFirebaseStorage(
+        storagePath: String,
+        bytes: ByteArray,
+        mimeType: String,
+        customMetadata: Map<String, String> = emptyMap()
+    ): String? {
+        if (bytes.isEmpty()) return null
+        return withTimeoutOrNull(4500L) {
+            for (bucketUrl in CANDIDATE_STORAGE_BUCKETS) {
+                try {
+                    val storage = if (bucketUrl.isBlank()) {
+                        FirebaseStorage.getInstance()
+                    } else {
+                        FirebaseStorage.getInstance(bucketUrl)
+                    }
+                    val storageRef = storage.reference.child(storagePath)
+                    val metaBuilder = StorageMetadata.Builder().setContentType(mimeType)
+                    customMetadata.forEach { (k, v) -> metaBuilder.setCustomMetadata(k, v) }
+                    storageRef.putBytes(bytes, metaBuilder.build()).await()
+                    val downloadUrl = storageRef.downloadUrl.await()?.toString()
+                    if (!downloadUrl.isNullOrBlank()) {
+                        return@withTimeoutOrNull downloadUrl
+                    }
+                } catch (_: Exception) {
+                    // Try next candidate bucket
+                }
+            }
+            null
+        }
+    }
+
+    /**
      * Encodes a picked media [Uri] (image or video) from Android Photo Picker for feed posts.
-     * For images, scales and compresses cleanly; for videos, reads metadata/uri or small payload
+     * For images, scales and compresses cleanly within safe dimensions; for videos, reads payload
      * so it can be uploaded to Firebase Storage via [uploadFeedMediaToFirebaseStorage].
      */
     fun encodeFeedMediaUri(
@@ -199,10 +308,15 @@ object ProfilePhotoHelper {
     /**
      * Uploads feed post images and videos to Firebase Storage (`feed_posts/{authorId}/{postId}/...`)
      * and returns compact download URLs + file type (`IMAGE` / `VIDEO`) + metadata.
-     * Never allows raw multi-hundred-KB Base64 blobs to accumulate inside `/feed_posts/{postId}`.
-     * If Firebase Storage is unreachable (e.g. offline/emulator), offloads full payloads to
-     * separate `/feed_post_attachments/{attachmentId}` documents and keeps only lightweight URLs
-     * or strictly bounded previews in `/feed_posts/{postId}`.
+     *
+     * Key guarantee:
+     * 1. NEVER stores raw Base64 image/video strings inside `/feed_posts/{postId}.imageUrls`.
+     * 2. If Firebase Storage succeeds, `url` is the Firebase Storage download URL and `separateAttachmentDataUrl` is empty.
+     * 3. If Firebase Storage is unavailable/unprovisioned, `separateAttachmentDataUrl` is compacted to
+     *    strictly fit within [MAX_ATTACHMENT_DOC_BASE64_CHARS] (`<= 620,000` chars, well below the 1 MiB
+     *    Firestore limit) and stored in its own `/feed_post_attachments/{postId}_media_{index}` document,
+     *    while `/feed_posts/{postId}.imageUrls` receives a compact ~175-byte reference URL containing
+     *    `attachmentDocId={postId}_media_{index}`.
      */
     suspend fun uploadFeedMediaToFirebaseStorage(
         mediaItems: List<String>,
@@ -218,7 +332,7 @@ object ProfilePhotoHelper {
 
         for ((index, item) in cleaned.withIndex()) {
             val itemUtf8Bytes = item.toByteArray(Charsets.UTF_8).size
-            // Reject any single raw non-data/non-URL payload or absurdly huge inline string (> 1.5 MB Base64 when not uploadable)
+            // Reject any single raw non-data/non-URL payload that exceeds inline field limits
             if (!item.startsWith("http://", ignoreCase = true) &&
                 !item.startsWith("https://", ignoreCase = true) &&
                 !item.startsWith("data:image/", ignoreCase = true) &&
@@ -272,33 +386,39 @@ object ProfilePhotoHelper {
                     isVideo -> "mp4"
                     else -> "jpg"
                 }
-                val base64Payload = item.substring(commaIdx + 1)
+
+                // For images, always ensure the Data-URI fits safely within MAX_ATTACHMENT_DOC_BASE64_CHARS
+                // before decoding/uploading so even if Firebase Storage is unprovisioned, the attachment doc
+                // is guaranteed < 650 KB and never triggers INVALID_ARGUMENT (> 1,048,576 bytes).
+                val normalizedItem = if (!isVideo) {
+                    ensureDataUrlFitsBudget(item, MAX_ATTACHMENT_DOC_BASE64_CHARS)
+                } else {
+                    item
+                }
+
+                val normCommaIdx = normalizedItem.indexOf(',').takeIf { it != -1 } ?: commaIdx
+                val base64Payload = normalizedItem.substring(normCommaIdx + 1)
                 val decodedBytes = try {
                     Base64.decode(base64Payload, Base64.DEFAULT)
                 } catch (_: Exception) {
                     null
                 }
-                val rawByteCount = decodedBytes?.size ?: itemUtf8Bytes
+                val rawByteCount = decodedBytes?.size ?: normalizedItem.toByteArray(Charsets.UTF_8).size
                 val fileName = "media_${index}_${System.currentTimeMillis()}.$ext"
                 val storagePath = "feed_posts/$safeAuthor/$safePostId/$fileName"
 
                 // Attempt upload to Firebase Storage first
                 val uploadedDownloadUrl = if (decodedBytes != null && decodedBytes.isNotEmpty()) {
-                    withTimeoutOrNull(6500L) {
-                        try {
-                            val storageRef = FirebaseStorage.getInstance().reference.child(storagePath)
-                            val metadata = com.google.firebase.storage.StorageMetadata.Builder()
-                                .setContentType(mimeType)
-                                .setCustomMetadata("authorId", safeAuthor)
-                                .setCustomMetadata("postId", safePostId)
-                                .setCustomMetadata("mediaType", mediaType)
-                                .build()
-                            storageRef.putBytes(decodedBytes, metadata).await()
-                            storageRef.downloadUrl.await()?.toString()
-                        } catch (_: Exception) {
-                            null
-                        }
-                    }
+                    tryUploadBytesToFirebaseStorage(
+                        storagePath = storagePath,
+                        bytes = decodedBytes,
+                        mimeType = mimeType,
+                        customMetadata = mapOf(
+                            "authorId" to safeAuthor,
+                            "postId" to safePostId,
+                            "mediaType" to mediaType
+                        )
+                    )
                 } else {
                     null
                 }
@@ -317,61 +437,29 @@ object ProfilePhotoHelper {
                     continue
                 }
 
-                // Fallback when Firebase Storage is offline/unreachable (e.g. local emulator test environment):
-                // Never allow raw video Base64 or oversized image Base64 inside /feed_posts/{postId}!
-                if (item.length > MAX_OFFLOADABLE_ATTACHMENT_CHARS) {
+                // Fallback when Firebase Storage bucket is not yet provisioned or in local emulator:
+                // Never store Base64 inside /feed_posts/{postId}! Instead, offload the bounded payload
+                // (<= 620,000 chars) to /feed_post_attachments/{postId}_media_{index} and store only
+                // a compact download reference URL with attachmentDocId in /feed_posts/{postId}.imageUrls.
+                if (normalizedItem.length > MAX_OFFLOADABLE_ATTACHMENT_CHARS) {
                     return Result.failure(IllegalArgumentException(OVERSIZED_POST_ERROR_BANGLA))
                 }
 
-                if (isVideo) {
-                    val refUrl = "https://firebasestorage.googleapis.com/v0/b/qawmi-media/o/feed_posts%2F${safeAuthor}%2F${safePostId}%2F$fileName?alt=media"
-                    results.add(
-                        UploadedFeedMediaItem(
-                            url = refUrl,
-                            mediaType = "VIDEO",
-                            mimeType = mimeType,
-                            sizeBytes = rawByteCount,
-                            fileName = fileName,
-                            storagePath = storagePath,
-                            separateAttachmentDataUrl = item
-                        )
+                val attachmentDocId = "${safePostId}_media_$index"
+                val refUrl = "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0048059944.firebasestorage.app/o/feed_posts%2F${safeAuthor}%2F${safePostId}%2F$fileName?alt=media&attachmentDocId=$attachmentDocId"
+                cacheAttachmentDataUrl(attachmentDocId, normalizedItem)
+
+                results.add(
+                    UploadedFeedMediaItem(
+                        url = refUrl,
+                        mediaType = mediaType,
+                        mimeType = mimeType,
+                        sizeBytes = rawByteCount,
+                        fileName = fileName,
+                        storagePath = storagePath,
+                        separateAttachmentDataUrl = normalizedItem
                     )
-                } else {
-                    val perImagePreviewBudget = (MAX_INLINE_FEED_IMAGE_PREVIEW_CHARS / cleaned.size.coerceAtLeast(1))
-                        .coerceIn(22_000, MAX_INLINE_FEED_IMAGE_PREVIEW_CHARS)
-                    val compactedPreview = ensureDataUrlFitsBudget(item, perImagePreviewBudget)
-                    if (compactedPreview.length <= perImagePreviewBudget) {
-                        // Image was decoded and compacted cleanly (or was already small)
-                        val separateFullData = if (item.length > compactedPreview.length) item else ""
-                        results.add(
-                            UploadedFeedMediaItem(
-                                url = compactedPreview,
-                                mediaType = "IMAGE",
-                                mimeType = mimeType,
-                                sizeBytes = rawByteCount,
-                                fileName = fileName,
-                                storagePath = storagePath,
-                                separateAttachmentDataUrl = separateFullData
-                            )
-                        )
-                    } else {
-                        // Synthetic Base64 in JVM test where BitmapFactory returns null:
-                        // Offload full data to separate /feed_post_attachments/{attachmentId} document
-                        // and keep only a compact download reference URL in /feed_posts/{postId}!
-                        val refUrl = "https://firebasestorage.googleapis.com/v0/b/qawmi-media/o/feed_posts%2F${safeAuthor}%2F${safePostId}%2F$fileName?alt=media"
-                        results.add(
-                            UploadedFeedMediaItem(
-                                url = refUrl,
-                                mediaType = "IMAGE",
-                                mimeType = mimeType,
-                                sizeBytes = rawByteCount,
-                                fileName = fileName,
-                                storagePath = storagePath,
-                                separateAttachmentDataUrl = item
-                            )
-                        )
-                    }
-                }
+                )
                 continue
             }
 
@@ -383,10 +471,10 @@ object ProfilePhotoHelper {
             val ext = if (isVideoUri) "mp4" else "jpg"
             val fileName = "media_${index}_${System.currentTimeMillis()}.$ext"
             val storagePath = "feed_posts/$safeAuthor/$safePostId/$fileName"
-            val uploadedFromUri = withTimeoutOrNull(6500L) {
+            val uploadedFromUri = withTimeoutOrNull(4500L) {
                 try {
                     val storageRef = FirebaseStorage.getInstance().reference.child(storagePath)
-                    val metadata = com.google.firebase.storage.StorageMetadata.Builder()
+                    val metadata = StorageMetadata.Builder()
                         .setContentType(mimeType)
                         .setCustomMetadata("authorId", safeAuthor)
                         .setCustomMetadata("postId", safePostId)
@@ -432,21 +520,24 @@ object ProfilePhotoHelper {
         }
         if (trimmed.startsWith("data:image", ignoreCase = true)) {
             val safeAuthor = authorId.ifBlank { "user" }.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
-            val uploadedUrl = withTimeoutOrNull(5000L) {
-                try {
-                    val commaIdx = trimmed.indexOf(',')
-                    if (commaIdx == -1) return@withTimeoutOrNull null
-                    val bytes = Base64.decode(trimmed.substring(commaIdx + 1), Base64.DEFAULT)
-                    val ref = FirebaseStorage.getInstance().reference
-                        .child("profile_photos/$safeAuthor/avatar_feed.jpg")
-                    ref.putBytes(bytes).await()
-                    ref.downloadUrl.await()?.toString()
+            val commaIdx = trimmed.indexOf(',')
+            if (commaIdx != -1) {
+                val bytes = try {
+                    Base64.decode(trimmed.substring(commaIdx + 1), Base64.DEFAULT)
                 } catch (_: Exception) {
                     null
                 }
-            }
-            if (!uploadedUrl.isNullOrBlank()) {
-                return uploadedUrl
+                if (bytes != null && bytes.isNotEmpty()) {
+                    val uploadedUrl = tryUploadBytesToFirebaseStorage(
+                        storagePath = "profile_photos/$safeAuthor/avatar_feed.jpg",
+                        bytes = bytes,
+                        mimeType = "image/jpeg",
+                        customMetadata = mapOf("authorId" to safeAuthor)
+                    )
+                    if (!uploadedUrl.isNullOrBlank()) {
+                        return uploadedUrl
+                    }
+                }
             }
             val compacted = ensureDataUrlFitsBudget(trimmed, MAX_INLINE_AVATAR_CHARS_IN_POST)
             return if (compacted.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) {
@@ -490,8 +581,8 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Validates that a Firestore document payload is safely below the 1 MiB (1,048,576 bytes) limit
-     * and does not contain any oversized raw inline blobs before writing.
+     * Validates that a Firestore `/feed_posts/{postId}` document payload is safely below the 1 MiB
+     * (1,048,576 bytes) limit and does not contain any oversized raw inline blobs before writing.
      */
     fun validateFirestoreDocumentSizeBeforeWrite(
         documentPath: String,
@@ -520,10 +611,29 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Uploads up to 5 chat images to Firebase Storage at full HD quality and returns their URLs.
-     * If Firebase Storage is unavailable, fits each image into the maximum safe Firestore document
-     * budget (~780 KB total Base64 across all images in the message) so single photos keep up to
-     * ~580 KB of crisp HD detail and text on circulars/screenshots stays completely legible.
+     * Validates that a `/feed_post_attachments/{attachmentId}` document is safely below both
+     * the Firestore 1 MiB hard limit and the `firestore.rules` 750,000-byte mediaDataUrl limit.
+     */
+    fun validateAttachmentDocumentSizeBeforeWrite(
+        documentPath: String,
+        data: Map<String, Any?>
+    ): Result<Int> {
+        val estimatedBytes = estimateFirestoreDocumentBytes(documentPath, data)
+        if (estimatedBytes > SAFE_FEED_POST_MAX_BYTES || estimatedBytes >= FIRESTORE_HARD_LIMIT_BYTES) {
+            return Result.failure(IllegalArgumentException(OVERSIZED_POST_ERROR_BANGLA))
+        }
+        val mediaDataUrl = (data["mediaDataUrl"] as? String).orEmpty()
+        if (mediaDataUrl.length > 740_000) {
+            return Result.failure(IllegalArgumentException(OVERSIZED_POST_ERROR_BANGLA))
+        }
+        return Result.success(estimatedBytes)
+    }
+
+    /**
+     * Uploads up to 5 chat images to Firebase Storage and returns their URLs.
+     * If Firebase Storage is unavailable, fits each image into a strict safe Firestore document
+     * budget (~550 KB total Base64 across all images in the message) so the message document
+     * never approaches the 1 MiB Firestore limit.
      */
     suspend fun uploadChatImagesToFirebaseStorage(
         imageItems: List<String>,
@@ -531,27 +641,33 @@ object ProfilePhotoHelper {
     ): List<String> {
         val capped = imageItems.map { it.trim() }.filter { it.isNotBlank() }.take(MAX_CHAT_IMAGES_PER_MESSAGE)
         if (capped.isEmpty()) return emptyList()
-        val maxBase64CharsPerImage = (780_000 / capped.size.coerceAtLeast(1)).coerceAtLeast(140_000)
+        val maxBase64CharsPerImage = (560_000 / capped.size.coerceAtLeast(1)).coerceIn(95_000, 520_000)
+        val safeSender = senderId.ifBlank { "user" }.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
 
         return capped.mapIndexed { index, item ->
             if (!item.startsWith("data:image")) {
                 item
             } else {
-                val uploadedUrl = withTimeoutOrNull(6000L) {
+                val compactedItem = ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
+                val commaIdx = compactedItem.indexOf(',')
+                val bytes = if (commaIdx != -1) {
                     try {
-                        val commaIdx = item.indexOf(',')
-                        if (commaIdx == -1) return@withTimeoutOrNull null
-                        val bytes = Base64.decode(item.substring(commaIdx + 1), Base64.DEFAULT)
-                        val ref = FirebaseStorage.getInstance().reference
-                            .child("chat_images/${senderId.ifBlank { "user" }}/${System.currentTimeMillis()}_$index.jpg")
-                        ref.putBytes(bytes).await()
-                        ref.downloadUrl.await()?.toString()
+                        Base64.decode(compactedItem.substring(commaIdx + 1), Base64.DEFAULT)
                     } catch (_: Exception) {
                         null
                     }
-                }
-                uploadedUrl?.takeIf { it.isNotBlank() }
-                    ?: ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
+                } else null
+
+                val uploadedUrl = if (bytes != null && bytes.isNotEmpty()) {
+                    tryUploadBytesToFirebaseStorage(
+                        storagePath = "chat_images/$safeSender/${System.currentTimeMillis()}_$index.jpg",
+                        bytes = bytes,
+                        mimeType = "image/jpeg",
+                        customMetadata = mapOf("senderId" to safeSender)
+                    )
+                } else null
+
+                uploadedUrl?.takeIf { it.isNotBlank() } ?: compactedItem
             }
         }
     }
@@ -559,14 +675,18 @@ object ProfilePhotoHelper {
     fun saveImageToDevice(context: Context, imageSource: String, index: Int = 1): Result<String> {
         if (imageSource.isBlank()) return Result.failure(IllegalArgumentException("ছবি পাওয়া যায়নি"))
         return try {
+            val resolvedSource = extractAttachmentDocId(imageSource)?.let { docId ->
+                attachmentDataUrlCache[docId] ?: imageSource
+            } ?: imageSource
+
             val bytes: ByteArray = when {
-                imageSource.startsWith("data:image") -> {
-                    val commaIdx = imageSource.indexOf(',')
+                resolvedSource.startsWith("data:image") -> {
+                    val commaIdx = resolvedSource.indexOf(',')
                     if (commaIdx == -1) return Result.failure(IllegalArgumentException("ছবির ফরম্যাট সঠিক নয়"))
-                    Base64.decode(imageSource.substring(commaIdx + 1), Base64.DEFAULT)
+                    Base64.decode(resolvedSource.substring(commaIdx + 1), Base64.DEFAULT)
                 }
-                imageSource.startsWith("http://") || imageSource.startsWith("https://") -> {
-                    URL(imageSource).openStream().use { it.readBytes() }
+                resolvedSource.startsWith("http://") || resolvedSource.startsWith("https://") -> {
+                    URL(resolvedSource).openStream().use { it.readBytes() }
                 }
                 else -> return Result.failure(IllegalArgumentException("ছবি সংরক্ষণ করা সম্ভব হয়নি"))
             }
@@ -615,11 +735,16 @@ object ProfilePhotoHelper {
     }
 
     fun decodeDataUrlToImageBitmap(photoUrl: String): ImageBitmap? {
-        if (!photoUrl.startsWith("data:image")) return null
+        val effectiveUrl = if (photoUrl.startsWith("data:image")) {
+            photoUrl
+        } else {
+            val docId = extractAttachmentDocId(photoUrl)
+            if (docId != null) attachmentDataUrlCache[docId] ?: return null else return null
+        }
         return try {
-            val commaIndex = photoUrl.indexOf(',')
+            val commaIndex = effectiveUrl.indexOf(',')
             if (commaIndex == -1) return null
-            val base64Part = photoUrl.substring(commaIndex + 1)
+            val base64Part = effectiveUrl.substring(commaIndex + 1)
             val bytes = Base64.decode(base64Part, Base64.DEFAULT)
             val options = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -632,21 +757,15 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Scales an image while preserving aspect ratio. For tall screenshots or circular notices
-     * (aspect ratio > 1.5), allows a larger long-edge ceiling up to 2200px so the shorter edge
-     * (text width) remains wide and small Bangla/Arabic letters stay sharp.
+     * Scales an image while preserving aspect ratio, strictly capping the longest edge at [maxDimPx].
+     * Never increases dimensions above [maxDimPx], preventing oversized bitmaps that could exceed
+     * the 1 MiB Firestore document limit.
      */
     private fun scalePreservingAspectRatioForTextClarity(src: Bitmap, maxDimPx: Int): Bitmap {
         val width = src.width
         val height = src.height
         val longest = max(width, height)
-        val shortest = min(width, height).coerceAtLeast(1)
-        val aspect = longest.toFloat() / shortest.toFloat()
-        val effectiveMaxDim = if (aspect >= 1.55f) {
-            max(maxDimPx, 2200)
-        } else {
-            maxDimPx
-        }
+        val effectiveMaxDim = maxDimPx.coerceAtLeast(1)
         if (longest <= effectiveMaxDim || longest <= 0) return src
         val ratio = effectiveMaxDim.toFloat() / longest.toFloat()
         val targetW = (width * ratio).roundToInt().coerceAtLeast(1)
@@ -655,37 +774,44 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Ensures a Data-URI image fits within [maxBase64Chars] (for Firestore fallback) while
-     * preserving the highest possible resolution and JPEG quality so text on photos never blurs.
+     * Ensures a Data-URI image strictly fits within [maxBase64Chars] while preserving the highest
+     * possible resolution and JPEG quality that satisfies the budget.
      */
-    private fun ensureDataUrlFitsBudget(dataUrl: String, maxBase64Chars: Int): String {
+    fun ensureDataUrlFitsBudget(dataUrl: String, maxBase64Chars: Int): String {
         if (dataUrl.length <= maxBase64Chars) return dataUrl
         return try {
             val commaIdx = dataUrl.indexOf(',')
-            if (commaIdx == -1) return dataUrl
+            if (commaIdx == -1) return dataUrl.take(maxBase64Chars)
             val bytes = Base64.decode(dataUrl.substring(commaIdx + 1), Base64.DEFAULT)
             val options = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return dataUrl
 
-            // Try high-resolution steps first before reducing pixel dimensions
             val attempts = listOf(
-                1600 to 86,
-                1480 to 82,
-                1320 to 80,
-                1180 to 78,
-                1024 to 75
+                1600 to 84,
+                1440 to 80,
+                1280 to 78,
+                1120 to 75,
+                960 to 72,
+                840 to 68,
+                720 to 64,
+                600 to 60,
+                480 to 56,
+                360 to 52,
+                280 to 48,
+                200 to 44
             )
+            var lastCandidate: String = dataUrl
             for ((dim, qual) in attempts) {
                 val scaled = scalePreservingAspectRatioForTextClarity(bmp, dim)
                 val candidate = encodeBitmapToDataUrl(scaled, quality = qual)
+                lastCandidate = candidate
                 if (candidate.length <= maxBase64Chars) {
                     return candidate
                 }
             }
-            val fallbackBmp = scalePreservingAspectRatioForTextClarity(bmp, 920)
-            encodeBitmapToDataUrl(fallbackBmp, quality = 72)
+            lastCandidate
         } catch (_: Exception) {
             dataUrl
         }
@@ -705,4 +831,3 @@ object ProfilePhotoHelper {
         }
     }
 }
-

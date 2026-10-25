@@ -52,6 +52,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -528,6 +529,38 @@ fun MainAppScaffold(
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
+                // Active upload / submission progress indicator banner
+                if (isSubmitting) {
+                    Surface(
+                        color = QawmiMintSurface,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .testTag("upload_progress_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = QawmiDeepGreen,
+                                strokeWidth = 2.dp
+                            )
+                            Text(
+                                text = "আপলোড ও প্রক্রিয়াকরণ চলছে, অনুগ্রহ করে অপেক্ষা করুন...",
+                                color = QawmiDeepGreen,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
                 // Real feedback / error banners
                 if (feedbackBanner != null || errorBanner != null) {
                     val isErr = errorBanner != null
@@ -537,6 +570,7 @@ fun MainAppScaffold(
                             .fillMaxWidth()
                             .padding(horizontal = 14.dp, vertical = 6.dp)
                             .clip(RoundedCornerShape(10.dp))
+                            .testTag(if (isErr) "error_banner" else "feedback_banner")
                     ) {
                         Row(
                             modifier = Modifier
@@ -642,6 +676,23 @@ fun MainAppScaffold(
                                         customCategory = customCat
                                     )
                                 },
+                                onEditOwnPostWithMedia = { post, title, dist, loc, desig, qual, salExp, deadl, desc, phone, cats, customCat, imgUrls ->
+                                    viewModel.updateOwnPost(
+                                        post = post,
+                                        title = title,
+                                        district = dist,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = salExp,
+                                        deadlineOrPreferredDistricts = deadl,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
+                                        imageUrls = imgUrls
+                                    )
+                                },
                                 onReportPost = { post, reason -> viewModel.reportPost(post, reason) },
                                 onRetryFeed = { viewModel.retryFeedStreams() }
                             )
@@ -710,6 +761,23 @@ fun MainAppScaffold(
                                         contactNumber = phone,
                                         khedmotCategories = cats,
                                         customCategory = customCat
+                                    )
+                                },
+                                onEditOwnPostWithMedia = { post, title, dist, loc, desig, qual, salExp, deadl, desc, phone, cats, customCat, imgUrls ->
+                                    viewModel.updateOwnPost(
+                                        post = post,
+                                        title = title,
+                                        district = dist,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = salExp,
+                                        deadlineOrPreferredDistricts = deadl,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
+                                        imageUrls = imgUrls
                                     )
                                 },
                                 onReportPost = { post, reason -> viewModel.reportPost(post, reason) },
@@ -807,6 +875,27 @@ fun MainAppScaffold(
                                             viewModel.openFeedWithFilter(FeedFilterTab.ALL)
                                         }
                                     )
+                                },
+                                onSubmitWithMedia = { authorName, postType, title, district, loc, desig, qual, sal, deadl, desc, phone, cats, customCat, imgUrls ->
+                                    viewModel.publishFeedPost(
+                                        authorName = authorName,
+                                        postType = postType,
+                                        title = title,
+                                        district = district,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = sal,
+                                        deadlineOrPreferredDistricts = deadl,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
+                                        imageUrls = imgUrls,
+                                        onSuccessNavigate = {
+                                            viewModel.openFeedWithFilter(FeedFilterTab.ALL)
+                                        }
+                                    )
                                 }
                             )
                         }
@@ -849,6 +938,27 @@ fun MainAppScaffold(
                                         contactNumber = phone,
                                         khedmotCategories = cats,
                                         customCategory = customCat,
+                                        onSuccessNavigate = {
+                                            viewModel.openFeedWithFilter(FeedFilterTab.APPLICATIONS)
+                                        }
+                                    )
+                                },
+                                onSubmitWithMedia = { authorName, postType, title, district, loc, desig, qual, exp, prefDist, desc, phone, cats, customCat, imgUrls ->
+                                    viewModel.publishFeedPost(
+                                        authorName = authorName,
+                                        postType = postType,
+                                        title = title,
+                                        district = district,
+                                        upazilaOrLocation = loc,
+                                        designation = desig,
+                                        qualification = qual,
+                                        salaryOrExperience = exp,
+                                        deadlineOrPreferredDistricts = prefDist,
+                                        description = desc,
+                                        contactNumber = phone,
+                                        khedmotCategories = cats,
+                                        customCategory = customCat,
+                                        imageUrls = imgUrls,
                                         onSuccessNavigate = {
                                             viewModel.openFeedWithFilter(FeedFilterTab.APPLICATIONS)
                                         }

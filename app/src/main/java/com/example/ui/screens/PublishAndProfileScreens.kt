@@ -92,6 +92,7 @@ import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.UserProfile
+import com.example.ui.components.ChatAttachmentImage
 import com.example.ui.components.IslamicStarEmblem
 import com.example.ui.components.UserAvatarImage
 import com.example.ui.theme.QawmiDarkGreen
@@ -143,8 +144,25 @@ fun PublishPostScreen(
         contactNumber: String,
         khedmotCategories: List<String>,
         customCategory: String
+    ) -> Unit)? = null,
+    onSubmitWithMedia: ((
+        authorName: String,
+        postType: String,
+        title: String,
+        district: String,
+        upazilaOrLocation: String,
+        designation: String,
+        qualification: String,
+        salaryOrExperience: String,
+        deadlineOrPreferredDistricts: String,
+        description: String,
+        contactNumber: String,
+        khedmotCategories: List<String>,
+        customCategory: String,
+        imageUrls: List<String>
     ) -> Unit)? = null
 ) {
+    val context = LocalContext.current
     val existingProfile = (userProfileState as? UiState.Success)?.data
 
     var title by remember {
@@ -171,8 +189,32 @@ fun PublishPostScreen(
 
     var selectedCategories by remember { mutableStateOf<List<String>>(emptyList()) }
     var customCategory by remember { mutableStateOf("") }
+    var attachedImages by remember { mutableStateOf<List<String>>(emptyList()) }
     var localValidationError by remember { mutableStateOf<String?>(null) }
     var showPreviewDialog by remember { mutableStateOf(false) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            if (attachedImages.size >= ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
+                localValidationError = "একটি পোস্টে সর্বোচ্চ ৫টি ছবি যুক্ত করা যাবে।"
+            } else {
+                val encodeRes = ProfilePhotoHelper.encodeFeedMediaUri(
+                    context = context,
+                    uri = uri,
+                    existingCount = attachedImages.size
+                )
+                encodeRes.onSuccess { encoded ->
+                    attachedImages = attachedImages + encoded
+                    localValidationError = null
+                }.onFailure { err ->
+                    localValidationError = err.localizedMessage
+                        ?: "নির্বাচিত ফাইলটি যুক্ত করা সম্ভব হয়নি। অনুগ্রহ করে ছোট আকারের ছবি নির্বাচন করুন।"
+                }
+            }
+        }
+    }
 
     val isOtherSelected = KhedmotCategoryHelper.CAT_OTHER in selectedCategories
     val combinedDesignation = remember(designation, selectedCategories, customCategory) {
@@ -211,36 +253,58 @@ fun PublishPostScreen(
     fun dispatchSubmit() {
         val postType = if (isCircular) "JOB_CIRCULAR" else "SEEKER_APPLICATION"
         val resolvedDesig = combinedDesignation.ifBlank { designation.trim() }
-        if (onSubmitWithCategories != null) {
-            onSubmitWithCategories(
-                title.trim(),
-                postType,
-                title.trim(),
-                district.trim(),
-                upazilaOrLocation.trim(),
-                resolvedDesig,
-                qualification.trim(),
-                salaryOrExperience.trim(),
-                deadlineOrPreferredDistricts.trim(),
-                description.trim(),
-                contactNumber.trim(),
-                selectedCategories,
-                if (isOtherSelected) customCategory.trim() else ""
-            )
-        } else {
-            onSubmit(
-                title.trim(),
-                postType,
-                title.trim(),
-                district.trim(),
-                upazilaOrLocation.trim(),
-                resolvedDesig,
-                qualification.trim(),
-                salaryOrExperience.trim(),
-                deadlineOrPreferredDistricts.trim(),
-                description.trim(),
-                contactNumber.trim()
-            )
+        val resolvedCustomCat = if (isOtherSelected) customCategory.trim() else ""
+        when {
+            onSubmitWithMedia != null -> {
+                onSubmitWithMedia(
+                    title.trim(),
+                    postType,
+                    title.trim(),
+                    district.trim(),
+                    upazilaOrLocation.trim(),
+                    resolvedDesig,
+                    qualification.trim(),
+                    salaryOrExperience.trim(),
+                    deadlineOrPreferredDistricts.trim(),
+                    description.trim(),
+                    contactNumber.trim(),
+                    selectedCategories,
+                    resolvedCustomCat,
+                    attachedImages
+                )
+            }
+            onSubmitWithCategories != null -> {
+                onSubmitWithCategories(
+                    title.trim(),
+                    postType,
+                    title.trim(),
+                    district.trim(),
+                    upazilaOrLocation.trim(),
+                    resolvedDesig,
+                    qualification.trim(),
+                    salaryOrExperience.trim(),
+                    deadlineOrPreferredDistricts.trim(),
+                    description.trim(),
+                    contactNumber.trim(),
+                    selectedCategories,
+                    resolvedCustomCat
+                )
+            }
+            else -> {
+                onSubmit(
+                    title.trim(),
+                    postType,
+                    title.trim(),
+                    district.trim(),
+                    upazilaOrLocation.trim(),
+                    resolvedDesig,
+                    qualification.trim(),
+                    salaryOrExperience.trim(),
+                    deadlineOrPreferredDistricts.trim(),
+                    description.trim(),
+                    contactNumber.trim()
+                )
+            }
         }
     }
 
@@ -615,6 +679,81 @@ fun PublishPostScreen(
                         .testTag("post_description_input")
                 )
 
+                // Unified Photo / Media Attachment Section (1–5 images)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        enabled = !isSubmitting && attachedImages.size < ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE,
+                        modifier = Modifier.testTag("publish_attach_media_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoLibrary,
+                            contentDescription = "ছবি যুক্ত করুন",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isCircular) {
+                                "বিজ্ঞপ্তির ছবি যুক্ত করুন (${IslamicDateAndPrayerHelper.toBanglaDigits(attachedImages.size.toString())}/৫)"
+                            } else {
+                                "ছবি বা সনদ যুক্ত করুন (${IslamicDateAndPrayerHelper.toBanglaDigits(attachedImages.size.toString())}/৫)"
+                            },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                if (attachedImages.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .testTag("publish_attached_images_row"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        attachedImages.forEachIndexed { idx, img ->
+                            Box(
+                                modifier = Modifier
+                                    .size(76.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
+                            ) {
+                                ChatAttachmentImage(
+                                    imageUrl = img,
+                                    contentDescription = "সংযুক্ত ছবি",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                IconButton(
+                                    onClick = {
+                                        attachedImages = attachedImages.filterIndexed { i, _ -> i != idx }
+                                    },
+                                    enabled = !isSubmitting,
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .size(22.dp)
+                                        .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "মুছুন",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Row(
@@ -660,7 +799,10 @@ fun PublishPostScreen(
                                 strokeWidth = 2.dp
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("প্রকাশ হচ্ছে...")
+                            Text(
+                                text = if (attachedImages.isNotEmpty()) "ছবি আপলোড ও প্রকাশ হচ্ছে..." else "প্রকাশ হচ্ছে...",
+                                fontSize = 12.sp
+                            )
                         } else {
                             Icon(Icons.Default.Save, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
