@@ -88,6 +88,7 @@ import androidx.compose.ui.draw.clip
 import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -1276,6 +1277,7 @@ fun MessagesScreen(
         onClearRecipient()
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     // =========================================================================
     // 1. SLEEK LONG-PRESS REACTION BAR (👍 ❤️ 😂 😮 😢 🙏 + 🤲 🌙 ✨ 🕌) + DARK EMERALD CONTEXT MENU
     // =========================================================================
@@ -1285,12 +1287,19 @@ fun MessagesScreen(
         val myCurrentReaction = mergedReactions[currentUserId]
             ?: if (isMyMessage) targetMsg.senderReaction else targetMsg.receiverReaction
 
-        Dialog(
-            onDismissRequest = { selectedMessageForAction = null }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(10f)
+                .background(Color(0x88000000))
+                .clickable(onClick = { selectedMessageForAction = null })
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .clickable(enabled = false, onClick = {})
                     .testTag("message_action_sheet"),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1606,47 +1615,62 @@ fun MessagesScreen(
     // 2. MESSAGE EDIT DIALOG (মেসেজ এডিট করুন + X/1000 counter)
     // =========================================================================
     messageBeingEdited?.let { editingMsg ->
-        AlertDialog(
-            onDismissRequest = { messageBeingEdited = null },
-            modifier = Modifier.testTag("edit_message_dialog"),
-            containerColor = Color.White,
-            shape = RoundedCornerShape(20.dp),
-            title = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(10f)
+                .background(Color(0x88000000))
+                .clickable(onClick = { messageBeingEdited = null })
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = false, onClick = {})
+                    .testTag("edit_message_dialog"),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = null,
-                            tint = QawmiDeepGreen,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "মেসেজ এডিট করুন",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = QawmiDeepGreen,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    IconButton(
-                        onClick = { messageBeingEdited = null },
-                        modifier = Modifier.size(28.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "বন্ধ করুন",
-                            tint = QawmiTextSecondary,
-                            modifier = Modifier.size(16.dp)
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = null,
+                                tint = QawmiDeepGreen,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "মেসেজ এডিট করুন",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = QawmiDeepGreen,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        IconButton(
+                            onClick = { messageBeingEdited = null },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "বন্ধ করুন",
+                                tint = QawmiTextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
                     Text(
                         text = "সম্পাদিত মেসেজে 'সম্পাদিত' লেখা প্রদর্শিত হবে এবং রিয়েল-টাইমে আপডেট হবে।",
                         style = MaterialTheme.typography.bodySmall,
@@ -1667,33 +1691,37 @@ fun MessagesScreen(
                         color = QawmiTextMuted,
                         modifier = Modifier.align(Alignment.End)
                     )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val trimmed = editedBodyText.trim()
-                        if (trimmed.isNotBlank()) {
-                            if (editingMsg.id.isNotBlank()) {
-                                localEditedBodies = localEditedBodies + (editingMsg.id to trimmed)
-                            }
-                            onEditMessage(editingMsg, trimmed)
-                            messageBeingEdited = null
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { messageBeingEdited = null }) {
+                            Text("বাতিল", color = QawmiTextSecondary)
                         }
-                    },
-                    enabled = editedBodyText.trim().isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
-                    modifier = Modifier.testTag("confirm_edit_message_button")
-                ) {
-                    Text("সংরক্ষণ")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { messageBeingEdited = null }) {
-                    Text("বাতিল", color = QawmiTextSecondary)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val trimmed = editedBodyText.trim()
+                                if (trimmed.isNotBlank()) {
+                                    if (editingMsg.id.isNotBlank()) {
+                                        localEditedBodies = localEditedBodies + (editingMsg.id to trimmed)
+                                    }
+                                    onEditMessage(editingMsg, trimmed)
+                                    messageBeingEdited = null
+                                }
+                            },
+                            enabled = editedBodyText.trim().isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                            modifier = Modifier.testTag("confirm_edit_message_button")
+                        ) {
+                            Text("সংরক্ষণ")
+                        }
+                    }
                 }
             }
-        )
+        }
     }
 
     // =========================================================================
@@ -1702,13 +1730,30 @@ fun MessagesScreen(
     if (showThemePickerDialog && receiverId.isNotBlank()) {
         var customBgHex by remember { mutableStateOf("#EEF7F2") }
         var customBubbleHex by remember { mutableStateOf("#115E46") }
-        AlertDialog(
-            onDismissRequest = { showThemePickerDialog = false },
-            modifier = Modifier.testTag("chat_theme_picker_dialog"),
-            containerColor = Color.White,
-            shape = RoundedCornerShape(20.dp),
-            title = {
-                Column {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(10f)
+                .background(Color(0x88000000))
+                .clickable(onClick = { showThemePickerDialog = false })
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = false, onClick = {})
+                    .testTag("chat_theme_picker_dialog"),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Text(
                         text = "কথোপকথনের আবহ ও থিম নির্বাচন",
                         style = MaterialTheme.typography.titleMedium,
@@ -1720,15 +1765,7 @@ fun MessagesScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = QawmiTextSecondary
                     )
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+
                     PresetChatThemes.forEach { preset ->
                         val isCurrent = activeThemePalette.spec.equals(preset.spec, ignoreCase = true)
                         Surface(
@@ -1853,16 +1890,19 @@ fun MessagesScreen(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("কাস্টম আবহ প্রয়োগ করুন")
                     }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showThemePickerDialog = false }) {
-                    Text("বন্ধ করুন", color = QawmiDeepGreen)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { showThemePickerDialog = false }) {
+                            Text("বন্ধ করুন", color = QawmiDeepGreen)
+                        }
+                    }
                 }
             }
-        )
+        }
     }
-
     // =========================================================================
     // 4. CREATE GROUP DIALOG (গ্রুপ তৈরি, নাম ও ছবি নির্ধারণ, সদস্য নির্বাচন)
     // =========================================================================
@@ -1901,26 +1941,37 @@ fun MessagesScreen(
             map
         }
 
-        AlertDialog(
-            onDismissRequest = { showCreateGroupDialog = false },
-            modifier = Modifier.testTag("create_group_dialog"),
-            containerColor = Color.White,
-            shape = RoundedCornerShape(20.dp),
-            title = {
-                Text(
-                    text = "নতুন গ্রুপ কথোপকথন খুলুন",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = QawmiDeepGreen,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(10f)
+                .background(Color(0x88000000))
+                .clickable(onClick = { showCreateGroupDialog = false })
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = false, onClick = {})
+                    .testTag("create_group_dialog"),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(20.dp)
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(18.dp)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    Text(
+                        text = "নতুন গ্রুপ কথোপকথন খুলুন",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+
                     // Group Avatar & Photo Picker
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1948,7 +1999,10 @@ fun MessagesScreen(
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text("গ্রুপের ছবি নির্বাচন করুন", style = MaterialTheme.typography.labelSmall, color = QawmiDeepGreen)
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 ProfilePhotoHelper.presetAvatars.forEach { (presetKey, presetLabel) ->
                                     Surface(
                                         shape = RoundedCornerShape(50),
@@ -2068,48 +2122,52 @@ fun MessagesScreen(
                             fontWeight = FontWeight.SemiBold
                         )
                     }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val trimmedGroupName = newGroupName.trim()
-                        if (trimmedGroupName.isNotBlank()) {
-                            val myName = currentUserProfile?.fullName?.takeIf { it.isNotBlank() } ?: "গ্রুপ অ্যাডমিন"
-                            val allMemberIds = (listOf(currentUserId) + selectedMembers.keys).distinct()
-                            val allMemberNames = selectedMembers + (currentUserId to myName)
-                            val tempGroupId = "grp_${System.currentTimeMillis()}"
-                            val optimisticGroup = ChatGroup(
-                                id = tempGroupId,
-                                name = trimmedGroupName,
-                                photoUrl = newGroupPhotoUrl,
-                                creatorId = currentUserId,
-                                creatorName = myName,
-                                memberIds = allMemberIds,
-                                memberNames = allMemberNames,
-                                createdAt = Timestamp.now(),
-                                updatedAt = Timestamp.now()
-                            )
-                            localGroupsMap = localGroupsMap + (tempGroupId to optimisticGroup)
-                            receiverId = "GROUP:$tempGroupId"
-                            receiverName = trimmedGroupName
-                            onCreateGroup(trimmedGroupName, newGroupPhotoUrl, allMemberIds, allMemberNames)
-                            showCreateGroupDialog = false
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { showCreateGroupDialog = false }) {
+                            Text("বাতিল", color = QawmiTextSecondary)
                         }
-                    },
-                    enabled = newGroupName.trim().isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
-                    modifier = Modifier.testTag("confirm_create_group_button")
-                ) {
-                    Text("গ্রুপ তৈরি করুন")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateGroupDialog = false }) {
-                    Text("বাতিল", color = QawmiTextSecondary)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val trimmedGroupName = newGroupName.trim()
+                                if (trimmedGroupName.isNotBlank()) {
+                                    val myName = currentUserProfile?.fullName?.takeIf { it.isNotBlank() } ?: "গ্রুপ অ্যাডমিন"
+                                    val allMemberIds = (listOf(currentUserId) + selectedMembers.keys).distinct()
+                                    val allMemberNames = selectedMembers + (currentUserId to myName)
+                                    val tempGroupId = "grp_${System.currentTimeMillis()}"
+                                    val optimisticGroup = ChatGroup(
+                                        id = tempGroupId,
+                                        name = trimmedGroupName,
+                                        photoUrl = newGroupPhotoUrl,
+                                        creatorId = currentUserId,
+                                        creatorName = myName,
+                                        memberIds = allMemberIds,
+                                        memberNames = allMemberNames,
+                                        createdAt = Timestamp.now(),
+                                        updatedAt = Timestamp.now()
+                                    )
+                                    localGroupsMap = localGroupsMap + (tempGroupId to optimisticGroup)
+                                    receiverId = "GROUP:$tempGroupId"
+                                    receiverName = trimmedGroupName
+                                    onCreateGroup(trimmedGroupName, newGroupPhotoUrl, allMemberIds, allMemberNames)
+                                    showCreateGroupDialog = false
+                                }
+                            },
+                            enabled = newGroupName.trim().isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = QawmiDeepGreen),
+                            modifier = Modifier.testTag("confirm_create_group_button")
+                        ) {
+                            Text("গ্রুপ তৈরি করুন")
+                        }
+                    }
                 }
             }
-        )
+        }
     }
 
     // =========================================================================
@@ -2131,26 +2189,37 @@ fun MessagesScreen(
             }
         }
 
-        AlertDialog(
-            onDismissRequest = { showGroupManagementDialog = false },
-            modifier = Modifier.testTag("group_management_dialog"),
-            containerColor = Color.White,
-            shape = RoundedCornerShape(20.dp),
-            title = {
-                Text(
-                    text = "গ্রুপ পরিচালনা ও সদস্য তালিকা",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = QawmiDeepGreen,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(10f)
+                .background(Color(0x88000000))
+                .clickable(onClick = { showGroupManagementDialog = false })
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = false, onClick = {})
+                    .testTag("group_management_dialog"),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(20.dp)
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(18.dp)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    Text(
+                        text = "গ্রুপ পরিচালনা ও সদস্য তালিকা",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = QawmiDeepGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -2309,17 +2378,21 @@ fun MessagesScreen(
                             Text("যুক্ত করুন", style = MaterialTheme.typography.labelSmall)
                         }
                     }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = { showGroupManagementDialog = false },
-                    modifier = Modifier.testTag("close_group_management_button")
-                ) {
-                    Text("বন্ধ করুন", color = QawmiDeepGreen, fontWeight = FontWeight.Bold)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = { showGroupManagementDialog = false },
+                            modifier = Modifier.testTag("close_group_management_button")
+                        ) {
+                            Text("বন্ধ করুন", color = QawmiDeepGreen, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
-        )
+        }
     }
 
     // =========================================================================
@@ -3682,6 +3755,7 @@ fun MessagesScreen(
                 }
             }
         }
+    }
     }
 }
 

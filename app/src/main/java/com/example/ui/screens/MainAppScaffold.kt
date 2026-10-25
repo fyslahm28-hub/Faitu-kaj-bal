@@ -32,8 +32,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Assignment
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.AdminPanelSettings
-import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
@@ -1258,7 +1258,7 @@ fun QawmiBottomNavBar(
             )
             BottomNavItem(
                 label = "ফিড",
-                icon = Icons.Default.Article,
+                icon = Icons.AutoMirrored.Filled.Article,
                 selected = currentDestination == MainDestination.FEED,
                 testTag = "bottom_nav_feed",
                 onClick = { onTabSelected(MainDestination.FEED) }

@@ -27,8 +27,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Assignment
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.AccountBalance
-import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CameraAlt
@@ -41,7 +41,6 @@ import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.MailOutline
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Save
@@ -1319,7 +1318,7 @@ fun ProfileScreen(
             ProfileMetricCard(
                 count = myPublishedPosts.size,
                 label = "প্রকাশিত পোস্ট",
-                icon = Icons.Default.Article,
+                icon = Icons.AutoMirrored.Filled.Article,
                 modifier = Modifier.weight(1f),
                 onClick = { selectedActivityTab = 0 }
             )

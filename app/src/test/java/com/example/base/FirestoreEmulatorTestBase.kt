@@ -16,6 +16,7 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -23,6 +24,8 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URL
 
 @RunWith(RobolectricTestRunner::class)
@@ -33,8 +36,23 @@ abstract class FirestoreEmulatorTestBase {
     protected lateinit var firestore: FirebaseFirestore
     protected lateinit var auth: FirebaseAuth
 
+    private fun isPortOpen(host: String, port: Int, timeoutMs: Int = 500): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), timeoutMs)
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     @Before
     open fun setUpFirebase() {
+        assumeTrue(
+            "Firebase Auth/Firestore emulators are not running on $EMULATOR_HOST:$FIRESTORE_PORT / $AUTH_PORT; skipping emulator-backed test.",
+            isPortOpen(EMULATOR_HOST, FIRESTORE_PORT) && isPortOpen(EMULATOR_HOST, AUTH_PORT)
+        )
         syncRulesWithRunningEmulator()
 
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -115,7 +133,9 @@ abstract class FirestoreEmulatorTestBase {
 
     @After
     open fun tearDownFirebase() {
-        auth.signOut()
+        if (::auth.isInitialized) {
+            auth.signOut()
+        }
     }
 
     protected suspend fun signInTestUser(email: String): String = withContext(Dispatchers.IO) {
@@ -131,8 +151,8 @@ abstract class FirestoreEmulatorTestBase {
 
     private companion object {
         const val EMULATOR_HOST = "127.0.0.1"
-        const val FIRESTORE_PORT = 8085
-        const val AUTH_PORT = 9099
+        const val FIRESTORE_PORT = 8088
+        const val AUTH_PORT = 9098
         const val PROJECT_ID = "demo-no-project"
         const val DEFAULT_PASSWORD = "password123"
         const val AUTH_TIMEOUT_MS = 5000L
