@@ -2,6 +2,7 @@ package com.example.ui.auth
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -60,11 +61,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.Credential
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
+import com.example.ensureFirebaseInitialized
 import com.example.ui.components.IslamicStarEmblem
 import com.example.ui.components.MosqueHeroIllustration
 import com.example.ui.theme.QawmiDarkGreen
@@ -82,10 +85,60 @@ import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.auth.OAuthProvider
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+
+private const val FALLBACK_WEB_CLIENT_ID =
+    "629586749547-ubgo99u8c72n63t1pujt7dlof51mqn5e.apps.googleusercontent.com"
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun resolveWebClientId(context: Context): String {
+    val configured = runCatching {
+        context.getString(R.string.default_web_client_id).trim()
+    }.getOrDefault("")
+    return if (configured.isNotBlank() && configured != "unconfigured_web_client_id") {
+        configured
+    } else {
+        FALLBACK_WEB_CLIENT_ID
+    }
+}
+
+private suspend fun signInFirebaseWithCredential(credential: Credential): Boolean {
+    val googleIdToken = when {
+        credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL ->
+            GoogleIdTokenCredential.createFrom(credential.data).idToken
+        credential is GoogleIdTokenCredential ->
+            credential.idToken
+        else -> null
+    } ?: return false
+
+    val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
+    Firebase.auth.signInWithCredential(authCredential).await()
+    return Firebase.auth.currentUser != null
+}
+
+private suspend fun signInWithFirebaseWebOAuth(activity: Activity): Boolean {
+    val pending = Firebase.auth.pendingAuthResult
+    if (pending != null) {
+        val result = pending.await()
+        if (result?.user != null || Firebase.auth.currentUser != null) {
+            return true
+        }
+    }
+    val provider = OAuthProvider.newBuilder("google.com")
+        .addCustomParameter("prompt", "select_account")
+        .build()
+    val authResult = Firebase.auth.startActivityForSignInWithProvider(activity, provider).await()
+    return authResult?.user != null || Firebase.auth.currentUser != null
+}
 
 fun attemptAutoSignIn(
     context: Context,
@@ -95,6 +148,7 @@ fun attemptAutoSignIn(
     scope: CoroutineScope
 ) {
     try {
+        ensureFirebaseInitialized(context)
         if (Firebase.auth.currentUser != null) {
             onAuthSuccess()
             return
@@ -108,19 +162,14 @@ fun attemptAutoSignIn(
         onUnauthenticated()
         return
     }
-    val activity = context as? Activity
+    val activity = context.findActivity()
     if (activity == null || activity.isFinishing || activity.isDestroyed) {
         onUnauthenticated()
         return
     }
 
-    val clientId = try {
-        context.getString(R.string.default_web_client_id).trim()
-    } catch (t: Throwable) {
-        onUnauthenticated()
-        return
-    }
-    if (clientId.isBlank() || clientId == "unconfigured_web_client_id") {
+    val clientId = resolveWebClientId(context)
+    if (clientId.isBlank()) {
         onUnauthenticated()
         return
     }
@@ -145,11 +194,7 @@ fun attemptAutoSignIn(
                 return@launch
             }
             val result = credentialManager.getCredential(activity, request)
-            val credential = result.credential
-            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                Firebase.auth.signInWithCredential(authCredential).await()
+            if (signInFirebaseWithCredential(result.credential)) {
                 onAuthSuccess()
             } else {
                 onUnauthenticated()
@@ -169,49 +214,125 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
-    if (credentialManager == null) {
-        onAuthError("ডিভাইসে Google ক্রেডেনশিয়াল সার্ভিস প্রস্তুত নয়। অনুগ্রহ করে Google Play Services হালনাগাদ করুন।")
-        return
-    }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id).trim()
-    } catch (t: Throwable) {
-        onAuthError("Google Sign-In কনফিগারেশন পাওয়া যায়নি (default_web_client_id অনুপস্থিত)")
-        return
-    }
-    if (clientId.isBlank() || clientId == "unconfigured_web_client_id") {
-        onAuthError("Google Sign-In কনফিগারেশন পাওয়া যায়নি (default_web_client_id অনুপস্থিত)")
-        return
+    ensureFirebaseInitialized(context)
+    runCatching {
+        if (Firebase.auth.currentUser != null) {
+            onAuthSuccess()
+            return
+        }
     }
 
-    val request = try {
-        val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-        GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
-    } catch (t: Throwable) {
-        Log.e("Auth", "Failed to build GetSignInWithGoogleOption", t)
-        onAuthError("গুগল সাইন-ইন প্রস্তুত করা যায়নি: ${t.localizedMessage ?: "অপ্রত্যাশিত ত্রুটি"}")
-        return
-    }
+    val clientId = resolveWebClientId(context)
+    val activity = context.findActivity()
 
     scope.launch {
         try {
-            val activityContext = context as? Activity ?: context
-            val result = credentialManager.getCredential(activityContext, request)
-            val credential = result.credential
-            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                Firebase.auth.signInWithCredential(authCredential).await()
-                onAuthSuccess()
-            } else {
-                onAuthError("অপ্রত্যাশিত ক্রেডেনশিয়াল ধরন")
+            val hostContext: Context = activity ?: context
+
+            if (credentialManager != null) {
+                // Attempt 1: Explicit Sign in with Google bottom sheet / dialog option
+                val signInOptionResult = runCatching {
+                    val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+                    val request = GetCredentialRequest.Builder()
+                        .addCredentialOption(signInOption)
+                        .build()
+                    val startMs = System.currentTimeMillis()
+                    try {
+                        credentialManager.getCredential(hostContext, request)
+                    } catch (cancelEx: GetCredentialCancellationException) {
+                        val elapsedMs = System.currentTimeMillis() - startMs
+                        val msg = cancelEx.message.orEmpty()
+                        val isSystemAbort = elapsedMs < 550L ||
+                            msg.contains("10:") ||
+                            msg.contains("16:") ||
+                            msg.contains("Developer", ignoreCase = true) ||
+                            msg.contains("console", ignoreCase = true) ||
+                            msg.contains("configuration", ignoreCase = true)
+                        if (!isSystemAbort) {
+                            throw cancelEx
+                        }
+                        throw IllegalStateException("Credential sheet aborted by system: $msg", cancelEx)
+                    }
+                }
+
+                if (signInOptionResult.isSuccess) {
+                    val credential = signInOptionResult.getOrThrow().credential
+                    if (signInFirebaseWithCredential(credential)) {
+                        onAuthSuccess()
+                        return@launch
+                    }
+                } else {
+                    val ex = signInOptionResult.exceptionOrNull()
+                    if (ex is GetCredentialCancellationException) {
+                        Log.w("Auth", "Google Sign-In cancelled by user: ${ex.message}")
+                        onAuthCancelled()
+                        return@launch
+                    }
+                    Log.w("Auth", "GetSignInWithGoogleOption failed, trying GetGoogleIdOption fallback: ${ex?.message}")
+                }
+
+                // Attempt 2: GetGoogleIdOption with filterByAuthorizedAccounts = false
+                val googleIdResult = runCatching {
+                    runCatching { credentialManager.clearCredentialState(ClearCredentialStateRequest()) }
+                    val googleIdOption = GetGoogleIdOption.Builder()
+                        .setFilterByAuthorizedAccounts(false)
+                        .setServerClientId(clientId)
+                        .setAutoSelectEnabled(false)
+                        .build()
+                    val request = GetCredentialRequest.Builder()
+                        .addCredentialOption(googleIdOption)
+                        .build()
+                    val startMs = System.currentTimeMillis()
+                    try {
+                        credentialManager.getCredential(hostContext, request)
+                    } catch (cancelEx: GetCredentialCancellationException) {
+                        val elapsedMs = System.currentTimeMillis() - startMs
+                        if (elapsedMs >= 550L) {
+                            throw cancelEx
+                        }
+                        throw IllegalStateException("GoogleId sheet aborted by system", cancelEx)
+                    }
+                }
+
+                if (googleIdResult.isSuccess) {
+                    val credential = googleIdResult.getOrThrow().credential
+                    if (signInFirebaseWithCredential(credential)) {
+                        onAuthSuccess()
+                        return@launch
+                    }
+                } else {
+                    val ex = googleIdResult.exceptionOrNull()
+                    if (ex is GetCredentialCancellationException) {
+                        Log.w("Auth", "Google ID Sign-In cancelled by user: ${ex.message}")
+                        onAuthCancelled()
+                        return@launch
+                    }
+                    Log.w("Auth", "GetGoogleIdOption failed, trying Firebase OAuthProvider fallback: ${ex?.message}")
+                }
             }
+
+            // Attempt 3: Firebase OAuthProvider ("google.com") fallback (works even without Play Services CredentialManager or on custom-signed APKs)
+            if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
+                val webSuccess = signInWithFirebaseWebOAuth(activity)
+                if (webSuccess) {
+                    onAuthSuccess()
+                    return@launch
+                }
+            }
+
+            onAuthError("গুগল সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে ইন্টারনেট সংযোগ ও ফোনে Google অ্যাকাউন্ট লগইন আছে কি না পরীক্ষা করুন।")
         } catch (e: GetCredentialCancellationException) {
             Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
             onAuthCancelled()
         } catch (t: Throwable) {
-            Log.e("Auth", "Google Sign-In failed", t)
-            onAuthError(t.localizedMessage ?: "গুগল সাইন-ইন সম্পন্ন করা যায়নি")
+            val msg = t.message.orEmpty()
+            if (msg.contains("canceled", ignoreCase = true) || msg.contains("cancelled", ignoreCase = true)) {
+                Log.w("Auth", "OAuth Sign-In cancelled by user: $msg")
+                onAuthCancelled()
+            } else {
+                Log.e("Auth", "Google Sign-In failed", t)
+                onAuthError("গুগল দিয়ে সাইন-ইন করতে সমস্যা হয়েছে: ${t.localizedMessage ?: "অনুগ্রহ করে পুনরায় চেষ্টা করুন"}")
+            }
         }
     }
 }
@@ -251,16 +372,23 @@ fun AuthScreen(
     var infoMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(350)
-        val activity = context as? Activity
-        if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
-            attemptAutoSignIn(
-                context = context,
-                credentialManager = credentialManager,
-                onAuthSuccess = onAuthSuccess,
-                onUnauthenticated = {},
-                scope = scope
-            )
+        ensureFirebaseInitialized(context)
+        runCatching {
+            if (Firebase.auth.currentUser != null) {
+                onAuthSuccess()
+                return@LaunchedEffect
+            }
+            val pending = Firebase.auth.pendingAuthResult
+            if (pending != null) {
+                isLoading = true
+                val res = pending.await()
+                isLoading = false
+                if (res?.user != null || Firebase.auth.currentUser != null) {
+                    onAuthSuccess()
+                }
+            }
+        }.onFailure {
+            isLoading = false
         }
     }
 

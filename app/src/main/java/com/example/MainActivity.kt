@@ -259,10 +259,14 @@ fun AppNavigation(
         return
     }
 
-    val initialUser = remember(resolvedAuth) {
+    var manualAuthRefresh by remember { mutableIntStateOf(0) }
+    val initialUser = remember(resolvedAuth, manualAuthRefresh) {
         runCatching { resolvedAuth.currentUser }.getOrNull()
     }
-    val currentUser by resolvedAuth.authStateFlow().collectAsStateWithLifecycle(initialValue = initialUser)
+    val authFlow = remember(resolvedAuth, manualAuthRefresh) {
+        resolvedAuth.authStateFlow()
+    }
+    val currentUser by authFlow.collectAsStateWithLifecycle(initialValue = initialUser)
     val user = currentUser
 
     if (user == null) {
@@ -285,6 +289,7 @@ fun AppNavigation(
         DisposableEffect(lifecycleOwner, context) {
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_RESUME) {
+                    manualAuthRefresh++
                     unauthDismissedVersionCode = AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
                     val lastCheck = AppUpdateManagerHelper.getLastUpdateCheckTimestampMs(context)
                     if (System.currentTimeMillis() - lastCheck >= AppUpdateManagerHelper.PERIODIC_CHECK_INTERVAL_MS) {
@@ -306,7 +311,7 @@ fun AppNavigation(
         Box(modifier = Modifier.fillMaxSize()) {
             AuthScreen(
                 onAuthSuccess = {
-                    // AuthStateListener automatically updates currentUser
+                    manualAuthRefresh++
                 }
             )
 
@@ -397,7 +402,7 @@ fun AppNavigation(
         MainAppScaffold(
             viewModel = qawmiViewModel,
             onSignedOut = {
-                // AuthStateListener handles transition back to AuthScreen
+                manualAuthRefresh++
             }
         )
     }
