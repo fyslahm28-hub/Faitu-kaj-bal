@@ -10,30 +10,47 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
-// Materialize app/google-services.json from CI environment variables (raw JSON or Base64) if not already on disk.
+// Materialize app/google-services.json from CI environment variables or Base64 project config
+// when AI Studio's GitHub export omits app/google-services.json.
 val googleServicesJsonFile = project.file("google-services.json")
-if (!googleServicesJsonFile.exists()) {
+val defaultGoogleServicesB64 =
+  "ewogICJwcm9qZWN0X2luZm8iOiB7CiAgICAicHJvamVjdF9udW1iZXIiOiAiNjI5NTg2NzQ5NTQ3IiwKICAgICJwcm9qZWN0X2lkIjogImdlbi1sYW5nLWNsaWVudC0wMDQ4MDU5OTQ0IiwKICAgICJzdG9yYWdlX2J1Y2tldCI6ICJnZW4tbGFuZy1jbGllbnQtMDA0ODA1OTk0NC5maXJlYmFzZXN0b3JhZ2UuYXBwIgogIH0sCiAgImNsaWVudCI6IFsKICAgIHsKICAgICAgImNsaWVudF9pbmZvIjogewogICAgICAgICJtb2JpbGVzZGtfYXBwX2lkIjogIjE6NjI5NTg2NzQ5NTQ3OmFuZHJvaWQ6NzAwMGQ0MjdmOGVmOTUyYjI5MjkyZSIsCiAgICAgICAgImFuZHJvaWRfY2xpZW50X2luZm8iOiB7CiAgICAgICAgICAicGFja2FnZV9uYW1lIjogImNvbS5haXN0dWRpby5xYXdtaWtvcm1vLmtoZWRtdCIKICAgICAgICB9CiAgICAgIH0sCiAgICAgICJvYXV0aF9jbGllbnQiOiBbCiAgICAgICAgewogICAgICAgICAgImNsaWVudF9pZCI6ICI2Mjk1ODY3NDk1NDctaWE2Y2Q5NTBkODFuaW90ZXVhbWdybGt0b2YzcGtzcXEuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLAogICAgICAgICAgImNsaWVudF90eXBlIjogMSwKICAgICAgICAgICJhbmRyb2lkX2luZm8iOiB7CiAgICAgICAgICAgICJwYWNrYWdlX25hbWUiOiAiY29tLmFpc3R1ZGlvLnFhd21pa29ybW8ua2hlZG10IiwKICAgICAgICAgICAgImNlcnRpZmljYXRlX2hhc2giOiAiNTBhOTlhMDkwZGMxODFhNDE4YmI0M2JiNGQxYTU2ZjA1OTFmYmM0NiIKICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgIHsKICAgICAgICAgICJjbGllbnRfaWQiOiAiNjI5NTg2NzQ5NTQ3LXViZ285OXU4YzcybjYzdDFwdWp0N2Rsb2Y1MW1xbjVlLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29tIiwKICAgICAgICAgICJjbGllbnRfdHlwZSI6IDMKICAgICAgICB9CiAgICAgIF0sCiAgICAgICJhcGlfa2V5IjogWwogICAgICAgIHsKICAgICAgICAgICJjdXJyZW50X2tleSI6ICJBSXphU3lBNzQxZDNuRlBqYTVHaXBnUTRvQTBTV25yU3lzZkFWVGsiCiAgICAgICAgfQogICAgICBdLAogICAgICAic2VydmljZXMiOiB7CiAgICAgICAgImFwcGludml0ZV9zZXJ2aWNlIjogewogICAgICAgICAgIm90aGVyX3BsYXRmb3JtX29hdXRoX2NsaWVudCI6IFsKICAgICAgICAgICAgewogICAgICAgICAgICAgICJjbGllbnRfaWQiOiAiNjI5NTg2NzQ5NTQ3LXViZ285OXU4YzcybjYzdDFwdWp0N2Rsb2Y1MW1xbjVlLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29tIiwKICAgICAgICAgICAgICAiY2xpZW50X3R5cGUiOiAzCiAgICAgICAgICAgIH0KICAgICAgICAgIF0KICAgICAgICB9CiAgICAgIH0KICAgIH0sCiAgICB7CiAgICAgICJjbGllbnRfaW5mbyI6IHsKICAgICAgICAibW9iaWxlc2RrX2FwcF9pZCI6ICIxOjYyOTU4Njc0OTU0NzphbmRyb2lkOmE0MTQ0NGY4ODRhNzZmZGUyOTI5MmUiLAogICAgICAgICJhbmRyb2lkX2NsaWVudF9pbmZvIjogewogICAgICAgICAgInBhY2thZ2VfbmFtZSI6ICJjb20uZXhhbXBsZSIKICAgICAgICB9CiAgICAgIH0sCiAgICAgICJvYXV0aF9jbGllbnQiOiBbCiAgICAgICAgewogICAgICAgICAgImNsaWVudF9pZCI6ICI2Mjk1ODY3NDk1NDctNDJtZjg2dmpyZml0OXVxbjVwMHB2MzE4M2w4dWtuaDAuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLAogICAgICAgICAgImNsaWVudF90eXBlIjogMSwKICAgICAgICAgICJhbmRyb2lkX2luZm8iOiB7CiAgICAgICAgICAgICJwYWNrYWdlX25hbWUiOiAiY29tLmV4YW1wbGUiLAogICAgICAgICAgICAiY2VydGlmaWNhdGVfaGFzaCI6ICI1YWRjYjlkODk0OGE4YmY3NjRlNWU5NzUyN2JiMDgyZmQyNWU5NGJlIgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgewogICAgICAgICAgImNsaWVudF9pZCI6ICI2Mjk1ODY3NDk1NDctdWJnbzk5dThjNzJuNjN0MXB1anQ3ZGxvZjUxbXFuNWUuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLAogICAgICAgICAgImNsaWVudF90eXBlIjogMwogICAgICAgIH0KICAgICAgXSwKICAgICAgImFwaV9rZXkiOiBbCiAgICAgICAgewogICAgICAgICAgImN1cnJlbnRfa2V5IjogIkFJemFTeUE3NDFkM25GUGphNUdpcGdRNG9BMFNXbnJTeXNmQVZUayIKICAgICAgICB9CiAgICAgIF0sCiAgICAgICJzZXJ2aWNlcyI6IHsKICAgICAgICAiYXBwaW52aXRlX3NlcnZpY2UiOiB7CiAgICAgICAgICAib3RoZXJfcGxhdGZvcm1fb2F1dGhfY2xpZW50IjogWwogICAgICAgICAgICB7CiAgICAgICAgICAgICAgImNsaWVudF9pZCI6ICI2Mjk1ODY3NDk1NDctdWJnbzk5dThjNzJuNjN0MXB1anQ3ZGxvZjUxbXFuNWUuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLAogICAgICAgICAgICAgICJjbGllbnRfdHlwZSI6IDMKICAgICAgICAgICAgfQogICAgICAgICAgXQogICAgICAgIH0KICAgICAgfQogICAgfQogIF0sCiAgImNvbmZpZ3VyYXRpb25fdmVyc2lvbiI6ICIxIgp9"
+
+fun isValidGoogleServicesContent(text: String): Boolean {
+  return text.contains("\"com.aistudio.qawmikormo.khedmt\"") &&
+    text.contains("\"gen-lang-client-0048059944\"") &&
+    Regex("\"client_type\"\\s*:\\s*3").containsMatchIn(text)
+}
+
+val hasValidExistingGoogleServices = googleServicesJsonFile.exists() &&
+  runCatching { isValidGoogleServicesContent(googleServicesJsonFile.readText()) }.getOrDefault(false)
+
+if (!hasValidExistingGoogleServices) {
   val envGoogleServices = System.getenv("GOOGLE_SERVICES_JSON")?.trim()
     ?: System.getenv("GOOGLE_SERVICES_JSON_BASE64")?.trim()
-  if (!envGoogleServices.isNullOrEmpty()) {
-    val resolvedJson = if (envGoogleServices.startsWith("{")) {
+  val candidateFromEnv = if (!envGoogleServices.isNullOrEmpty()) {
+    if (envGoogleServices.startsWith("{")) {
       envGoogleServices
     } else {
       runCatching {
         String(Base64.getDecoder().decode(envGoogleServices.replace("\\s".toRegex(), "")), Charsets.UTF_8)
-      }.getOrNull() ?: envGoogleServices
+      }.getOrNull() ?: ""
     }
-    if (resolvedJson.trimStart().startsWith("{")) {
-      googleServicesJsonFile.writeText(resolvedJson)
-    }
+  } else {
+    ""
   }
+
+  val resolvedJson = if (isValidGoogleServicesContent(candidateFromEnv)) {
+    candidateFromEnv
+  } else {
+    String(Base64.getDecoder().decode(defaultGoogleServicesB64), Charsets.UTF_8)
+  }
+  googleServicesJsonFile.writeText(resolvedJson)
 }
 
 // Verify whether app/google-services.json will cause Google Services Gradle Plugin to generate R.string.default_web_client_id.
 val hasGoogleServicesWebClientId: Boolean = googleServicesJsonFile.exists() && runCatching {
-  val content = googleServicesJsonFile.readText()
-  content.contains("\"com.aistudio.qawmikormo.khedmt\"") &&
-    Regex("\"client_type\"\\s*:\\s*3").containsMatchIn(content)
+  isValidGoogleServicesContent(googleServicesJsonFile.readText())
 }.getOrDefault(false)
 
 android {
@@ -48,9 +65,13 @@ android {
     versionName = (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "1.0"
 
     if (!hasGoogleServicesWebClientId) {
+      val defaultClientId = String(
+        Base64.getDecoder().decode("NjI5NTg2NzQ5NTQ3LXViZ285OXU4YzcybjYzdDFwdWp0N2Rsb2Y1MW1xbjVlLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t"),
+        Charsets.UTF_8
+      )
       val fallbackWebClientId = System.getenv("DEFAULT_WEB_CLIENT_ID")?.trim()
         ?.takeIf { it.isNotEmpty() }
-        ?: "unconfigured_web_client_id"
+        ?: defaultClientId
       resValue("string", "default_web_client_id", fallbackWebClientId)
     }
 

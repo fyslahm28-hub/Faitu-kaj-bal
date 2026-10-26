@@ -81,16 +81,14 @@ jobs:
             if grep -q '"com.aistudio.qawmikormo.khedmt"' "${TEMP_GS_JSON}" && grep -q '"gen-lang-client-0048059944"' "${TEMP_GS_JSON}"; then
               cp "${TEMP_GS_JSON}" app/google-services.json
               echo "Prepared validated app/google-services.json from GOOGLE_SERVICES_JSON secret."
-            elif [ -f "app/google-services.json" ]; then
-              echo "GOOGLE_SERVICES_JSON secret did not match package com.aistudio.qawmikormo.khedmt; keeping valid repository app/google-services.json."
             else
-              cp "${TEMP_GS_JSON}" app/google-services.json
+              echo "GOOGLE_SERVICES_JSON secret did not match package com.aistudio.qawmikormo.khedmt; Gradle will materialize validated app/google-services.json."
             fi
             rm -f "${TEMP_GS_JSON}"
           elif [ -f "app/google-services.json" ]; then
             echo "Using existing app/google-services.json in repository."
           else
-            echo "No GOOGLE_SERVICES_JSON secret or file found; Gradle fallback resValue for default_web_client_id will be used."
+            echo "app/google-services.json will be materialized automatically by app/build.gradle.kts."
           fi
 
       - name: Build Debug APK with Release Version
