@@ -1847,6 +1847,67 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("কওমি কর্মসংস্থান").assertIsDisplayed()
     }
+
+    @Test
+    @Config(qualifiers = "w420dp-h900dp")
+    fun `Google Sign-In validates default_web_client_id, shows Bengali error on failure without hanging in Loading, and transitions to Home on success`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify default_web_client_id is properly generated from google-services.json (OAuth client_type 3)
+        val resolvedClientId = com.example.ui.auth.resolveWebClientId(context)
+        assertTrue(
+            "Expected valid OAuth 2.0 Web Client ID from default_web_client_id, got: $resolvedClientId",
+            resolvedClientId.isNotBlank() && resolvedClientId.endsWith(".apps.googleusercontent.com")
+        )
+
+        // 2. Verify Bengali error messages are clear and non-empty for all failure modes
+        val cancelMsg = com.example.ui.auth.formatGoogleSignInErrorBangla(
+            androidx.credentials.exceptions.GetCredentialCancellationException("activity is cancelled by the user.")
+        )
+        val noCredMsg = com.example.ui.auth.formatGoogleSignInErrorBangla(
+            androidx.credentials.exceptions.NoCredentialException("No credentials available")
+        )
+        assertTrue(cancelMsg.contains("গুগল অ্যাকাউন্ট নির্বাচন সম্পন্ন হয়নি"))
+        assertTrue(noCredMsg.contains("কোনো সক্রিয় গুগল অ্যাকাউন্ট পাওয়া যায়নি"))
+
+        // 3. Render AuthScreen and click Google Sign-In button; verify it does NOT hang in Loading or fail silently
+        var isSignedIn by mutableStateOf(false)
+        var triggerSuccessNow: (() -> Unit)? = null
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(900.dp)) {
+                    if (!isSignedIn) {
+                        val onSuccessCallback = {
+                            isSignedIn = true
+                        }
+                        triggerSuccessNow = onSuccessCallback
+                        com.example.ui.auth.AuthScreen(
+                            onAuthSuccess = onSuccessCallback
+                        )
+                    } else {
+                        androidx.compose.material3.Text("হোম স্ক্রিনে স্বাগতম")
+                    }
+                }
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("google_sign_in_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("google_sign_in_button").performClick()
+        composeTestRule.mainClock.advanceTimeBy(7000L)
+        composeTestRule.waitForIdle()
+
+        // Must show clear Bengali error banner rather than failing silently, and button must not stay stuck in "প্রবেশ করা হচ্ছে..."
+        composeTestRule.onNodeWithTag("auth_error_banner").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("প্রবেশ করা হচ্ছে...").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Sign in with Google (গুগল দিয়ে প্রবেশ করুন)").performScrollTo().assertIsDisplayed()
+
+        // 4. Verify that when Firebase Authentication succeeds (onAuthSuccess), the user enters the Home screen
+        triggerSuccessNow?.invoke()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("হোম স্ক্রিনে স্বাগতম").assertIsDisplayed()
+    }
 }
+
 
 

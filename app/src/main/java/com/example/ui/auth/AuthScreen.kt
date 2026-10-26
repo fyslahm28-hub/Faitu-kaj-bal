@@ -66,6 +66,10 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.NoCredentialException
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import com.example.R
 import com.example.ensureFirebaseInitialized
 import com.example.ui.components.IslamicStarEmblem
@@ -78,36 +82,139 @@ import com.example.ui.theme.QawmiMintSurface
 import com.example.ui.theme.QawmiSoftBg
 import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextSecondary
-import com.example.ui.util.AdminSecurityHelper
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseNetworkException
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.OAuthProvider
 import com.google.firebase.auth.auth
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeout
 
-private const val FALLBACK_WEB_CLIENT_ID =
-    "629586749547-ubgo99u8c72n63t1pujt7dlof51mqn5e.apps.googleusercontent.com"
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
+internal tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
 }
 
-private fun resolveWebClientId(context: Context): String {
+internal fun resolveWebClientId(context: Context): String {
     val configured = runCatching {
         context.getString(R.string.default_web_client_id).trim()
     }.getOrDefault("")
     return if (configured.isNotBlank() && configured != "unconfigured_web_client_id") {
         configured
     } else {
-        FALLBACK_WEB_CLIENT_ID
+        ""
+    }
+}
+
+internal fun formatGoogleSignInErrorBangla(error: Throwable?): String {
+    if (error == null) {
+        return "গুগল সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে আপনার গুগল অ্যাকাউন্ট নির্বাচন করে পুনরায় চেষ্টা করুন।"
+    }
+    val msg = error.message.orEmpty()
+    return when {
+        error is FirebaseNetworkException ||
+            msg.contains("network", ignoreCase = true) ||
+            msg.contains("Unable to resolve host", ignoreCase = true) ||
+            msg.contains("timeout", ignoreCase = true) ->
+            "ইন্টারনেট সংযোগে সমস্যা হয়েছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+
+        error is GetCredentialCancellationException ||
+            msg.contains("canceled", ignoreCase = true) ||
+            msg.contains("cancelled", ignoreCase = true) ->
+            "গুগল অ্যাকাউন্ট নির্বাচন সম্পন্ন হয়নি। অ্যাপে প্রবেশ করতে অনুগ্রহ করে আপনার গুগল অ্যাকাউন্ট নির্বাচন করুন।"
+
+        error is NoCredentialException ||
+            msg.contains("NoCredential", ignoreCase = true) ||
+            msg.contains("Cannot find a matching credential", ignoreCase = true) ->
+            "এই ডিভাইসে কোনো সক্রিয় গুগল অ্যাকাউন্ট পাওয়া যায়নি। ফোনের Settings > Accounts-এ গুগল অ্যাকাউন্ট লগইন করে পুনরায় চেষ্টা করুন।"
+
+        else ->
+            "গুগল দিয়ে সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে ফোনে Google অ্যাকাউন্ট ও ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+    }
+}
+
+/**
+ * Runs a suspending sign-in step that is expected to launch a system/Play Services/OAuth UI on top
+ * of [activity].
+ * - While [activity] is paused (user is interacting with the Google Account Picker or OAuth browser),
+ *   no timeout expires so the user has unlimited time to select their account.
+ * - If [activity] never pauses within [initialLaunchTimeoutMs] (meaning no sign-in UI opened),
+ *   or if [activity] resumes after pausing and the step still hasn't completed after [postResumeGraceMs],
+ *   the hung step is cancelled so fallback or error reporting can proceed immediately.
+ */
+private suspend fun <T> runSignInStepWithLifecycleWatchdog(
+    activity: Activity?,
+    initialLaunchTimeoutMs: Long = 2000L,
+    postResumeGraceMs: Long = 2000L,
+    block: suspend () -> T
+): T = coroutineScope {
+    val lifecycle = (activity as? LifecycleOwner)?.lifecycle
+    if (lifecycle == null) {
+        return@coroutineScope withTimeout(initialLaunchTimeoutMs) {
+            block()
+        }
+    }
+
+    var hasEverPaused = false
+    var isCurrentlyPaused = !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+    if (isCurrentlyPaused) {
+        hasEverPaused = true
+    }
+
+    val observer = LifecycleEventObserver { _, event ->
+        when (event) {
+            Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                hasEverPaused = true
+                isCurrentlyPaused = true
+            }
+            Lifecycle.Event.ON_RESUME -> {
+                isCurrentlyPaused = false
+            }
+            else -> Unit
+        }
+    }
+
+    lifecycle.addObserver(observer)
+    try {
+        val stepDeferred = async { block() }
+        var elapsedBeforePauseMs = 0L
+        var elapsedAfterResumeMs = 0L
+        val tickMs = 100L
+
+        while (stepDeferred.isActive) {
+            delay(tickMs)
+            if (!stepDeferred.isActive) break
+            if (!hasEverPaused) {
+                elapsedBeforePauseMs += tickMs
+                if (elapsedBeforePauseMs >= initialLaunchTimeoutMs) {
+                    stepDeferred.cancel()
+                    throw IllegalStateException("Google Sign-In UI did not open within ${initialLaunchTimeoutMs}ms")
+                }
+            } else if (!isCurrentlyPaused) {
+                elapsedAfterResumeMs += tickMs
+                if (elapsedAfterResumeMs >= postResumeGraceMs) {
+                    stepDeferred.cancel()
+                    throw GetCredentialCancellationException("Google Sign-In closed before authentication completed")
+                }
+            } else {
+                elapsedAfterResumeMs = 0L
+            }
+        }
+        stepDeferred.await()
+    } finally {
+        lifecycle.removeObserver(observer)
     }
 }
 
@@ -120,23 +227,31 @@ private suspend fun signInFirebaseWithCredential(credential: Credential): Boolea
         else -> null
     } ?: return false
 
+    if (googleIdToken.isBlank()) return false
     val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-    Firebase.auth.signInWithCredential(authCredential).await()
-    return Firebase.auth.currentUser != null
+    val authResult = withTimeout(10_000L) {
+        Firebase.auth.signInWithCredential(authCredential).await()
+    }
+    return authResult?.user != null || Firebase.auth.currentUser != null
 }
 
 private suspend fun signInWithFirebaseWebOAuth(activity: Activity): Boolean {
     val pending = Firebase.auth.pendingAuthResult
     if (pending != null) {
-        val result = pending.await()
+        val result = runSignInStepWithLifecycleWatchdog(activity) {
+            pending.await()
+        }
         if (result?.user != null || Firebase.auth.currentUser != null) {
             return true
         }
     }
     val provider = OAuthProvider.newBuilder("google.com")
         .addCustomParameter("prompt", "select_account")
+        .setScopes(listOf("email", "profile"))
         .build()
-    val authResult = Firebase.auth.startActivityForSignInWithProvider(activity, provider).await()
+    val authResult = runSignInStepWithLifecycleWatchdog(activity) {
+        Firebase.auth.startActivityForSignInWithProvider(activity, provider).await()
+    }
     return authResult?.user != null || Firebase.auth.currentUser != null
 }
 
@@ -193,7 +308,9 @@ fun attemptAutoSignIn(
                 onUnauthenticated()
                 return@launch
             }
-            val result = credentialManager.getCredential(activity, request)
+            val result = runSignInStepWithLifecycleWatchdog(activity) {
+                credentialManager.getCredential(activity, request)
+            }
             if (signInFirebaseWithCredential(result.credential)) {
                 onAuthSuccess()
             } else {
@@ -213,67 +330,76 @@ fun onGoogleSignInClicked(
     onAuthError: (String) -> Unit,
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
-) {
+): Job {
     ensureFirebaseInitialized(context)
-    runCatching {
-        if (Firebase.auth.currentUser != null) {
-            onAuthSuccess()
-            return
-        }
+    val alreadySignedIn = runCatching { Firebase.auth.currentUser != null }.getOrDefault(false)
+    if (alreadySignedIn) {
+        onAuthSuccess()
+        return scope.launch {}
     }
 
     val clientId = resolveWebClientId(context)
+    if (clientId.isBlank()) {
+        onAuthError("Google Sign-In কনফিগারেশন পাওয়া যায়নি (default_web_client_id অনুপস্থিত)।")
+        return scope.launch {}
+    }
+
     val activity = context.findActivity()
 
-    scope.launch {
+    return scope.launch {
+        var completed = false
+        var lastException: Throwable? = null
         try {
             val hostContext: Context = activity ?: context
 
             if (credentialManager != null) {
-                // Attempt 1: Explicit Sign in with Google bottom sheet / dialog option
+                // Stage 1: Explicit Sign in with Google bottom sheet / account chooser via CredentialManager
                 val signInOptionResult = runCatching {
                     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
                     val request = GetCredentialRequest.Builder()
                         .addCredentialOption(signInOption)
                         .build()
-                    val startMs = System.currentTimeMillis()
-                    try {
+                    runSignInStepWithLifecycleWatchdog(activity) {
                         credentialManager.getCredential(hostContext, request)
-                    } catch (cancelEx: GetCredentialCancellationException) {
-                        val elapsedMs = System.currentTimeMillis() - startMs
-                        val msg = cancelEx.message.orEmpty()
-                        val isSystemAbort = elapsedMs < 550L ||
-                            msg.contains("10:") ||
-                            msg.contains("16:") ||
-                            msg.contains("Developer", ignoreCase = true) ||
-                            msg.contains("console", ignoreCase = true) ||
-                            msg.contains("configuration", ignoreCase = true)
-                        if (!isSystemAbort) {
-                            throw cancelEx
-                        }
-                        throw IllegalStateException("Credential sheet aborted by system: $msg", cancelEx)
                     }
                 }
 
                 if (signInOptionResult.isSuccess) {
                     val credential = signInOptionResult.getOrThrow().credential
                     if (signInFirebaseWithCredential(credential)) {
+                        completed = true
                         onAuthSuccess()
                         return@launch
                     }
                 } else {
-                    val ex = signInOptionResult.exceptionOrNull()
-                    if (ex is GetCredentialCancellationException) {
-                        Log.w("Auth", "Google Sign-In cancelled by user: ${ex.message}")
-                        onAuthCancelled()
-                        return@launch
-                    }
-                    Log.w("Auth", "GetSignInWithGoogleOption failed, trying GetGoogleIdOption fallback: ${ex?.message}")
+                    lastException = signInOptionResult.exceptionOrNull()
+                    Log.w(
+                        "Auth",
+                        "Stage 1 (GetSignInWithGoogleOption) did not complete, proceeding to fallback: ${lastException?.message}"
+                    )
                 }
+            }
 
-                // Attempt 2: GetGoogleIdOption with filterByAuthorizedAccounts = false
+            // Stage 2: Firebase OAuthProvider ("google.com") with select_account prompt
+            // Opens the Google Account Selection screen even when CredentialManager/Play Services OneTap
+            // aborts with RESULT_CANCELED, NoCredentialException, or SHA-1/provider mismatch.
+            if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
+                val webOAuthResult = runCatching {
+                    signInWithFirebaseWebOAuth(activity)
+                }
+                if (webOAuthResult.getOrDefault(false)) {
+                    completed = true
+                    onAuthSuccess()
+                    return@launch
+                } else if (webOAuthResult.isFailure) {
+                    lastException = webOAuthResult.exceptionOrNull() ?: lastException
+                    Log.w("Auth", "Stage 2 (Firebase OAuthProvider) did not complete: ${lastException?.message}")
+                }
+            }
+
+            // Stage 3: Secondary CredentialManager GetGoogleIdOption (unfiltered) if still unauthenticated
+            if (credentialManager != null) {
                 val googleIdResult = runCatching {
-                    runCatching { credentialManager.clearCredentialState(ClearCredentialStateRequest()) }
                     val googleIdOption = GetGoogleIdOption.Builder()
                         .setFilterByAuthorizedAccounts(false)
                         .setServerClientId(clientId)
@@ -282,56 +408,45 @@ fun onGoogleSignInClicked(
                     val request = GetCredentialRequest.Builder()
                         .addCredentialOption(googleIdOption)
                         .build()
-                    val startMs = System.currentTimeMillis()
-                    try {
+                    runSignInStepWithLifecycleWatchdog(activity) {
                         credentialManager.getCredential(hostContext, request)
-                    } catch (cancelEx: GetCredentialCancellationException) {
-                        val elapsedMs = System.currentTimeMillis() - startMs
-                        if (elapsedMs >= 550L) {
-                            throw cancelEx
-                        }
-                        throw IllegalStateException("GoogleId sheet aborted by system", cancelEx)
                     }
                 }
-
                 if (googleIdResult.isSuccess) {
                     val credential = googleIdResult.getOrThrow().credential
                     if (signInFirebaseWithCredential(credential)) {
+                        completed = true
                         onAuthSuccess()
                         return@launch
                     }
                 } else {
-                    val ex = googleIdResult.exceptionOrNull()
-                    if (ex is GetCredentialCancellationException) {
-                        Log.w("Auth", "Google ID Sign-In cancelled by user: ${ex.message}")
-                        onAuthCancelled()
-                        return@launch
-                    }
-                    Log.w("Auth", "GetGoogleIdOption failed, trying Firebase OAuthProvider fallback: ${ex?.message}")
+                    lastException = lastException ?: googleIdResult.exceptionOrNull()
                 }
             }
 
-            // Attempt 3: Firebase OAuthProvider ("google.com") fallback (works even without Play Services CredentialManager or on custom-signed APKs)
-            if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
-                val webSuccess = signInWithFirebaseWebOAuth(activity)
-                if (webSuccess) {
-                    onAuthSuccess()
-                    return@launch
-                }
+            if (runCatching { Firebase.auth.currentUser != null }.getOrDefault(false)) {
+                completed = true
+                onAuthSuccess()
+                return@launch
             }
 
-            onAuthError("গুগল সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে ইন্টারনেট সংযোগ ও ফোনে Google অ্যাকাউন্ট লগইন আছে কি না পরীক্ষা করুন।")
-        } catch (e: GetCredentialCancellationException) {
-            Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
-            onAuthCancelled()
+            val banglaError = formatGoogleSignInErrorBangla(lastException)
+            completed = true
+            onAuthError(banglaError)
+        } catch (e: CancellationException) {
+            throw e
         } catch (t: Throwable) {
-            val msg = t.message.orEmpty()
-            if (msg.contains("canceled", ignoreCase = true) || msg.contains("cancelled", ignoreCase = true)) {
-                Log.w("Auth", "OAuth Sign-In cancelled by user: $msg")
-                onAuthCancelled()
-            } else {
-                Log.e("Auth", "Google Sign-In failed", t)
-                onAuthError("গুগল দিয়ে সাইন-ইন করতে সমস্যা হয়েছে: ${t.localizedMessage ?: "অনুগ্রহ করে পুনরায় চেষ্টা করুন"}")
+            Log.e("Auth", "Google Sign-In failed", t)
+            completed = true
+            onAuthError(formatGoogleSignInErrorBangla(t))
+        } finally {
+            if (!completed) {
+                val signedInNow = runCatching { Firebase.auth.currentUser != null }.getOrDefault(false)
+                if (signedInNow) {
+                    onAuthSuccess()
+                } else {
+                    onAuthError(formatGoogleSignInErrorBangla(lastException))
+                }
             }
         }
     }
@@ -349,7 +464,9 @@ fun signOutUser(
     }
     scope.launch {
         try {
-            credentialManager?.clearCredentialState(ClearCredentialStateRequest())
+            withTimeout(1500L) {
+                credentialManager?.clearCredentialState(ClearCredentialStateRequest())
+            }
         } catch (t: Throwable) {
             Log.e("Auth", "Failed to clear credential state", t)
         } finally {
@@ -370,25 +487,31 @@ fun AuthScreen(
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var infoMessage by remember { mutableStateOf<String?>(null) }
+    var activeSignInJob by remember { mutableStateOf<Job?>(null) }
 
     LaunchedEffect(Unit) {
         ensureFirebaseInitialized(context)
         runCatching {
             if (Firebase.auth.currentUser != null) {
+                isLoading = false
                 onAuthSuccess()
                 return@LaunchedEffect
             }
             val pending = Firebase.auth.pendingAuthResult
             if (pending != null) {
                 isLoading = true
-                val res = pending.await()
+                val activity = context.findActivity()
+                val res = runSignInStepWithLifecycleWatchdog(activity) {
+                    pending.await()
+                }
                 isLoading = false
                 if (res?.user != null || Firebase.auth.currentUser != null) {
                     onAuthSuccess()
                 }
             }
-        }.onFailure {
+        }.onFailure { t ->
             isLoading = false
+            errorMessage = formatGoogleSignInErrorBangla(t)
         }
     }
 
@@ -537,7 +660,9 @@ fun AuthScreen(
                         Surface(
                             color = Color(0xFFFFEBEE),
                             shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("auth_error_banner")
                         ) {
                             Text(
                                 text = errorMessage!!,
@@ -573,23 +698,28 @@ fun AuthScreen(
 
                     Button(
                         onClick = {
+                            activeSignInJob?.cancel()
                             errorMessage = null
                             infoMessage = null
                             isLoading = true
-                            onGoogleSignInClicked(
+                            activeSignInJob = onGoogleSignInClicked(
                                 context = context,
                                 credentialManager = credentialManager,
                                 onAuthSuccess = {
                                     isLoading = false
+                                    errorMessage = null
                                     onAuthSuccess()
                                 },
                                 onAuthError = { msg ->
                                     isLoading = false
-                                    errorMessage = msg
+                                    errorMessage = msg.ifBlank {
+                                        "গুগল দিয়ে সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
+                                    }
                                 },
                                 scope = scope,
                                 onAuthCancelled = {
                                     isLoading = false
+                                    errorMessage = "গুগল অ্যাকাউন্ট নির্বাচন সম্পন্ন হয়নি। অ্যাপে প্রবেশ করতে অনুগ্রহ করে আপনার গুগল অ্যাকাউন্ট নির্বাচন করুন।"
                                 }
                             )
                         },

@@ -96,14 +96,13 @@ fun ensureFirebaseInitialized(context: Context): Boolean {
             if (initialized != null) {
                 true
             } else {
-                val fallbackOptions = FirebaseOptions.Builder()
-                    .setProjectId("gen-lang-client-0048059944")
-                    .setApplicationId("1:629586749547:android:7000d427f8ef952b29292e")
-                    .setApiKey("AIzaSyA741d3nFPja5GipgQ4oA0SWnrSysfAVTk")
-                    .setStorageBucket("gen-lang-client-0048059944.firebasestorage.app")
-                    .setGcmSenderId("629586749547")
-                    .build()
-                FirebaseApp.initializeApp(appContext, fallbackOptions) != null
+                val optionsFromRes = FirebaseOptions.fromResource(appContext)
+                if (optionsFromRes != null) {
+                    FirebaseApp.initializeApp(appContext, optionsFromRes)
+                    true
+                } else {
+                    false
+                }
             }
         }
     } catch (t: Throwable) {
