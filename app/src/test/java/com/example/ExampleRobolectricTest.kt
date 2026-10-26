@@ -1860,15 +1860,29 @@ class ExampleRobolectricTest {
             resolvedClientId.isNotBlank() && resolvedClientId.endsWith(".apps.googleusercontent.com")
         )
 
-        // 2. Verify Bengali error messages are clear and non-empty for all failure modes
+        // Verify GenericIdpActivity's PackageManager.resolveActivity(Intent(ACTION_VIEW), 0) check succeeds on targetSdk 36
+        val resolvedViewActivity = context.packageManager.resolveActivity(
+            android.content.Intent(android.content.Intent.ACTION_VIEW),
+            0
+        )
+        assertTrue(
+            "Expected PackageManager.resolveActivity(Intent(ACTION_VIEW), 0) to return non-null for GenericIdpActivity",
+            resolvedViewActivity != null
+        )
+
+        // 2. Verify Bengali error messages are clear and non-empty for all failure modes and do not falsely blame internet
         val cancelMsg = com.example.ui.auth.formatGoogleSignInErrorBangla(
             androidx.credentials.exceptions.GetCredentialCancellationException("activity is cancelled by the user.")
         )
         val noCredMsg = com.example.ui.auth.formatGoogleSignInErrorBangla(
             androidx.credentials.exceptions.NoCredentialException("No credentials available")
         )
+        val genericMsg = com.example.ui.auth.formatGoogleSignInErrorBangla(
+            IllegalStateException("Provider error")
+        )
         assertTrue(cancelMsg.contains("গুগল অ্যাকাউন্ট নির্বাচন সম্পন্ন হয়নি"))
         assertTrue(noCredMsg.contains("কোনো সক্রিয় গুগল অ্যাকাউন্ট পাওয়া যায়নি"))
+        assertTrue(!genericMsg.contains("ইন্টারনেট"))
 
         // 3. Render AuthScreen and click Google Sign-In button; verify it does NOT hang in Loading or fail silently
         var isSignedIn by mutableStateOf(false)

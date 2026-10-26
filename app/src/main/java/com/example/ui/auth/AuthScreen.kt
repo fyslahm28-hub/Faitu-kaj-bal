@@ -57,6 +57,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -82,6 +86,10 @@ import com.example.ui.theme.QawmiMintSurface
 import com.example.ui.theme.QawmiSoftBg
 import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextSecondary
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.CommonStatusCodes
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -91,7 +99,10 @@ import com.google.firebase.FirebaseNetworkException
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.OAuthProvider
 import com.google.firebase.auth.auth
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -130,14 +141,19 @@ internal fun formatGoogleSignInErrorBangla(error: Throwable?): String {
         return "গুগল সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে আপনার গুগল অ্যাকাউন্ট নির্বাচন করে পুনরায় চেষ্টা করুন।"
     }
     val msg = error.message.orEmpty()
+    val apiStatus = (error as? ApiException)?.statusCode
     return when {
         error is FirebaseNetworkException ||
-            msg.contains("network", ignoreCase = true) ||
+            error is UnknownHostException ||
+            error is SocketTimeoutException ||
+            apiStatus == CommonStatusCodes.NETWORK_ERROR ||
             msg.contains("Unable to resolve host", ignoreCase = true) ||
-            msg.contains("timeout", ignoreCase = true) ->
-            "ইন্টারনেট সংযোগে সমস্যা হয়েছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+            msg.contains("A network error", ignoreCase = true) ->
+            "ইন্টারনেট সংযোগে বিঘ্ন ঘটেছে। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
 
         error is GetCredentialCancellationException ||
+            apiStatus == CommonStatusCodes.CANCELED ||
+            apiStatus == 12501 ||
             msg.contains("canceled", ignoreCase = true) ||
             msg.contains("cancelled", ignoreCase = true) ->
             "গুগল অ্যাকাউন্ট নির্বাচন সম্পন্ন হয়নি। অ্যাপে প্রবেশ করতে অনুগ্রহ করে আপনার গুগল অ্যাকাউন্ট নির্বাচন করুন।"
@@ -148,7 +164,7 @@ internal fun formatGoogleSignInErrorBangla(error: Throwable?): String {
             "এই ডিভাইসে কোনো সক্রিয় গুগল অ্যাকাউন্ট পাওয়া যায়নি। ফোনের Settings > Accounts-এ গুগল অ্যাকাউন্ট লগইন করে পুনরায় চেষ্টা করুন।"
 
         else ->
-            "গুগল দিয়ে সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে ফোনে Google অ্যাকাউন্ট ও ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+            "গুগল দিয়ে সাইন-ইন সম্পন্ন করা যায়নি। অনুগ্রহ করে আপনার গুগল অ্যাকাউন্ট নির্বাচন করে পুনরায় চেষ্টা করুন।"
     }
 }
 
@@ -177,10 +193,7 @@ private suspend fun <T> runSignInStepWithLifecycleWatchdog(
     }
 
     var hasEverPaused = false
-    var isCurrentlyPaused = !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-    if (isCurrentlyPaused) {
-        hasEverPaused = true
-    }
+    var isCurrentlyPaused = false
 
     val observer = LifecycleEventObserver { _, event ->
         when (event) {
@@ -189,7 +202,9 @@ private suspend fun <T> runSignInStepWithLifecycleWatchdog(
                 isCurrentlyPaused = true
             }
             Lifecycle.Event.ON_RESUME -> {
-                isCurrentlyPaused = false
+                if (hasEverPaused) {
+                    isCurrentlyPaused = false
+                }
             }
             else -> Unit
         }
@@ -227,6 +242,15 @@ private suspend fun <T> runSignInStepWithLifecycleWatchdog(
     }
 }
 
+private suspend fun signInFirebaseWithIdToken(googleIdToken: String): Boolean {
+    if (googleIdToken.isBlank()) return false
+    val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
+    val authResult = withTimeout(25_000L) {
+        Firebase.auth.signInWithCredential(authCredential).await()
+    }
+    return authResult?.user != null || Firebase.auth.currentUser != null
+}
+
 private suspend fun signInFirebaseWithCredential(credential: Credential): Boolean {
     val googleIdToken = when {
         credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL ->
@@ -236,12 +260,35 @@ private suspend fun signInFirebaseWithCredential(credential: Credential): Boolea
         else -> null
     } ?: return false
 
-    if (googleIdToken.isBlank()) return false
-    val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-    val authResult = withTimeout(25_000L) {
-        Firebase.auth.signInWithCredential(authCredential).await()
+    return signInFirebaseWithIdToken(googleIdToken)
+}
+
+private suspend fun signInWithLegacyGooglePlayServices(
+    activity: Activity,
+    clientId: String,
+    launchIntentForResult: (Intent, CompletableDeferred<ActivityResult>) -> Unit
+): Boolean {
+    val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+        .requestIdToken(clientId)
+        .requestEmail()
+        .requestProfile()
+        .build()
+    val googleSignInClient = GoogleSignIn.getClient(activity, gso)
+    // Clear cached selection so the account chooser dialog always opens cleanly
+    runCatching {
+        withTimeout(1200L) {
+            googleSignInClient.signOut().await()
+        }
     }
-    return authResult?.user != null || Firebase.auth.currentUser != null
+    val resultDeferred = CompletableDeferred<ActivityResult>()
+    val activityResult = runSignInStepWithLifecycleWatchdog(activity) {
+        launchIntentForResult(googleSignInClient.signInIntent, resultDeferred)
+        resultDeferred.await()
+    }
+    val task = GoogleSignIn.getSignedInAccountFromIntent(activityResult.data)
+    val account = task.getResult(ApiException::class.java)
+    val idToken = account?.idToken.orEmpty()
+    return signInFirebaseWithIdToken(idToken)
 }
 
 private suspend fun signInWithFirebaseWebOAuth(activity: Activity): Boolean {
@@ -338,7 +385,8 @@ fun onGoogleSignInClicked(
     onAuthSuccess: () -> Unit,
     onAuthError: (String) -> Unit,
     scope: CoroutineScope,
-    onAuthCancelled: () -> Unit = {}
+    onAuthCancelled: () -> Unit = {},
+    launchLegacySignInIntent: ((Intent, CompletableDeferred<ActivityResult>) -> Unit)? = null
 ): Job {
     ensureFirebaseInitialized(context)
     val alreadySignedIn = runCatching { Firebase.auth.currentUser != null }.getOrDefault(false)
@@ -384,14 +432,39 @@ fun onGoogleSignInClicked(
                     lastException = signInOptionResult.exceptionOrNull()
                     Log.w(
                         "Auth",
-                        "Stage 1 (GetSignInWithGoogleOption) did not complete, proceeding to fallback: ${lastException?.message}"
+                        "Stage 1 (GetSignInWithGoogleOption) did not complete, proceeding to Stage 2: ${lastException?.message}"
                     )
                 }
             }
 
-            // Stage 2: Firebase OAuthProvider ("google.com") with select_account prompt
-            // Opens the Google Account Selection screen even when CredentialManager/Play Services OneTap
-            // aborts with RESULT_CANCELED, NoCredentialException, or SHA-1/provider mismatch.
+            // Stage 2: Google Play Services Auth (GoogleSignInClient / SignInHubActivity)
+            // Works reliably across OEM ROMs (ColorOS, Realme UI, HyperOS, OneUI) where Android 14 CredentialManager may be disabled.
+            if (!isRobolectricRuntime &&
+                launchLegacySignInIntent != null &&
+                activity != null &&
+                !activity.isFinishing &&
+                !activity.isDestroyed
+            ) {
+                val legacyResult = runCatching {
+                    signInWithLegacyGooglePlayServices(
+                        activity = activity,
+                        clientId = clientId,
+                        launchIntentForResult = launchLegacySignInIntent
+                    )
+                }
+                if (legacyResult.getOrDefault(false)) {
+                    completed = true
+                    onAuthSuccess()
+                    return@launch
+                } else if (legacyResult.isFailure) {
+                    val ex = legacyResult.exceptionOrNull()
+                    lastException = ex ?: lastException
+                    Log.w("Auth", "Stage 2 (GoogleSignInClient) did not complete, proceeding to Stage 3: ${ex?.message}")
+                }
+            }
+
+            // Stage 3: Firebase OAuthProvider ("google.com") with select_account prompt
+            // Opens the Google Account Selection screen in Custom Tab / Browser even if Play Services Auth is unavailable or has a SHA-1 mismatch.
             if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
                 val webOAuthResult = runCatching {
                     signInWithFirebaseWebOAuth(activity)
@@ -402,11 +475,11 @@ fun onGoogleSignInClicked(
                     return@launch
                 } else if (webOAuthResult.isFailure) {
                     lastException = webOAuthResult.exceptionOrNull() ?: lastException
-                    Log.w("Auth", "Stage 2 (Firebase OAuthProvider) did not complete: ${lastException?.message}")
+                    Log.w("Auth", "Stage 3 (Firebase OAuthProvider) did not complete: ${lastException?.message}")
                 }
             }
 
-            // Stage 3: Secondary CredentialManager GetGoogleIdOption (unfiltered) if still unauthenticated
+            // Stage 4: Secondary CredentialManager GetGoogleIdOption (unfiltered) if still unauthenticated
             if (credentialManager != null) {
                 val googleIdResult = runCatching {
                     val googleIdOption = GetGoogleIdOption.Builder()
@@ -497,6 +570,16 @@ fun AuthScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var infoMessage by remember { mutableStateOf<String?>(null) }
     var activeSignInJob by remember { mutableStateOf<Job?>(null) }
+    var pendingLegacyResultDeferred by remember {
+        mutableStateOf<CompletableDeferred<ActivityResult>?>(null)
+    }
+
+    val legacyGoogleSignInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { activityResult ->
+        pendingLegacyResultDeferred?.complete(activityResult)
+        pendingLegacyResultDeferred = null
+    }
 
     LaunchedEffect(Unit) {
         ensureFirebaseInitialized(context)
@@ -708,6 +791,8 @@ fun AuthScreen(
                     Button(
                         onClick = {
                             activeSignInJob?.cancel()
+                            pendingLegacyResultDeferred?.cancel()
+                            pendingLegacyResultDeferred = null
                             errorMessage = null
                             infoMessage = null
                             isLoading = true
@@ -729,6 +814,10 @@ fun AuthScreen(
                                 onAuthCancelled = {
                                     isLoading = false
                                     errorMessage = "গুগল অ্যাকাউন্ট নির্বাচন সম্পন্ন হয়নি। অ্যাপে প্রবেশ করতে অনুগ্রহ করে আপনার গুগল অ্যাকাউন্ট নির্বাচন করুন।"
+                                },
+                                launchLegacySignInIntent = { signInIntent, resultDeferred ->
+                                    pendingLegacyResultDeferred = resultDeferred
+                                    legacyGoogleSignInLauncher.launch(signInIntent)
                                 }
                             )
                         },
