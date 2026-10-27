@@ -1978,6 +1978,22 @@ fun AppUpdatePromptOverlay(
                                         color = Color(0xFFC62828)
                                     )
                                 }
+                                TextButton(
+                                    onClick = {
+                                        AppUpdateManagerHelper.openExternalApkDownloadWindow(
+                                            context = context,
+                                            apkDownloadUrl = releaseInfo.apkDownloadUrl
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("update_open_external_window_button")
+                                ) {
+                                    Text(
+                                        text = "আলাদা উইন্ডোতে ডাউনলোড",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = QawmiDeepGreen
+                                    )
+                                }
                             }
                         }
                     }

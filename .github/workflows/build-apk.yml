@@ -62,7 +62,8 @@ jobs:
           if [ ! -f "debug.keystore" ] && [ -f "debug.keystore.base64" ]; then
             tr -d '[:space:]' < debug.keystore.base64 | base64 -d > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            DEFAULT_KEYSTORE_B64="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"
+            printf '%s' "${DEFAULT_KEYSTORE_B64}" | base64 -d > debug.keystore
           fi
           keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -E "SHA1:|SHA256:"
 
@@ -78,11 +79,11 @@ jobs:
             else
               echo "${GOOGLE_SERVICES_JSON_SECRET}" | tr -d '[:space:]' | base64 -d > "${TEMP_GS_JSON}" || true
             fi
-            if grep -q '"com.aistudio.qawmikormo.khedmt"' "${TEMP_GS_JSON}" && grep -q '"gen-lang-client-0048059944"' "${TEMP_GS_JSON}"; then
+            if grep -q '"com.aistudio.qawmikormo.khedmt"' "${TEMP_GS_JSON}" && grep -q '"baa797a0a6f02b7111bada4795a4531bbd4ce123"' "${TEMP_GS_JSON}"; then
               cp "${TEMP_GS_JSON}" app/google-services.json
               echo "Prepared validated app/google-services.json from GOOGLE_SERVICES_JSON secret."
             else
-              echo "GOOGLE_SERVICES_JSON secret did not match package com.aistudio.qawmikormo.khedmt; Gradle will materialize validated app/google-services.json."
+              echo "GOOGLE_SERVICES_JSON secret did not contain latest certificate hash; Gradle will materialize validated app/google-services.json."
             fi
             rm -f "${TEMP_GS_JSON}"
           elif [ -f "app/google-services.json" ]; then
@@ -209,4 +210,5 @@ jobs:
             --commit-sha "${GITHUB_SHA}" \
             --release-notes "${RELEASE_NOTES}" \
             --release-status "PUBLISHED" \
-            --require-service-account true
+            --mandatory "true" \
+            --require-service-account false

@@ -1602,9 +1602,25 @@ class ExampleRobolectricTest {
                 "Expected FLAG_GRANT_READ_URI_PERMISSION on APK install intent",
                 (flags and android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0
             )
+            assertTrue(
+                "Expected FLAG_ACTIVITY_NEW_TASK on APK install intent to open separate installer window",
+                (flags and android.content.Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+            )
             composeTestRule.onNodeWithTag("update_install_status").assertIsDisplayed()
+
+            // 5. Verify separate browser/downloader window launcher works cleanly
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val externalOpened = com.example.ui.util.AppUpdateManagerHelper.openExternalApkDownloadWindow(
+                context = context,
+                apkDownloadUrl = remoteRelease.apkDownloadUrl
+            )
+            assertTrue("Expected openExternalApkDownloadWindow to succeed", externalOpened)
+            val browserIntent = com.example.ui.util.AppUpdateManagerHelper.lastLaunchedExternalBrowserIntent
+            assertNotNull("Expected external window Intent to be recorded", browserIntent)
+            assertEquals(android.content.Intent.ACTION_VIEW, browserIntent?.action)
+            assertEquals(remoteRelease.apkDownloadUrl, browserIntent?.dataString)
         } finally {
-            com.example.ui.util.AppUpdateManagerHelper.customApkFetcher = null
+            com.example.ui.util.AppUpdateManagerHelper.resetTestHooks()
         }
     }
 

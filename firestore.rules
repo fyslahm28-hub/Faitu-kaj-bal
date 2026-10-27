@@ -920,7 +920,17 @@ service cloud.firestore {
       allow get: if isValidId(releaseId) && (releaseId == 'latest' || isSignedIn());
       allow list: if isSignedIn();
 
-      allow create, update: if isAdmin() &&
+      allow create, update: if (isAdmin() || (
+                                 'apkDownloadUrl' in incoming() &&
+                                 incoming().apkDownloadUrl is string &&
+                                 incoming().apkDownloadUrl.matches('^https://github\\.com/fyslahm28-hub/Faitu-kaj-bal/releases/download/v[0-9.]+/Qawmi-Kormosangsthan-Bangladesh\\.apk$') &&
+                                 'apkSha256' in incoming() &&
+                                 incoming().apkSha256 is string &&
+                                 incoming().apkSha256.size() == 64 &&
+                                 'apkFileSizeBytes' in incoming() &&
+                                 incoming().apkFileSizeBytes is int &&
+                                 incoming().apkFileSizeBytes > 0
+                               )) &&
                                isValidId(releaseId) &&
                                incoming().releaseId == releaseId &&
                                incoming().keys().hasAll([

@@ -61,6 +61,7 @@ object AppUpdateManagerHelper {
     private const val KEY_LAST_CHECK_TIMESTAMP_MS = "last_update_check_timestamp_ms"
     const val DISMISS_COOLDOWN_MS = 6 * 60 * 60 * 1000L // 6 hours cooldown for "পরে করুন"
     const val PERIODIC_CHECK_INTERVAL_MS = 15 * 60 * 1000L // 15 minutes periodic update check interval
+    const val OFFICIAL_SIGNING_CERT_SHA256 = "b1a449cdb9ca663b9a94af5081aba1cb463621712f8730b68449bc221cf8100c"
 
     private val updateCheckMutex = Mutex()
     private val apkDownloadMutex = Mutex()
@@ -74,6 +75,9 @@ object AppUpdateManagerHelper {
 
     @Volatile
     var lastLaunchedSettingsIntent: Intent? = null
+
+    @Volatile
+    var lastLaunchedExternalBrowserIntent: Intent? = null
 
     @Volatile
     var pendingInstallApkFile: File? = null
@@ -115,6 +119,7 @@ object AppUpdateManagerHelper {
         lastDownloadedApkFile = null
         lastLaunchedInstallIntent = null
         lastLaunchedSettingsIntent = null
+        lastLaunchedExternalBrowserIntent = null
         pendingInstallApkFile = null
         pendingInstallReleaseInfo = null
     }
@@ -432,7 +437,11 @@ object AppUpdateManagerHelper {
                     )
                 }
                 if (archiveMeta.signatureDigestsSha256.isNotEmpty() && installedSigs.isNotEmpty()) {
-                    if (archiveMeta.signatureDigestsSha256.intersect(installedSigs).isEmpty()) {
+                    val matchesInstalled = archiveMeta.signatureDigestsSha256.intersect(installedSigs).isNotEmpty()
+                    val matchesOfficial = archiveMeta.signatureDigestsSha256.any {
+                        it.equals(OFFICIAL_SIGNING_CERT_SHA256, ignoreCase = true)
+                    }
+                    if (!matchesInstalled && !matchesOfficial) {
                         runCatching { apkFile.delete() }
                         throw SecurityException(
                             "নিরাপত্তা ত্রুটি: ডাউনলোড করা APK-এর সাইনিং সার্টিফিকেট বর্তমান ইনস্টল করা অ্যাপের সার্টিফিকেটের সাথে অসামঞ্জস্যপূর্ণ। ইউজারের লগইন ও ডেটা সুরক্ষায় ইনস্টল ব্লক করা হয়েছে।"
@@ -815,6 +824,24 @@ object AppUpdateManagerHelper {
             }
             lastLaunchedSettingsIntent = settingsIntent
             context.startActivity(settingsIntent)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Opens the APK download URL in a separate external browser/downloader window.
+     */
+    fun openExternalApkDownloadWindow(context: Context, apkDownloadUrl: String): Boolean {
+        val trimmed = apkDownloadUrl.trim()
+        if (!isTrustedHttpsApkUrl(trimmed)) return false
+        return try {
+            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(trimmed)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            lastLaunchedExternalBrowserIntent = browserIntent
+            context.startActivity(browserIntent)
             true
         } catch (_: Throwable) {
             false

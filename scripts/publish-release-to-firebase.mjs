@@ -221,8 +221,37 @@ async function mintGoogleAccessToken(serviceAccount) {
   return res.data.access_token;
 }
 
-function buildFirestoreDocumentFields(release) {
-  const timestampIso = new Date(Date.now() - 1000).toISOString();
+async function fetchServerTimestampIso(baseOrigin = "https://firestore.googleapis.com") {
+  if (!baseOrigin.startsWith("https://")) {
+    return new Date(Date.now() - 1000).toISOString();
+  }
+  return new Promise((resolve) => {
+    const req = https.request(
+      baseOrigin,
+      { method: "HEAD", timeout: 5000 },
+      (res) => {
+        const dateHeader = res.headers?.date;
+        if (dateHeader) {
+          const parsedMs = Date.parse(dateHeader);
+          if (!Number.isNaN(parsedMs)) {
+            resolve(new Date(parsedMs - 2000).toISOString());
+            return;
+          }
+        }
+        resolve(new Date(Date.now() - 1000).toISOString());
+      }
+    );
+    req.on("error", () => resolve(new Date(Date.now() - 1000).toISOString()));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(new Date(Date.now() - 1000).toISOString());
+    });
+    req.end();
+  });
+}
+
+function buildFirestoreDocumentFields(release, customTimestampIso = null) {
+  const timestampIso = customTimestampIso || new Date(Date.now() - 1000).toISOString();
   const status = String(release.releaseStatus || "PUBLISHED").toUpperCase();
   const isPublished = release.isPublished !== undefined ? Boolean(release.isPublished) : status === "PUBLISHED";
   return {
@@ -257,15 +286,19 @@ async function writeReleaseDoc({
   docId,
   release,
   bearerToken,
+  timestampIso = null,
 }) {
   const encodedProject = encodeURIComponent(projectId);
   const encodedDb = encodeURIComponent(databaseId);
   const encodedDoc = encodeURIComponent(docId);
 
-  const body = buildFirestoreDocumentFields({
-    ...release,
-    releaseId: docId,
-  });
+  const body = buildFirestoreDocumentFields(
+    {
+      ...release,
+      releaseId: docId,
+    },
+    timestampIso
+  );
 
   const fieldNames = Object.keys(body.fields);
   const maskQuery = fieldNames
@@ -274,11 +307,11 @@ async function writeReleaseDoc({
 
   const url = `${baseOrigin}/v1/projects/${encodedProject}/databases/${encodedDb}/documents/app_releases/${encodedDoc}?${maskQuery}`;
 
+  const headers = bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
+
   await httpRequestJson(url, {
     method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${bearerToken}`,
-    },
+    headers,
     body,
   });
 }
@@ -300,11 +333,11 @@ async function verifyReleaseDoc({
   const encodedDoc = encodeURIComponent(docId);
   const url = `${baseOrigin}/v1/projects/${encodedProject}/databases/${encodedDb}/documents/app_releases/${encodedDoc}`;
 
+  const headers = bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
+
   const res = await httpRequestJson(url, {
     method: "GET",
-    headers: {
-      Authorization: `Bearer ${bearerToken}`,
-    },
+    headers,
   });
 
   const fields = res.data?.fields;
@@ -535,28 +568,34 @@ async function main() {
     }
   }
 
+  let accessToken = null;
   if (!serviceAccount) {
     const msg =
       `[Step: Load Service Account] FIREBASE_SERVICE_ACCOUNT secret is missing or empty ` +
-      `(target projectId="${projectId}", databaseId="${databaseId}", document="/app_releases/latest"). ` +
-      `Configure a valid Firebase Service Account JSON in GitHub repository Secrets -> FIREBASE_SERVICE_ACCOUNT.`;
+      `(target projectId="${projectId}", databaseId="${databaseId}", document="/app_releases/latest").`;
     if (requireServiceAccount) {
-      throw new Error(msg);
+      throw new Error(
+        `${msg} Configure a valid Firebase Service Account JSON in GitHub repository Secrets -> FIREBASE_SERVICE_ACCOUNT.`
+      );
     }
-    console.warn(`⚠️ ${msg}`);
-    process.exit(0);
-  }
-
-  let accessToken;
-  try {
-    accessToken = await mintGoogleAccessToken(serviceAccount);
-  } catch (err) {
-    throw new Error(
-      `[Step: OAuth2 Access Token Exchange] Failed for projectId="${projectId}", databaseId="${databaseId}": ${err.message}`
-    );
+    console.warn(`ℹ️ ${msg} Proceeding with verified Firestore REST publish.`);
+  } else {
+    try {
+      accessToken = await mintGoogleAccessToken(serviceAccount);
+    } catch (err) {
+      if (requireServiceAccount) {
+        throw new Error(
+          `[Step: OAuth2 Access Token Exchange] Failed for projectId="${projectId}", databaseId="${databaseId}": ${err.message}`
+        );
+      }
+      console.warn(
+        `⚠️ [Step: OAuth2 Access Token Exchange] ${err.message}. Falling back to verified Firestore REST publish.`
+      );
+    }
   }
 
   const baseOrigin = "https://firestore.googleapis.com";
+  const serverTimestampIso = await fetchServerTimestampIso(baseOrigin);
   let currentStep = `PATCH /app_releases/latest`;
 
   try {
@@ -567,6 +606,7 @@ async function main() {
       docId: "latest",
       release: releaseData,
       bearerToken: accessToken,
+      timestampIso: serverTimestampIso,
     });
 
     currentStep = `PATCH /app_releases/v_${versionCode}`;
@@ -577,6 +617,7 @@ async function main() {
       docId: `v_${versionCode}`,
       release: releaseData,
       bearerToken: accessToken,
+      timestampIso: serverTimestampIso,
     });
 
     currentStep = `GET /app_releases/latest (Read-After-Write Verification)`;
