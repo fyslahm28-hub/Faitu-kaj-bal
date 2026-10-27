@@ -179,6 +179,40 @@ class ExampleUnitTest {
         assertFalse(diag403.sendMessageOk)
         assertEquals("FAILED", diag403.deliveryStatus)
         assertTrue(diag403.diagnosticMessageBangla.contains("403 (Forbidden)"))
+
+        // 6. Missing or placeholder TELEGRAM_BOT_TOKEN -> must report FAILED and NEVER claim success
+        try {
+            TelegramNotificationHelper.clearDeliveredEventKeysForTest()
+            TelegramNotificationHelper.setTokenOverrideForTest("TELEGRAM_BOT_TOKEN_DEFAULT_VALUE")
+            assertFalse(TelegramNotificationHelper.isTelegramBotConfigured())
+
+            val missingGetMe = TelegramNotificationHelper.verifyBotConnectionWithGetMe()
+            assertFalse(missingGetMe.isTokenConfigured)
+            assertFalse(missingGetMe.getMeVerified)
+            assertFalse(missingGetMe.sendMessageOk)
+            assertEquals("FAILED", missingGetMe.deliveryStatus)
+            assertTrue(missingGetMe.diagnosticMessageBangla.contains("TELEGRAM_BOT_TOKEN কনফিগার করা নেই"))
+            assertFalse(missingGetMe.diagnosticMessageBangla.contains("সফলভাবে পাঠানো হয়েছে"))
+
+            val missingDispatch = TelegramNotificationHelper.dispatchToTelegramBotVerified(
+                eventType = "ADMIN_SECURITY",
+                title = "টোকেন বিহীন পরীক্ষা",
+                message = "টোকেন ছাড়া মেসেজ সফল দেখানো যাবে না",
+                actorName = "অ্যাডমিন",
+                bypassDedup = true
+            )
+            assertFalse(missingDispatch.isTokenConfigured)
+            assertFalse(missingDispatch.sendMessageOk)
+            assertEquals("FAILED", missingDispatch.deliveryStatus)
+            assertFalse(missingDispatch.diagnosticMessageBangla.contains("সফলভাবে পাঠানো হয়েছে"))
+        } finally {
+            TelegramNotificationHelper.setTokenOverrideForTest(null)
+        }
+
+        // 7. Token normalization strips quotes and 'bot' prefix safely
+        assertEquals("", TelegramNotificationHelper.normalizeBotToken("TELEGRAM_BOT_TOKEN_DEFAULT_VALUE"))
+        assertEquals("", TelegramNotificationHelper.normalizeBotToken("   "))
+        assertFalse(TelegramNotificationHelper.isBotTokenStructurallyValid("invalid_token_without_colon"))
     }
 
     @Test

@@ -10,26 +10,69 @@ const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 
-admin.initializeApp();
+const app = admin.initializeApp();
+const FIRESTORE_DATABASE_ID = "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c";
 
 // Secure server-side secret managed via Firebase Secret Manager / Google Cloud Secret Manager
 const telegramBotTokenSecret = defineSecret("TELEGRAM_BOT_TOKEN");
 const DEFAULT_ADMIN_CHAT_ID = "6255562134";
 const DEFAULT_ADMIN_BOT_ID = "8982853197";
+const PLACEHOLDER_BOT_TOKEN = "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE";
+const BOT_TOKEN_FORMAT_REGEX = /^\d{6,15}:[A-Za-z0-9_-]{20,}$/;
 
 function sanitizeSecrets(rawText) {
   if (!rawText) return "";
   return String(rawText)
-    .replace(/\b\d{8,12}:[A-Za-z0-9_-]{25,}\b/g, "[REDACTED_BOT_TOKEN]")
+    .replace(/\b(?:bot)?\d{6,15}:[A-Za-z0-9_-]{20,}\b/gi, "[REDACTED_BOT_TOKEN]")
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED_FIREBASE_SECRET]")
     .replace(/https?:\/\/[^\s]*(oobCode|resetPassword|apiKey=)[^\s]*/gi, "[REDACTED_RESET_LINK]")
     .replace(/(password|পাসওয়ার্ড|পাসওয়ার্ড|otp|secret|token)\s*[:=]\s*\S+/gi, "$1: [REDACTED]")
     .trim();
 }
 
-function formatServerTelegramMessage(data) {
-  const chatId = process.env.TELEGRAM_CHAT_ID || DEFAULT_ADMIN_CHAT_ID;
+function normalizeServerBotToken(rawToken) {
+  if (!rawToken) return "";
+  let cleaned = String(rawToken).trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (/^bot\d{6,15}:/i.test(cleaned)) {
+    cleaned = cleaned.slice(3).trim();
+  }
+  if (!cleaned || cleaned === PLACEHOLDER_BOT_TOKEN || cleaned === "null" || cleaned === "undefined") {
+    return "";
+  }
+  return cleaned;
+}
+
+function resolveServerBotToken() {
+  let secretValue = "";
+  try {
+    secretValue = telegramBotTokenSecret.value() || "";
+  } catch (_) {
+    secretValue = "";
+  }
+  const candidate = normalizeServerBotToken(secretValue) || normalizeServerBotToken(process.env.TELEGRAM_BOT_TOKEN || "");
+  return BOT_TOKEN_FORMAT_REGEX.test(candidate) ? candidate : "";
+}
+
+function resolveServerBotId(validToken) {
+  if (validToken && validToken.includes(":")) {
+    const prefix = validToken.split(":")[0].trim();
+    if (/^\d{6,15}$/.test(prefix)) {
+      return prefix;
+    }
+  }
+  return DEFAULT_ADMIN_BOT_ID;
+}
+
+function formatServerTelegramMessage(data, botId = DEFAULT_ADMIN_BOT_ID) {
+  const chatId = (process.env.TELEGRAM_CHAT_ID || DEFAULT_ADMIN_CHAT_ID).trim();
   const nowBangla = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Dhaka",
     day: "2-digit",
@@ -44,7 +87,7 @@ function formatServerTelegramMessage(data) {
   return [
     "【কওমি কর্মসংস্থান • স্বয়ংক্রিয় অ্যাডমিন বট অ্যালার্ট】",
     `টেলিগ্রাম চ্যাট আইডি: ${chatId}`,
-    `টেলিগ্রাম বট আইডি: ${DEFAULT_ADMIN_BOT_ID}`,
+    `টেলিগ্রাম বট আইডি: ${botId}`,
     `সময়: ${nowBangla} (BDT)`,
     `কার্যক্রমের ধরন: ${sanitizeSecrets(data.eventType || "ADMIN_SECURITY")}`,
     `শিরোনাম: ${sanitizeSecrets(data.title || "কওমি কর্মসংস্থান ইত্তেলা")}`,
@@ -62,6 +105,7 @@ function formatServerTelegramMessage(data) {
 exports.dispatchTelegramNotificationOnCreated = onDocumentCreated(
   {
     document: "telegram_notifications/{logId}",
+    database: FIRESTORE_DATABASE_ID,
     region: "asia-south1",
     secrets: [telegramBotTokenSecret],
   },
@@ -75,20 +119,18 @@ exports.dispatchTelegramNotificationOnCreated = onDocumentCreated(
       return;
     }
 
-    const token = (
-      telegramBotTokenSecret.value() ||
-      process.env.TELEGRAM_BOT_TOKEN ||
-      ""
-    ).trim();
+    const token = resolveServerBotToken();
+    const botId = resolveServerBotId(token);
     const chatId = (process.env.TELEGRAM_CHAT_ID || DEFAULT_ADMIN_CHAT_ID).trim();
 
-    if (!token || token === "TELEGRAM_BOT_TOKEN_DEFAULT_VALUE" || !token.includes(":")) {
+    if (!token) {
       const configErr =
-        "সার্ভার ত্রুটি: TELEGRAM_BOT_TOKEN কনফিগার করা নেই (Secret Manager-এ বট ৮৯৮২৮৫৩১৯৭-এর সক্রিয় টোকেন সেট করুন)।";
+        `সার্ভার ত্রুটি: TELEGRAM_BOT_TOKEN কনফিগার করা নেই (Secret Manager-এ বট ${botId}-এর সক্রিয় টোকেন সেট করুন)।`;
+      const baseMsg = sanitizeSecrets(data.message || "").replace(/\s*\[(?:টেলিগ্রাম ডেলিভারি ব্যর্থ|ডেলিভারি ত্রুটি):.*\]$/s, "");
       await snap.ref.update({
         deliveryStatus: "FAILED",
-        message: `${sanitizeSecrets(data.message || "")} [ডেলিভারি ত্রুটি: ${configErr}]`.slice(0, 1950),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        message: `${baseMsg} [ডেলিভারি ত্রুটি: ${configErr}]`.slice(0, 1950),
+        updatedAt: FieldValue.serverTimestamp(),
       });
       return;
     }
@@ -107,16 +149,18 @@ exports.dispatchTelegramNotificationOnCreated = onDocumentCreated(
           getMeRes.status === 401
             ? `Telegram API 401 (Unauthorized): বট টোকেনটি বৈধ নয় বা @BotFather-এ বাতিল হয়েছে (${desc})।`
             : `Telegram getMe ব্যর্থ (HTTP ${getMeRes.status}): ${desc}`;
+        const baseMsg = sanitizeSecrets(data.message || "").replace(/\s*\[(?:টেলিগ্রাম ডেলিভারি ব্যর্থ|ডেলিভারি ত্রুটি):.*\]$/s, "");
         await snap.ref.update({
           deliveryStatus: "FAILED",
-          message: `${sanitizeSecrets(data.message || "")} [ডেলিভারি ত্রুটি: ${errBangla}]`.slice(0, 1950),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          message: `${baseMsg} [ডেলিভারি ত্রুটি: ${errBangla}]`.slice(0, 1950),
+          updatedAt: FieldValue.serverTimestamp(),
         });
         return;
       }
 
       // 2. Dispatch message via Telegram sendMessage API and verify "ok": true + message_id
-      const formattedText = formatServerTelegramMessage(data);
+      const baseMsg = sanitizeSecrets(data.message || "").replace(/\s*\[(?:টেলিগ্রাম ডেলিভারি ব্যর্থ|ডেলিভারি ত্রুটি):.*\]$/s, "");
+      const formattedText = formatServerTelegramMessage({ ...data, message: baseMsg }, botId);
       const sendRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json; charset=UTF-8" },
@@ -131,23 +175,25 @@ exports.dispatchTelegramNotificationOnCreated = onDocumentCreated(
       if (sendRes.ok && sendJson.ok === true && sendJson.result && sendJson.result.message_id) {
         await snap.ref.update({
           deliveryStatus: "DELIVERED",
-          referenceId: `${data.referenceId || "tg"}#msg_${sendJson.result.message_id}`.slice(0, 128),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          message: baseMsg.slice(0, 1950),
+          referenceId: `${String(data.referenceId || "tg").split("#msg_")[0]}#msg_${sendJson.result.message_id}`.slice(0, 128),
+          updatedAt: FieldValue.serverTimestamp(),
         });
       } else {
         const desc = sanitizeSecrets(sendJson.description || `HTTP ${sendRes.status}`);
         await snap.ref.update({
           deliveryStatus: "FAILED",
-          message: `${sanitizeSecrets(data.message || "")} [Telegram API ত্রুটি (${sendRes.status}): ${desc}]`.slice(0, 1950),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          message: `${baseMsg} [Telegram API ত্রুটি (${sendRes.status}): ${desc}]`.slice(0, 1950),
+          updatedAt: FieldValue.serverTimestamp(),
         });
       }
     } catch (err) {
       const safeNetErr = sanitizeSecrets(err && err.message ? err.message : "Network error");
+      const baseMsg = sanitizeSecrets(data.message || "").replace(/\s*\[(?:টেলিগ্রাম ডেলিভারি ব্যর্থ|ডেলিভারি ত্রুটি):.*\]$/s, "");
       await snap.ref.update({
         deliveryStatus: "FAILED",
-        message: `${sanitizeSecrets(data.message || "")} [নেটওয়ার্ক ত্রুটি: ${safeNetErr}]`.slice(0, 1950),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        message: `${baseMsg} [নেটওয়ার্ক ত্রুটি: ${safeNetErr}]`.slice(0, 1950),
+        updatedAt: FieldValue.serverTimestamp(),
       });
     }
   }
@@ -233,7 +279,7 @@ exports.sendDailyAjkerSmoronPush = onSchedule(
     region: "asia-south1",
   },
   async () => {
-    const db = admin.firestore();
+    const db = getFirestore(app, FIRESTORE_DATABASE_ID);
     const now = new Date();
     const dateKey = new Intl.DateTimeFormat("en-CA", {
       timeZone: "Asia/Dhaka",

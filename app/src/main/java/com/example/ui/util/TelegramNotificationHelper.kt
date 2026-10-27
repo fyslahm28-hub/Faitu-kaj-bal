@@ -23,14 +23,19 @@ object TelegramNotificationHelper {
     private const val PLACEHOLDER_CHAT_ID = "TELEGRAM_CHAT_ID_DEFAULT_VALUE"
     private const val DEDUP_WINDOW_MS = 30_000L
 
-    // Regex patterns to strictly redact any accidental secrets, tokens, OTPs, or reset links
-    private val BOT_TOKEN_REGEX = Regex("""\b\d{8,12}:[A-Za-z0-9_-]{25,}\b""")
+    // Regex patterns to strictly validate and redact any accidental secrets, tokens, OTPs, or reset links
+    private val BOT_TOKEN_FORMAT_REGEX = Regex("""^\d{6,15}:[A-Za-z0-9_-]{20,}$""")
+    private val BOT_TOKEN_REGEX = Regex("""\b(?:bot)?\d{6,15}:[A-Za-z0-9_-]{20,}\b""", RegexOption.IGNORE_CASE)
     private val FIREBASE_KEY_REGEX = Regex("""\bAIza[0-9A-Za-z_-]{20,}\b""")
     private val RESET_LINK_REGEX = Regex("""https?://[^\s]*(oobCode|resetPassword|apiKey=)[^\s]*""", RegexOption.IGNORE_CASE)
     private val PASSWORD_KV_REGEX = Regex("""(?i)(password|পাসওয়ার্ড|পাসওয়ার্ড|otp|secret|token)\s*[:=]\s*\S+""")
 
     // Idempotency tracking map: eventKey -> timestampMillis when successfully delivered to Telegram
     private val deliveredEventKeys = ConcurrentHashMap<String, Long>()
+
+    // Test-only override to simulate missing/invalid token states deterministically in unit tests without hardcoding secrets
+    @Volatile
+    private var testTokenOverride: String? = null
 
     data class TelegramBotDiagnosticResult(
         val isTokenConfigured: Boolean,
@@ -54,12 +59,47 @@ object TelegramNotificationHelper {
         deliveredEventKeys.clear()
     }
 
+    internal fun setTokenOverrideForTest(overrideToken: String?) {
+        testTokenOverride = overrideToken
+    }
+
+    internal fun normalizeBotToken(raw: String): String {
+        var cleaned = raw.trim()
+        if ((cleaned.startsWith("\"") && cleaned.endsWith("\"")) ||
+            (cleaned.startsWith("'") && cleaned.endsWith("'"))
+        ) {
+            cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+        }
+        if (cleaned.startsWith("bot", ignoreCase = true) &&
+            cleaned.length > 3 &&
+            cleaned.substring(3).matches(Regex("""^\d{6,15}:.+"""))
+        ) {
+            cleaned = cleaned.substring(3).trim()
+        }
+        if (cleaned.isBlank() ||
+            cleaned.equals(PLACEHOLDER_TOKEN, ignoreCase = true) ||
+            cleaned.equals("null", ignoreCase = true) ||
+            cleaned.equals("undefined", ignoreCase = true)
+        ) {
+            return ""
+        }
+        return cleaned
+    }
+
+    fun isBotTokenStructurallyValid(token: String): Boolean {
+        val normalized = normalizeBotToken(token)
+        return normalized.isNotBlank() && BOT_TOKEN_FORMAT_REGEX.matches(normalized)
+    }
+
     /**
      * Permanently fitted target Chat ID inside the app (6255562134).
      */
     fun resolveTargetChatId(): String {
-        val configured = BuildConfig.TELEGRAM_CHAT_ID.trim()
-        return if (configured.isNotBlank() && configured != PLACEHOLDER_CHAT_ID) {
+        val configured = BuildConfig.TELEGRAM_CHAT_ID.trim().removeSurrounding("\"").removeSurrounding("'").trim()
+        return if (configured.isNotBlank() &&
+            configured != PLACEHOLDER_CHAT_ID &&
+            !configured.equals("null", ignoreCase = true)
+        ) {
             configured
         } else {
             DEFAULT_ADMIN_CHAT_ID
@@ -70,8 +110,8 @@ object TelegramNotificationHelper {
      * Permanently fitted Telegram Bot ID inside the app (8982853197).
      */
     fun resolveConfiguredBotId(): String {
-        val token = BuildConfig.TELEGRAM_BOT_TOKEN.trim()
-        if (token.isNotBlank() && token != PLACEHOLDER_TOKEN && token.contains(":")) {
+        val token = resolveActiveBotToken()
+        if (token.isNotBlank() && token.contains(":")) {
             val prefix = token.substringBefore(":").trim()
             if (prefix.matches(Regex("""^\d{6,15}$"""))) {
                 return prefix
@@ -81,16 +121,21 @@ object TelegramNotificationHelper {
     }
 
     private fun resolveActiveBotToken(): String {
-        val fromBuildConfig = BuildConfig.TELEGRAM_BOT_TOKEN.trim()
-        if (fromBuildConfig.isNotBlank() && fromBuildConfig != PLACEHOLDER_TOKEN) {
+        val override = testTokenOverride
+        if (override != null) {
+            val normalizedOverride = normalizeBotToken(override)
+            return if (isBotTokenStructurallyValid(normalizedOverride)) normalizedOverride else ""
+        }
+        val fromBuildConfig = normalizeBotToken(BuildConfig.TELEGRAM_BOT_TOKEN)
+        if (isBotTokenStructurallyValid(fromBuildConfig)) {
             return fromBuildConfig
         }
         val fromEnv = try {
-            System.getenv("TELEGRAM_BOT_TOKEN")?.trim().orEmpty()
+            normalizeBotToken(System.getenv("TELEGRAM_BOT_TOKEN").orEmpty())
         } catch (_: Exception) {
             ""
         }
-        return if (fromEnv.isNotBlank()) fromEnv else fromBuildConfig
+        return if (isBotTokenStructurallyValid(fromEnv)) fromEnv else ""
     }
 
     fun isChatIdStructurallyValid(chatId: String = resolveTargetChatId()): Boolean {
@@ -101,10 +146,7 @@ object TelegramNotificationHelper {
     fun isTelegramBotConfigured(): Boolean {
         val token = resolveActiveBotToken()
         val chatId = resolveTargetChatId()
-        return token.isNotBlank() &&
-            token != PLACEHOLDER_TOKEN &&
-            token.contains(":") &&
-            isChatIdStructurallyValid(chatId)
+        return isBotTokenStructurallyValid(token) && isChatIdStructurallyValid(chatId)
     }
 
     /**

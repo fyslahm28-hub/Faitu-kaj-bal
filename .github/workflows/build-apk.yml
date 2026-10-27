@@ -97,6 +97,8 @@ jobs:
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
           DEFAULT_WEB_CLIENT_ID: ${{ secrets.DEFAULT_WEB_CLIENT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           gradle assembleDebug \
             -PversionCode=${{ steps.version_meta.outputs.version_code }} \

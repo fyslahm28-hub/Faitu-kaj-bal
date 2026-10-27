@@ -136,38 +136,49 @@ tasks.withType<Test> {
   }
 }
 
-// Synchronize secrets injected via AI Studio Secrets panel environment variables into the gitignored .env file
-// so the Secrets Gradle Plugin populates BuildConfig fields accurately without hardcoding secrets.
+// Synchronize secrets injected via AI Studio Secrets panel or CI environment variables into the gitignored .env file
+// using Gradle providers so Configuration Cache tracks secret changes and Secrets Gradle Plugin populates BuildConfig fields accurately.
 val envExampleFile = rootProject.file(".env.example")
 val dotEnvFile = rootProject.file(".env")
 if (envExampleFile.exists()) {
-  val envLines = mutableListOf<String>()
-  val existingMap = mutableMapOf<String, String>()
+  val resolvedMap = linkedMapOf<String, String>()
+  val defaultMap = linkedMapOf<String, String>()
+
+  envExampleFile.readLines().forEach { line ->
+    val trimmed = line.trim()
+    if (trimmed.isNotEmpty() && !trimmed.startsWith("#") && trimmed.contains("=")) {
+      val k = trimmed.substringBefore("=").trim()
+      val v = trimmed.substringAfter("=").trim()
+      defaultMap[k] = v
+      resolvedMap[k] = v
+    }
+  }
+
   if (dotEnvFile.exists()) {
     dotEnvFile.readLines().forEach { line ->
       val trimmed = line.trim()
       if (trimmed.isNotEmpty() && !trimmed.startsWith("#") && trimmed.contains("=")) {
         val k = trimmed.substringBefore("=").trim()
         val v = trimmed.substringAfter("=").trim()
-        existingMap[k] = v
+        if (v.isNotEmpty() && v != defaultMap[k]) {
+          resolvedMap[k] = v
+        }
       }
     }
   }
-  var updatedFromEnv = false
-  envExampleFile.readLines().forEach { line ->
-    val trimmed = line.trim()
-    if (trimmed.isNotEmpty() && !trimmed.startsWith("#") && trimmed.contains("=")) {
-      val key = trimmed.substringBefore("=").trim()
-      val sysVal = System.getenv(key)?.trim()
-      if (!sysVal.isNullOrEmpty()) {
-        existingMap[key] = sysVal
-        updatedFromEnv = true
-      }
+
+  defaultMap.keys.forEach { key ->
+    val fromProvider = providers.environmentVariable(key).orNull?.trim()
+    val sysVal = if (!fromProvider.isNullOrEmpty()) fromProvider else System.getenv(key)?.trim()
+    if (!sysVal.isNullOrEmpty() && sysVal != defaultMap[key]) {
+      resolvedMap[key] = sysVal
     }
   }
-  if (updatedFromEnv && existingMap.isNotEmpty()) {
-    existingMap.forEach { (k, v) -> envLines.add("$k=$v") }
-    dotEnvFile.writeText(envLines.joinToString("\n") + "\n")
+
+  val desiredContent = resolvedMap.entries.joinToString("\n") { (k, v) -> "$k=$v" } + "\n"
+  val currentContent = if (dotEnvFile.exists()) runCatching { dotEnvFile.readText() }.getOrDefault("") else ""
+  if (!dotEnvFile.exists() || currentContent != desiredContent) {
+    dotEnvFile.writeText(desiredContent)
   }
 }
 
