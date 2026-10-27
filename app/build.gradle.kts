@@ -137,9 +137,10 @@ tasks.withType<Test> {
 }
 
 // Synchronize secrets injected via AI Studio Secrets panel or CI environment variables into the gitignored .env file
-// using Gradle providers so Configuration Cache tracks secret changes and Secrets Gradle Plugin populates BuildConfig fields accurately.
+// using Gradle providers so Configuration Cache tracks both environment variables and .env file presence on disk.
 val envExampleFile = rootProject.file(".env.example")
 val dotEnvFile = rootProject.file(".env")
+val existingDotEnvContent = providers.fileContents(rootProject.layout.projectDirectory.file(".env")).asText.orNull
 if (envExampleFile.exists()) {
   val resolvedMap = linkedMapOf<String, String>()
   val defaultMap = linkedMapOf<String, String>()
@@ -154,8 +155,8 @@ if (envExampleFile.exists()) {
     }
   }
 
-  if (dotEnvFile.exists()) {
-    dotEnvFile.readLines().forEach { line ->
+  if (!existingDotEnvContent.isNullOrEmpty()) {
+    existingDotEnvContent.lineSequence().forEach { line ->
       val trimmed = line.trim()
       if (trimmed.isNotEmpty() && !trimmed.startsWith("#") && trimmed.contains("=")) {
         val k = trimmed.substringBefore("=").trim()
@@ -176,8 +177,7 @@ if (envExampleFile.exists()) {
   }
 
   val desiredContent = resolvedMap.entries.joinToString("\n") { (k, v) -> "$k=$v" } + "\n"
-  val currentContent = if (dotEnvFile.exists()) runCatching { dotEnvFile.readText() }.getOrDefault("") else ""
-  if (!dotEnvFile.exists() || currentContent != desiredContent) {
+  if (existingDotEnvContent == null || existingDotEnvContent != desiredContent) {
     dotEnvFile.writeText(desiredContent)
   }
 }

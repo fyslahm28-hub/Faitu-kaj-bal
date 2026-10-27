@@ -209,7 +209,7 @@ class QawmiRepository(
                 }
                 ?.toMap()
                 ?: obj.chatThemes
-            obj.copy(
+            val candidate = obj.copy(
                 id = id,
                 isOnline = resolvedOnline,
                 isVerified = resolvedVerified,
@@ -217,6 +217,12 @@ class QawmiRepository(
                 blockedUserIds = rawBlocked,
                 chatThemes = rawThemes
             )
+            val effectiveOnline = if (metadata.hasPendingWrites()) {
+                candidate.isOnline
+            } else {
+                candidate.isEffectivelyOnline()
+            }
+            candidate.copy(isOnline = effectiveOnline)
         } catch (_: Throwable) {
             null
         }
@@ -615,7 +621,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                extRef.set(extPayload).await()
+                extRef.set(extPayload).awaitWithTimeout(10_000L)
                 primaryAttachmentDocId = extDocId
             }
 
@@ -648,7 +654,7 @@ class QawmiRepository(
                                 ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
                         )
                     }
-                    mediaRef.set(mediaPayload).await()
+                    mediaRef.set(mediaPayload).awaitWithTimeout(10_000L)
                     ProfilePhotoHelper.cacheAttachmentDataUrl(mediaDocId, mediaItem.separateAttachmentDataUrl)
                     itemAttachmentDocId = mediaDocId
                     if (primaryAttachmentDocId.isBlank()) {
@@ -726,7 +732,7 @@ class QawmiRepository(
                 )
             }
 
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(10_000L)
 
             // Deliver community notification to other users (observeNotifications excludes senderId == uid)
             val isCircular = postType == "JOB_CIRCULAR"
@@ -742,23 +748,31 @@ class QawmiRepository(
                 else -> "${title.trim()} (${qualification.trim()}) '${resolvedDesignation}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
             }
             val resolvedSender = authorName.trim().ifBlank { title.trim() }
-            createNotification(
-                recipientId = "ALL_USERS",
-                senderName = resolvedSender,
-                title = notifTitle,
-                message = notifMsg.take(500),
-                type = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
-                referenceId = docRef.id
-            )
+            kotlinx.coroutines.withTimeoutOrNull(3000L) {
+                runCatching {
+                    createNotification(
+                        recipientId = "ALL_USERS",
+                        senderName = resolvedSender,
+                        title = notifTitle,
+                        message = notifMsg.take(500),
+                        type = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
+                        referenceId = docRef.id
+                    )
+                }
+            }
 
-            // Enqueue & dispatch Telegram notification for Admin oversight
-            enqueueAndDispatchTelegramNotification(
-                eventType = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
-                title = notifTitle,
-                message = "$notifMsg (যোগাযোগ: ${contactNumber.trim().ifBlank { "অপ্রদত্ত" }})",
-                actorName = resolvedSender,
-                referenceId = docRef.id
-            )
+            // Enqueue & dispatch Telegram notification for Admin oversight with bounded timeout so post publishing never hangs
+            kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
+                        title = notifTitle,
+                        message = "$notifMsg (যোগাযোগ: ${contactNumber.trim().ifBlank { "অপ্রদত্ত" }})",
+                        actorName = resolvedSender,
+                        referenceId = docRef.id
+                    )
+                }
+            }
 
             Result.success(docRef.id)
         } catch (e: CancellationException) {
@@ -844,7 +858,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                extRef.set(extPayload).await()
+                extRef.set(extPayload).awaitWithTimeout(10_000L)
                 primaryAttachmentDocId = extDocId
             }
 
@@ -877,7 +891,7 @@ class QawmiRepository(
                                 ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
                         )
                     }
-                    mediaRef.set(mediaPayload).await()
+                    mediaRef.set(mediaPayload).awaitWithTimeout(10_000L)
                     ProfilePhotoHelper.cacheAttachmentDataUrl(mediaDocId, mediaItem.separateAttachmentDataUrl)
                     itemAttachmentDocId = mediaDocId
                     if (primaryAttachmentDocId.isBlank()) {
@@ -942,7 +956,7 @@ class QawmiRepository(
                 )
             }
 
-            docRef.update(updates).await()
+            docRef.update(updates).awaitWithTimeout(10_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1530,22 +1544,26 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(10_000L)
 
-            enqueueAndDispatchTelegramNotification(
-                eventType = "NEW_MADRASA",
-                title = "নতুন মাদরাসা নিবন্ধন: ${name.trim()}",
-                message = "জেলা: ${district.trim()} | সর্বোচ্চ মারহালা: ${highestMarhala.trim()} | যোগাযোগ: ${contactPhone.trim()}",
-                actorName = name.trim(),
-                referenceId = docRef.id
-            )
+            kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = "NEW_MADRASA",
+                        title = "নতুন মাদরাসা নিবন্ধন: ${name.trim()}",
+                        message = "জেলা: ${district.trim()} | সর্বোচ্চ মারহালা: ${highestMarhala.trim()} | যোগাযোগ: ${contactPhone.trim()}",
+                        actorName = name.trim(),
+                        referenceId = docRef.id
+                    )
+                }
+            }
 
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -1562,33 +1580,41 @@ class QawmiRepository(
                     "isVerified" to verified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(10_000L)
 
             if (verified && madrasa.ownerId.isNotBlank() && madrasa.ownerId != uid) {
-                createNotification(
-                    recipientId = madrasa.ownerId,
-                    senderName = adminName,
-                    title = "মাদরাসা যাচাইকরণ অনুমোদিত",
-                    message = "আলহামদুলিল্লাহ, আপনার '${madrasa.name}' (${madrasa.district}) যাচাইকৃত মাদরাসা হিসেবে তালিকাভুক্ত হয়েছে।",
-                    type = "VERIFICATION",
-                    referenceId = madrasa.id
-                )
+                kotlinx.coroutines.withTimeoutOrNull(3000L) {
+                    runCatching {
+                        createNotification(
+                            recipientId = madrasa.ownerId,
+                            senderName = adminName,
+                            title = "মাদরাসা যাচাইকরণ অনুমোদিত",
+                            message = "আলহামদুলিল্লাহ, আপনার '${madrasa.name}' (${madrasa.district}) যাচাইকৃত মাদরাসা হিসেবে তালিকাভুক্ত হয়েছে।",
+                            type = "VERIFICATION",
+                            referenceId = madrasa.id
+                        )
+                    }
+                }
             }
 
-            enqueueAndDispatchTelegramNotification(
-                eventType = "ADMIN_VERIFICATION",
-                title = if (verified) "মাদরাসা যাচাইকৃত অনুমোদিত" else "মাদরাসা যাচাইকরণ পরিবর্তন",
-                message = "'${madrasa.name}' (${madrasa.district}) মাদরাসার যাচাইকরণ স্ট্যাটাস: ${if (verified) "যাচাইকৃত ✓" else "অযাচাইকৃত"}",
-                actorName = adminName,
-                referenceId = madrasa.id
-            )
+            kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = "ADMIN_VERIFICATION",
+                        title = if (verified) "মাদরাসা যাচাইকৃত অনুমোদিত" else "মাদরাসা যাচাইকরণ পরিবর্তন",
+                        message = "'${madrasa.name}' (${madrasa.district}) মাদরাসার যাচাইকরণ স্ট্যাটাস: ${if (verified) "যাচাইকৃত ✓" else "অযাচাইকৃত"}",
+                        actorName = adminName,
+                        referenceId = madrasa.id
+                    )
+                }
+            }
 
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -1650,34 +1676,42 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(10_000L)
 
             // Deliver real-time notification ONLY to the Madrasa / circular author (not to self)
             if (post.authorId.isNotBlank() && post.authorId != uid) {
-                createNotification(
-                    recipientId = post.authorId,
-                    senderName = applicantName.trim(),
-                    title = "নতুন খেদমতের আবেদন প্রাপ্তি",
-                    message = "${applicantName.trim()} আপনার '${post.title}'-এর '${post.designation}' খেদমতের জন্য আবেদন করেছেন।",
-                    type = "APPLICATION",
-                    referenceId = docRef.id
-                )
+                kotlinx.coroutines.withTimeoutOrNull(3000L) {
+                    runCatching {
+                        createNotification(
+                            recipientId = post.authorId,
+                            senderName = applicantName.trim(),
+                            title = "নতুন খেদমতের আবেদন প্রাপ্তি",
+                            message = "${applicantName.trim()} আপনার '${post.title}'-এর '${post.designation}' খেদমতের জন্য আবেদন করেছেন।",
+                            type = "APPLICATION",
+                            referenceId = docRef.id
+                        )
+                    }
+                }
             }
 
-            enqueueAndDispatchTelegramNotification(
-                eventType = "KHEDMOT_SUBMISSION",
-                title = "বিজ্ঞপ্তিতে নতুন খেদমত আবেদন: ${post.title}",
-                message = "প্রার্থী: ${applicantName.trim()} (${applicantQualification.trim()}) | পদ: ${post.designation} | ফোন: ${applicantPhone.trim()}",
-                actorName = applicantName.trim(),
-                referenceId = docRef.id
-            )
+            kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = "KHEDMOT_SUBMISSION",
+                        title = "বিজ্ঞপ্তিতে নতুন খেদমত আবেদন: ${post.title}",
+                        message = "প্রার্থী: ${applicantName.trim()} (${applicantQualification.trim()}) | পদ: ${post.designation} | ফোন: ${applicantPhone.trim()}",
+                        actorName = applicantName.trim(),
+                        referenceId = docRef.id
+                    )
+                }
+            }
 
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -1790,13 +1824,13 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(10_000L)
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -2011,8 +2045,10 @@ class QawmiRepository(
         return try {
             if (!isGroupMessage) {
                 // Check block status between sender and receiver before sending 1-on-1 message
-                val senderSnap = db.collection("users").document(uid).get().await()
-                val senderBlockedList = (senderSnap.get("blockedUserIds") as? List<*>)
+                val senderSnap = kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                    runCatching { db.collection("users").document(uid).get().await() }.getOrNull()
+                }
+                val senderBlockedList = (senderSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
                 if (receiverId in senderBlockedList) {
@@ -2021,8 +2057,10 @@ class QawmiRepository(
                     )
                 }
 
-                val receiverSnap = db.collection("users").document(receiverId).get().await()
-                val receiverBlockedList = (receiverSnap.get("blockedUserIds") as? List<*>)
+                val receiverSnap = kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                    runCatching { db.collection("users").document(receiverId).get().await() }.getOrNull()
+                }
+                val receiverBlockedList = (receiverSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
                 if (uid in receiverBlockedList) {
@@ -2069,12 +2107,13 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(10_000L)
 
-            // Clear typing status immediately upon sending a message
-            try {
-                updateTypingStatus(targetUserId = "", isTyping = false, defaultFullName = safeSenderName)
-            } catch (_: Exception) {
+            // Clear typing status immediately upon sending a message without blocking completion
+            kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                runCatching {
+                    updateTypingStatus(targetUserId = "", isTyping = false, defaultFullName = safeSenderName)
+                }
             }
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.
@@ -2084,7 +2123,7 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -2093,13 +2132,13 @@ class QawmiRepository(
         if (messageId.isBlank()) return Result.success(Unit)
         val docRef = db.collection("messages").document(messageId)
         return try {
-            docRef.update("isRead", true).await()
+            docRef.update("isRead", true).awaitWithTimeout(6_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 

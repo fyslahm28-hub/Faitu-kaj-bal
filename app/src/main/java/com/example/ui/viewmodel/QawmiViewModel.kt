@@ -18,7 +18,10 @@ import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.data.repository.QawmiRepository
 import com.example.ui.util.AdminSecurityHelper
+import com.google.firebase.Timestamp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +33,14 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+
+data class FailedMessageDraft(
+    val partnerId: String,
+    val body: String,
+    val imageUrls: List<String>,
+    val timestampMs: Long = System.currentTimeMillis()
+)
 
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>
@@ -102,6 +113,45 @@ class QawmiViewModel(
 
     private val _isSubmitting = MutableStateFlow(false)
     val isSubmitting: StateFlow<Boolean> = _isSubmitting.asStateFlow()
+
+    private val _failedMessageDraft = MutableStateFlow<FailedMessageDraft?>(null)
+    val failedMessageDraft: StateFlow<FailedMessageDraft?> = _failedMessageDraft.asStateFlow()
+
+    fun clearFailedMessageDraft() {
+        _failedMessageDraft.value = null
+    }
+
+    fun cancelSubmittingIfStuck() {
+        _isSubmitting.value = false
+    }
+
+    private fun runSubmittingAction(
+        timeoutMs: Long = 15_000L,
+        onTimeoutOrError: ((Throwable) -> Unit)? = null,
+        block: suspend () -> Unit
+    ) {
+        viewModelScope.launch {
+            _isSubmitting.value = true
+            clearBanners()
+            try {
+                withTimeout(timeoutMs) {
+                    block()
+                }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "Submitting action timed out after ${timeoutMs}ms", e)
+                _errorBanner.value = "অনুরোধটি সম্পন্ন হতে অতিরিক্ত সময় নিচ্ছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+                onTimeoutOrError?.invoke(e)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.e(TAG, "Unexpected error in submitting action", e)
+                _errorBanner.value = e.localizedMessage ?: "কার্যক্রমটি সম্পন্ন করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
+                onTimeoutOrError?.invoke(e)
+            } finally {
+                _isSubmitting.value = false
+            }
+        }
+    }
 
     // Active dialog / detail targets
     private val _selectedPostForApply = MutableStateFlow<FeedPost?>(null)
@@ -190,15 +240,34 @@ class QawmiViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
     private val _adminDataRefreshToken = MutableStateFlow(0)
+    private val _localOptimisticPosts = MutableStateFlow<List<FeedPost>>(emptyList())
+    private val _localOptimisticSubmissions = MutableStateFlow<List<KhedmotSubmission>>(emptyList())
+    private val _localOptimisticMessages = MutableStateFlow<List<DirectMessage>>(emptyList())
 
-    val feedPostsState: StateFlow<UiState<List<FeedPost>>> = _adminDataRefreshToken
-        .flatMapLatest {
+    val feedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
+        _adminDataRefreshToken.flatMapLatest {
             repository.observePublicFeedPosts()
-                .map<List<FeedPost>, UiState<List<FeedPost>>> { UiState.Success(it) }
-                .catch { e ->
-                    Log.w(TAG, "Error observing feed posts", e)
-                    emit(UiState.Error(e.localizedMessage ?: "ফিড লোড করা যায়নি"))
-                }
+        },
+        _localOptimisticPosts
+    ) { remotePosts, optimisticPosts ->
+        val remoteIds = remotePosts.map { it.id }.toSet()
+        val pendingOptimistic = optimisticPosts.filter { it.id.isNotBlank() && it.id !in remoteIds }
+        val merged = (pendingOptimistic + remotePosts)
+            .distinctBy { it.id }
+            .sortedWith(
+                compareByDescending<FeedPost> { it.isBoosted }
+                    .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+            )
+        UiState.Success(merged) as UiState<List<FeedPost>>
+    }
+        .catch { e ->
+            Log.w(TAG, "Error observing feed posts", e)
+            val fallback = _localOptimisticPosts.value
+            if (fallback.isNotEmpty()) {
+                emit(UiState.Success(fallback))
+            } else {
+                emit(UiState.Error(e.localizedMessage ?: "ফিড লোড করা যায়নি"))
+            }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
@@ -232,8 +301,17 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val mySentSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = repository.observeMySentSubmissions(currentUserId)
-        .map<List<KhedmotSubmission>, UiState<List<KhedmotSubmission>>> { UiState.Success(it) }
+    val mySentSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
+        repository.observeMySentSubmissions(currentUserId),
+        _localOptimisticSubmissions
+    ) { remoteList, optimisticList ->
+        val remoteIds = remoteList.map { it.id }.toSet()
+        val pending = optimisticList.filter { it.id.isNotBlank() && it.id !in remoteIds }
+        val merged = (pending + remoteList)
+            .distinctBy { it.id }
+            .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        UiState.Success(merged) as UiState<List<KhedmotSubmission>>
+    }
         .catch { e ->
             Log.w(TAG, "Error observing sent submissions", e)
             emit(UiState.Error(e.localizedMessage ?: "আবেদন তালিকা লোড করা যায়নি"))
@@ -261,9 +339,13 @@ class QawmiViewModel(
 
     val messagesState: StateFlow<UiState<List<DirectMessage>>> = combine(
         repository.observeUserMessages(currentUserId),
-        _locallyReadMessageIds
-    ) { list, locallyReadIds ->
-        val deduplicated = list
+        _locallyReadMessageIds,
+        _localOptimisticMessages
+    ) { list, locallyReadIds, optimisticMsgs ->
+        val remoteIds = list.map { it.id }.toSet()
+        val pendingOptimistic = optimisticMsgs.filter { it.id.isNotBlank() && it.id !in remoteIds }
+        val combinedList = pendingOptimistic + list
+        val deduplicated = combinedList
             .filter { it.id.isNotBlank() }
             .filterNot { msg ->
                 (msg.senderId == currentUserId && msg.deletedForSender) ||
@@ -281,11 +363,17 @@ class QawmiViewModel(
                     msg
                 }
             }
+            .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
         UiState.Success(deduplicated) as UiState<List<DirectMessage>>
     }
         .catch { e ->
             Log.w(TAG, "Error observing messages", e)
-            emit(UiState.Error(e.localizedMessage ?: "মেসেজ লোড করা যায়নি"))
+            val fallback = _localOptimisticMessages.value
+            if (fallback.isNotEmpty()) {
+                emit(UiState.Success(fallback))
+            } else {
+                emit(UiState.Error(e.localizedMessage ?: "মেসেজ লোড করা যায়নি"))
+            }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
@@ -461,21 +549,27 @@ class QawmiViewModel(
             return
         }
         if (_currentDestination.value != destination) {
+            clearBanners()
             _navigationStack.addLast(_currentDestination.value)
             _currentDestination.value = destination
         }
     }
 
     fun navigateBottomTab(destination: MainDestination) {
+        if (_currentDestination.value != destination) {
+            clearBanners()
+        }
         _navigationStack.clear()
         _currentDestination.value = destination
     }
 
     fun navigateBack(): Boolean {
         return if (_navigationStack.isNotEmpty()) {
+            clearBanners()
             _currentDestination.value = _navigationStack.removeLast()
             true
         } else if (_currentDestination.value != MainDestination.HOME) {
+            clearBanners()
             _currentDestination.value = MainDestination.HOME
             true
         } else {
@@ -580,9 +674,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে আপনার পূর্ণ নাম উল্লেখ করুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val existingPhoto = (userProfileState.value as? UiState.Success)?.data?.photoUrl.orEmpty()
             val profile = UserProfile(
                 userId = currentUserId,
@@ -600,7 +692,6 @@ class QawmiViewModel(
                 isOnline = true
             )
             val result = repository.saveUserProfile(profile)
-            _isSubmitting.value = false
             result.onSuccess {
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার প্রোফাইল তথ্য ও ছবি সংরক্ষিত হয়েছে।"
                 onComplete()
@@ -611,12 +702,9 @@ class QawmiViewModel(
     }
 
     fun updateProfilePhotoImmediately(photoUrl: String) {
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val fallbackName = resolveActorDisplayName("আবদুল্লাহ")
             val result = repository.updateProfilePhoto(photoUrl, fallbackName)
-            _isSubmitting.value = false
             result.onSuccess {
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার প্রোফাইল ছবি সফলভাবে সংরক্ষিত হয়েছে।"
             }.onFailure { err ->
@@ -659,36 +747,66 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে পোস্টের শিরোনাম বা বিবরণ লিখুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction(timeoutMs = 18_000L) {
             val resolvedTitle = title.trim().ifBlank {
                 description.trim().lineSequence().firstOrNull()?.take(80)?.ifBlank { "দ্বীনি খেদমত ও আলোচনা" }
                     ?: "দ্বীনি খেদমত ও আলোচনা"
             }
+            val resolvedAuthorName = authorName.ifBlank { resolveActorDisplayName(resolvedTitle) }
+            val resolvedDistrict = district.trim().ifBlank {
+                (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
+            }
+            val resolvedUpazila = upazilaOrLocation.ifBlank { resolvedDistrict }
+            val resolvedDesignation = effectiveDesignation.ifBlank {
+                if (postType == "GENERAL_POST") "দ্বীনি আলোচনা" else designation
+            }
+            val resolvedSalary = salaryOrExperience.ifBlank { if (postType == "GENERAL_POST") "" else "আলোচনা সাপেক্ষ" }
+            val resolvedDeadline = deadlineOrPreferredDistricts.ifBlank { if (postType == "GENERAL_POST") "" else "চলমান" }
+            val resolvedPhoto = resolveActorPhotoUrl()
+
             val result = repository.createFeedPost(
-                authorName = authorName.ifBlank { resolveActorDisplayName(resolvedTitle) },
+                authorName = resolvedAuthorName,
                 postType = postType,
                 title = resolvedTitle,
-                district = district.trim().ifBlank {
-                    (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
-                },
-                upazilaOrLocation = upazilaOrLocation.ifBlank { district },
-                designation = effectiveDesignation.ifBlank {
-                    if (postType == "GENERAL_POST") "দ্বীনি আলোচনা" else designation
-                },
+                district = resolvedDistrict,
+                upazilaOrLocation = resolvedUpazila,
+                designation = resolvedDesignation,
                 qualification = qualification,
-                salaryOrExperience = salaryOrExperience.ifBlank { if (postType == "GENERAL_POST") "" else "আলোচনা সাপেক্ষ" },
-                deadlineOrPreferredDistricts = deadlineOrPreferredDistricts.ifBlank { if (postType == "GENERAL_POST") "" else "চলমান" },
+                salaryOrExperience = resolvedSalary,
+                deadlineOrPreferredDistricts = resolvedDeadline,
                 description = description,
                 contactNumber = contactNumber,
-                authorPhotoUrl = resolveActorPhotoUrl(),
+                authorPhotoUrl = resolvedPhoto,
                 khedmotCategories = khedmotCategories,
                 customCategory = customCategory,
                 imageUrls = imageUrls
             )
-            _isSubmitting.value = false
-            result.onSuccess {
+            result.onSuccess { postId ->
+                if (postId.isNotBlank()) {
+                    val optimisticPost = FeedPost(
+                        id = postId,
+                        authorId = currentUserId,
+                        authorName = resolvedAuthorName,
+                        authorPhotoUrl = resolvedPhoto,
+                        postType = postType,
+                        title = resolvedTitle,
+                        district = resolvedDistrict,
+                        upazilaOrLocation = resolvedUpazila,
+                        designation = resolvedDesignation,
+                        khedmotCategories = khedmotCategories,
+                        customCategory = customCategory,
+                        qualification = qualification,
+                        salaryOrExperience = resolvedSalary,
+                        deadlineOrPreferredDistricts = resolvedDeadline,
+                        description = description,
+                        contactNumber = contactNumber,
+                        imageUrls = imageUrls,
+                        visibility = "PUBLIC",
+                        createdAt = Timestamp.now(),
+                        updatedAt = Timestamp.now()
+                    )
+                    _localOptimisticPosts.value = (listOf(optimisticPost) + _localOptimisticPosts.value).distinctBy { it.id }
+                }
                 _feedbackBanner.value = when (postType) {
                     "JOB_CIRCULAR" -> "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।"
                     "GENERAL_POST" -> "আলহামদুলিল্লাহ, আপনার দ্বীনি পোস্টটি ফিডে প্রকাশিত হয়েছে।"
@@ -720,9 +838,7 @@ class QawmiViewModel(
             _errorBanner.value = "‘অন্যান্য’ বিভাগ নির্বাচন করলে অনুগ্রহ করে খেদমতের ধরনটি লিখুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction(timeoutMs = 18_000L) {
             val res = repository.updateOwnFeedPost(
                 post = post,
                 title = title,
@@ -738,8 +854,29 @@ class QawmiViewModel(
                 customCategory = customCategory,
                 imageUrls = imageUrls
             )
-            _isSubmitting.value = false
             res.onSuccess {
+                _localOptimisticPosts.value = _localOptimisticPosts.value.map { existing ->
+                    if (existing.id == post.id) {
+                        existing.copy(
+                            title = title,
+                            district = district,
+                            upazilaOrLocation = upazilaOrLocation,
+                            designation = designation,
+                            qualification = qualification,
+                            salaryOrExperience = salaryOrExperience,
+                            deadlineOrPreferredDistricts = deadlineOrPreferredDistricts,
+                            description = description,
+                            contactNumber = contactNumber,
+                            khedmotCategories = khedmotCategories,
+                            customCategory = customCategory,
+                            imageUrls = imageUrls,
+                            isEdited = true,
+                            updatedAt = Timestamp.now()
+                        )
+                    } else {
+                        existing
+                    }
+                }
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পোস্টটি সফলভাবে হালনাগাদ হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ করা যায়নি।"
@@ -817,9 +954,7 @@ class QawmiViewModel(
     }
 
     fun sharePostInApp(post: FeedPost, caption: String) {
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val sharerName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
             val sharerPhoto = resolveActorPhotoUrl()
             val sharerDistrict = (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
@@ -830,7 +965,6 @@ class QawmiViewModel(
                 sharerDistrict = sharerDistrict,
                 shareCaption = caption
             )
-            _isSubmitting.value = false
             res.onSuccess {
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
             }.onFailure { err ->
@@ -854,6 +988,7 @@ class QawmiViewModel(
     fun deletePost(postId: String) {
         viewModelScope.launch {
             clearBanners()
+            _localOptimisticPosts.value = _localOptimisticPosts.value.filterNot { it.id == postId }
             val result = repository.deleteFeedPost(postId)
             result.onSuccess {
                 _feedbackBanner.value = "পোস্টটি মুছে ফেলা হয়েছে।"
@@ -894,9 +1029,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে মাদরাসার নাম ও জেলা উল্লেখ করুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val result = repository.createMadrasa(
                 name = name,
                 district = district,
@@ -907,7 +1040,6 @@ class QawmiViewModel(
                 studentCount = studentCount,
                 contactPhone = contactPhone
             )
-            _isSubmitting.value = false
             result.onSuccess {
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, মাদরাসার তথ্য ডিরেক্টরিতে যুক্ত হয়েছে।"
                 onSuccessNavigate()
@@ -930,9 +1062,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে আপনার নাম ও যোগাযোগের নম্বর উল্লেখ করুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val result = repository.submitApplicationToCircular(
                 post = post,
                 applicantName = applicantName,
@@ -941,8 +1071,26 @@ class QawmiViewModel(
                 applicantPhone = applicantPhone,
                 coverNote = coverNote
             )
-            _isSubmitting.value = false
-            result.onSuccess {
+            result.onSuccess { submissionId ->
+                if (submissionId.isNotBlank()) {
+                    val optimisticSub = KhedmotSubmission(
+                        id = submissionId,
+                        postId = post.id,
+                        postTitle = post.title,
+                        postDesignation = post.designation,
+                        applicantId = currentUserId,
+                        applicantName = applicantName.trim(),
+                        applicantQualification = applicantQualification.trim(),
+                        applicantExperience = applicantExperience.trim(),
+                        applicantPhone = applicantPhone.trim(),
+                        coverNote = coverNote.trim(),
+                        recipientId = post.authorId,
+                        status = "PENDING",
+                        createdAt = Timestamp.now(),
+                        updatedAt = Timestamp.now()
+                    )
+                    _localOptimisticSubmissions.value = (listOf(optimisticSub) + _localOptimisticSubmissions.value).distinctBy { it.id }
+                }
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদন সংশ্লিষ্ট মাদরাসায় প্রেরিত হয়েছে।"
                 _selectedPostForApply.value = null
                 onComplete()
@@ -989,9 +1137,16 @@ class QawmiViewModel(
             _errorBanner.value = "একবারে সর্বোচ্চ ৫টি ছবি পাঠানো যাবে।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction(
+            timeoutMs = 15_000L,
+            onTimeoutOrError = {
+                _failedMessageDraft.value = FailedMessageDraft(
+                    partnerId = receiverId,
+                    body = body,
+                    imageUrls = imageUrls
+                )
+            }
+        ) {
             val senderName = resolveActorDisplayName("দ্বীনি ভাই")
             val senderPhoto = resolveActorPhotoUrl()
             val resolvedGroupId = groupId.ifBlank {
@@ -1009,8 +1164,31 @@ class QawmiViewModel(
                 groupName = groupName.ifBlank { receiverName },
                 groupMemberIds = groupMemberIds
             )
-            _isSubmitting.value = false
-            result.onSuccess {
+            result.onSuccess { msgId ->
+                _failedMessageDraft.value = null
+                if (msgId.isNotBlank()) {
+                    val optimisticBody = body.trim().ifBlank {
+                        if (imageUrls.isNotEmpty()) "📷 ${imageUrls.size} টি ছবি প্রেরণ করা হয়েছে" else ""
+                    }
+                    val optimisticMsg = DirectMessage(
+                        id = msgId,
+                        senderId = currentUserId,
+                        senderName = senderName,
+                        senderPhotoUrl = senderPhoto,
+                        receiverId = if (isGroupMsg) "GROUP:$resolvedGroupId" else receiverId,
+                        receiverName = receiverName,
+                        groupId = resolvedGroupId,
+                        groupName = groupName.ifBlank { receiverName },
+                        groupMemberIds = if (isGroupMsg) (groupMemberIds + currentUserId).distinct() else emptyList(),
+                        subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+                        body = optimisticBody,
+                        imageUrls = imageUrls.take(5),
+                        isRead = false,
+                        readByUserIds = listOf(currentUserId),
+                        createdAt = Timestamp.now()
+                    )
+                    _localOptimisticMessages.value = (listOf(optimisticMsg) + _localOptimisticMessages.value).distinctBy { it.id }
+                }
                 _feedbackBanner.value = if (imageUrls.isNotEmpty()) {
                     "আলহামদুলিল্লাহ, ছবিসহ আপনার পয়গাম প্রেরিত হয়েছে।"
                 } else {
@@ -1018,6 +1196,11 @@ class QawmiViewModel(
                 }
                 onSent()
             }.onFailure { err ->
+                _failedMessageDraft.value = FailedMessageDraft(
+                    partnerId = receiverId,
+                    body = body,
+                    imageUrls = imageUrls
+                )
                 _errorBanner.value = err.localizedMessage ?: "পয়গাম পাঠাতে ত্রুটি হয়েছে।"
             }
         }
@@ -1035,9 +1218,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে গ্রুপের নাম লিখুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val creatorName = resolveActorDisplayName("গ্রুপ অ্যাডমিন")
             val result = repository.createChatGroup(
                 name = trimmedName,
@@ -1046,7 +1227,6 @@ class QawmiViewModel(
                 memberIds = initialMemberIds,
                 memberNames = initialMemberNames
             )
-            _isSubmitting.value = false
             result.onSuccess { groupId ->
                 val uid = currentUserId
                 val finalMembers = (initialMemberIds + uid).map { it.trim() }.filter { it.isNotBlank() }.distinct()
@@ -1403,12 +1583,9 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে ঘোষণার শিরোনাম ও বিস্তারিত বার্তা লিখুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val result = repository.sendAdminAnnouncement(adminName, title, message)
-            _isSubmitting.value = false
             result.onSuccess {
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, অ্যাডমিন ঘোষণা সকল ব্যবহারকারীর কাছে ও টেলিগ্রাম লগে প্রেরিত হয়েছে।"
                 onSent()
@@ -1419,11 +1596,8 @@ class QawmiViewModel(
     }
 
     fun requestAdminPasswordReset(email: String) {
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val result = repository.sendAdminPasswordResetLink(email)
-            _isSubmitting.value = false
             result.onSuccess { sentEmail ->
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, অনুমোদিত অ্যাডমিন ইমেইল ($sentEmail)-এ Firebase Authentication থেকে নিরাপদ Password Reset Link পাঠানো হয়েছে।"
             }.onFailure { err ->
@@ -1437,12 +1611,9 @@ class QawmiViewModel(
             _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন টেলিগ্রাম নোটিফিকেশন পরীক্ষা করতে পারবেন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val result = repository.sendAdminTestTelegramNotification(adminName, customMessage)
-            _isSubmitting.value = false
             result.onSuccess { verifiedMessage ->
                 _feedbackBanner.value = verifiedMessage
             }.onFailure { err ->
@@ -1540,9 +1711,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে বিজ্ঞপ্তির শিরোনাম ও বিবরণ পূরণ করুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction(timeoutMs = 18_000L) {
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val isFeatured = noticeType == "প্রধান" || noticeType == "জরুরি"
             val result = repository.createFeedPost(
@@ -1559,18 +1728,31 @@ class QawmiViewModel(
                 contactNumber = AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
                 authorPhotoUrl = resolveActorPhotoUrl()
             )
-            _isSubmitting.value = false
             result.onSuccess { postId ->
+                val createdPost = FeedPost(
+                    id = postId,
+                    authorId = currentUserId,
+                    authorName = adminName,
+                    postType = "JOB_CIRCULAR",
+                    title = title.trim(),
+                    district = "সারা বাংলাদেশ",
+                    upazilaOrLocation = noticeType,
+                    designation = if (noticeType == "জরুরি") "জরুরি বিজ্ঞপ্তি" else "দ্বীনি খেদমত বিজ্ঞপ্তি",
+                    qualification = "সংশ্লিষ্ট মারহালা / বিভাগ",
+                    salaryOrExperience = "আলোচনা সাপেক্ষে",
+                    deadlineOrPreferredDistricts = noticeType,
+                    description = description.trim(),
+                    contactNumber = AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+                    isVerifiedMadrasa = isFeatured,
+                    isBoosted = isFeatured,
+                    visibility = "PUBLIC",
+                    createdAt = Timestamp.now(),
+                    updatedAt = Timestamp.now()
+                )
+                if (postId.isNotBlank()) {
+                    _localOptimisticPosts.value = (listOf(createdPost) + _localOptimisticPosts.value).distinctBy { it.id }
+                }
                 if (isFeatured) {
-                    val createdPost = FeedPost(
-                        id = postId,
-                        authorId = currentUserId,
-                        authorName = adminName,
-                        title = title.trim(),
-                        designation = if (noticeType == "জরুরি") "জরুরি বিজ্ঞপ্তি" else "দ্বীনি খেদমত বিজ্ঞপ্তি",
-                        isVerifiedMadrasa = true,
-                        isBoosted = true
-                    )
                     repository.adminTogglePostBoost(createdPost, true, adminName)
                 }
                 val tgRes = repository.adminRecordLiveChangeNotification(
@@ -1610,9 +1792,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে আপনার বার্তা, অভিযোগ, সমস্যা বা পরামর্শ বিস্তারিত লিখুন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val senderName = resolveActorDisplayName("ব্যবহারকারী")
             val result = repository.submitSupportOrComplaintMessage(
                 category = category,
@@ -1621,7 +1801,6 @@ class QawmiViewModel(
                 contactPhone = contactPhone,
                 senderName = senderName
             )
-            _isSubmitting.value = false
             result.onSuccess { dispatchSummary ->
                 if (dispatchSummary.startsWith("FIRESTORE_SAVED_TELEGRAM_FAILED::")) {
                     val reason = dispatchSummary.removePrefix("FIRESTORE_SAVED_TELEGRAM_FAILED::")
@@ -1651,9 +1830,7 @@ class QawmiViewModel(
             _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন নতুন অ্যাপ আপডেট রিলিজ তথ্য প্রকাশ করতে পারবেন।"
             return
         }
-        viewModelScope.launch {
-            _isSubmitting.value = true
-            clearBanners()
+        runSubmittingAction {
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val result = repository.publishAppReleaseInfo(
                 versionCode = versionCode,
@@ -1666,7 +1843,6 @@ class QawmiViewModel(
                 releaseStatus = releaseStatus,
                 publishedBy = adminName
             )
-            _isSubmitting.value = false
             result.onSuccess {
                 _dismissedUpdateVersionCode.value = null
                 val statusLabel = when (releaseStatus.uppercase()) {

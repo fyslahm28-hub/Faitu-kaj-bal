@@ -756,6 +756,37 @@ fun PublishPostScreen(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
+                if (!localValidationError.isNullOrBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFFFFEBEE),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Color(0xFFEF9A9A), RoundedCornerShape(10.dp))
+                            .testTag("bottom_publish_validation_error")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = null,
+                                tint = Color(0xFFC62828),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = localValidationError.orEmpty(),
+                                color = Color(0xFFC62828),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2133,12 +2164,20 @@ fun PublicUserProfileDialog(
     val profile = (inspectedProfileState as? UiState.Success)?.data
     val displayName = profile?.fullName?.takeIf { it.isNotBlank() } ?: fallbackName.ifBlank { "সম্মানিত দ্বীনি ভাই" }
     val photoUrl = profile?.photoUrl.orEmpty()
-    val isOnline = profile?.isOnline == true
-    val lastSeenText = remember(profile?.isOnline, profile?.lastSeenAt) {
-        if (profile?.isOnline == true) {
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    androidx.compose.runtime.LaunchedEffect(targetUserId) {
+        while (true) {
+            kotlinx.coroutines.delay(30_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    val isOnline = profile?.isCurrentlyOnline(nowMillis) == true
+    val effectiveLastSeen = profile?.effectiveLastSeenTimestamp()
+    val lastSeenText = remember(isOnline, effectiveLastSeen, nowMillis) {
+        if (isOnline) {
             "অনলাইন (এখন সক্রিয়)"
-        } else if (profile?.lastSeenAt != null) {
-            "সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(profile.lastSeenAt)}"
+        } else if (effectiveLastSeen != null) {
+            "সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(effectiveLastSeen)}"
         } else {
             "অফলাইন"
         }

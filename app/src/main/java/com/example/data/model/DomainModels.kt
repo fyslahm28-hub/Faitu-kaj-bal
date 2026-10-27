@@ -64,7 +64,36 @@ data class UserProfile(
     var isVerified: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    /**
+     * Returns true only when [isOnline] is true AND the user's [lastSeenAt] (or [updatedAt])
+     * heartbeat timestamp is within [maxStaleMillis] (default 3 minutes).
+     * When both timestamps are null (e.g., in local UI unit tests), falls back to [isOnline].
+     */
+    fun isEffectivelyOnline(
+        nowMillis: Long = System.currentTimeMillis(),
+        maxStaleMillis: Long = ONLINE_PRESENCE_TTL_MS
+    ): Boolean {
+        if (!isOnline) return false
+        val referenceTimestamp = lastSeenAt ?: typingUpdatedAt ?: updatedAt ?: return true
+        val seenMillis = referenceTimestamp.toDate().time
+        if (seenMillis <= 0L) return true
+        val elapsed = nowMillis - seenMillis
+        return elapsed <= maxStaleMillis
+    }
+
+    fun isCurrentlyOnline(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        return isEffectivelyOnline(nowMillis = nowMillis)
+    }
+
+    fun effectiveLastSeenTimestamp(): Timestamp? {
+        return lastSeenAt ?: typingUpdatedAt ?: updatedAt
+    }
+
+    companion object {
+        const val ONLINE_PRESENCE_TTL_MS = 180_000L // 3 minutes active heartbeat window
+    }
+}
 
 @IgnoreExtraProperties
 data class FeedPost(

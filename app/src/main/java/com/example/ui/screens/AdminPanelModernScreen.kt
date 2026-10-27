@@ -79,6 +79,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -1399,12 +1400,15 @@ private fun AdminUsersManagementView(
     val localStatusOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
 
     val combinedUsers = remember(users, localStatusOverrides.value) {
+        val nowMillis = System.currentTimeMillis()
         users.map { prof ->
             val uid = prof.id.ifBlank { prof.userId }
             val activeState = localStatusOverrides.value[uid] ?: prof.isVerified
+            val currentlyOnline = prof.isCurrentlyOnline(nowMillis)
+            val effectiveLastSeen = prof.effectiveLastSeenTimestamp()
             val presence = when {
-                prof.isOnline -> "Online"
-                prof.lastSeenAt != null -> "Last seen ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(prof.lastSeenAt)}"
+                currentlyOnline -> "Online"
+                effectiveLastSeen != null -> "Last seen ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(effectiveLastSeen)}"
                 else -> "Offline"
             }
             DisplayUserItem(
@@ -1412,7 +1416,7 @@ private fun AdminUsersManagementView(
                 name = prof.fullName.ifBlank { "সম্মানিত ব্যবহারকারী" },
                 contact = prof.contactInfo.ifBlank { prof.designation.ifBlank { "যোগাযোগের তথ্য নেই" } },
                 presenceText = presence,
-                isOnline = prof.isOnline,
+                isOnline = currentlyOnline,
                 isActive = activeState,
                 isAdminRole = prof.accountType.equals("admin", ignoreCase = true),
                 photoUrl = prof.photoUrl,
@@ -3814,6 +3818,14 @@ private fun AdminTelegramIntegrationView(
         mutableStateOf<TelegramNotificationHelper.TelegramBotDiagnosticResult?>(null)
     }
 
+    LaunchedEffect(isTokenConfigured) {
+        if (isTokenConfigured && getMeDiagResult == null && !isCheckingGetMe) {
+            isCheckingGetMe = true
+            getMeDiagResult = TelegramNotificationHelper.verifyBotConnectionWithGetMe()
+            isCheckingGetMe = false
+        }
+    }
+
     val deliveredCount = remember(telegramLogs) { telegramLogs.count { it.deliveryStatus == "DELIVERED" } }
     val queuedCount = remember(telegramLogs) { telegramLogs.count { it.deliveryStatus == "QUEUED" } }
     val failedCount = remember(telegramLogs) { telegramLogs.count { it.deliveryStatus == "FAILED" } }
@@ -4029,7 +4041,11 @@ private fun AdminTelegramIntegrationView(
 
                     val statusExplanation = getMeDiagResult?.diagnosticMessageBangla
                         ?: if (!isTokenConfigured) {
-                            "সতর্কতা: অ্যাপের পরিবেশে TELEGRAM_BOT_TOKEN কনফিগার করা নেই। AI Studio-এর Secrets প্যানেলে বট ৮৯৮২৮৫৩১৯৭-এর সক্রিয় টোকেন সেট করুন।"
+                            if (deliveredCount > 0) {
+                                "সতর্কতা: পূর্বে টেলিগ্রাম বটে মেসেজ পৌঁছেছে ($deliveredCount টি সফল), কিন্তু বর্তমান ইনস্টল করা অ্যাপ বিল্ডে TELEGRAM_BOT_TOKEN সংযুক্ত নেই (যেমন GitHub Actions বিল্ডে Secret না থাকলে ডিফল্ট প্লেসহোল্ডার ব্যবহৃত হয়)। এই বিল্ড থেকে সরাসরি ডেলিভারি সচল রাখতে বিল্ড পরিবেশে TELEGRAM_BOT_TOKEN নিশ্চিত করুন।"
+                            } else {
+                                "সতর্কতা: অ্যাপের পরিবেশে TELEGRAM_BOT_TOKEN কনফিগার করা নেই। AI Studio-এর Secrets প্যানেলে বট ৮৯৮২৮৫৩১৯৭-এর সক্রিয় টোকেন সেট করুন।"
+                            }
                         } else {
                             "বট টোকেন কনফিগার করা আছে। নিচের 'বট সংযোগ যাচাই করুন (getMe API)' বাটনে ট্যাপ করে টেলিগ্রাম সার্ভারের সরাসরি রেসপন্স পরীক্ষা করুন।"
                         }

@@ -165,6 +165,16 @@ fun MainAppScaffold(
         }
     }
 
+    // Periodic foreground presence heartbeat so active users never appear offline while using the app
+    LaunchedEffect(viewModel.currentUserId) {
+        while (true) {
+            kotlinx.coroutines.delay(60_000L)
+            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                viewModel.setUserOnlineStatus(true)
+            }
+        }
+    }
+
     val currentDestination by viewModel.currentDestination.collectAsStateWithLifecycle()
     val selectedFeedFilter by viewModel.selectedFeedFilter.collectAsStateWithLifecycle()
     val selectedKhedmotCategory by viewModel.selectedKhedmotCategoryFilter.collectAsStateWithLifecycle()
@@ -173,6 +183,14 @@ fun MainAppScaffold(
     val feedbackBanner by viewModel.feedbackBanner.collectAsStateWithLifecycle()
     val errorBanner by viewModel.errorBanner.collectAsStateWithLifecycle()
     val isSubmitting by viewModel.isSubmitting.collectAsStateWithLifecycle()
+    val failedMessageDraft by viewModel.failedMessageDraft.collectAsStateWithLifecycle()
+
+    LaunchedEffect(isSubmitting) {
+        if (isSubmitting) {
+            kotlinx.coroutines.delay(16_000L)
+            viewModel.cancelSubmittingIfStuck()
+        }
+    }
 
     val userProfileState by viewModel.userProfileState.collectAsStateWithLifecycle()
     val feedPostsState by viewModel.feedPostsState.collectAsStateWithLifecycle()
@@ -568,8 +586,20 @@ fun MainAppScaffold(
                                 text = "আপলোড ও প্রক্রিয়াকরণ চলছে, অনুগ্রহ করে অপেক্ষা করুন...",
                                 color = QawmiDeepGreen,
                                 style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
                             )
+                            IconButton(
+                                onClick = { viewModel.cancelSubmittingIfStuck() },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "বন্ধ করুন",
+                                    tint = QawmiDeepGreen,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -1053,6 +1083,8 @@ fun MainAppScaffold(
                                 activePartnerProfile = activeChatPartnerProfile,
                                 userGroups = activeGroups,
                                 isSubmitting = isSubmitting,
+                                failedMessageDraft = failedMessageDraft,
+                                onClearFailedMessageDraft = { viewModel.clearFailedMessageDraft() },
                                 onSendMessage = { recId, recName, subj, body ->
                                     viewModel.sendMessage(recId, recName, subj, body)
                                 },

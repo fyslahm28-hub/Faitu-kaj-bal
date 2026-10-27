@@ -222,10 +222,13 @@ object ProfilePhotoHelper {
         }
     }
 
+    // Cooldown timestamp when Firebase Storage is unprovisioned/unreachable so multi-image posts & chats never stall repeatedly
+    private val storageUnavailableUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
+
     /**
      * Attempts to upload raw bytes to Firebase Storage across default and project-specific bucket URLs.
      * Returns the public/authenticated download URL if Firebase Storage is provisioned and reachable,
-     * or `null` if Firebase Storage is offline/unprovisioned.
+     * or `null` immediately if Firebase Storage is offline/unprovisioned.
      */
     private suspend fun tryUploadBytesToFirebaseStorage(
         storagePath: String,
@@ -234,28 +237,48 @@ object ProfilePhotoHelper {
         customMetadata: Map<String, String> = emptyMap()
     ): String? {
         if (bytes.isEmpty()) return null
-        return withTimeoutOrNull(4500L) {
-            for (bucketUrl in CANDIDATE_STORAGE_BUCKETS) {
-                try {
-                    val storage = if (bucketUrl.isBlank()) {
-                        FirebaseStorage.getInstance()
-                    } else {
-                        FirebaseStorage.getInstance(bucketUrl)
-                    }
-                    val storageRef = storage.reference.child(storagePath)
-                    val metaBuilder = StorageMetadata.Builder().setContentType(mimeType)
-                    customMetadata.forEach { (k, v) -> metaBuilder.setCustomMetadata(k, v) }
-                    storageRef.putBytes(bytes, metaBuilder.build()).await()
-                    val downloadUrl = storageRef.downloadUrl.await()?.toString()
-                    if (!downloadUrl.isNullOrBlank()) {
-                        return@withTimeoutOrNull downloadUrl
-                    }
-                } catch (_: Exception) {
-                    // Try next candidate bucket
-                }
-            }
-            null
+        val now = System.currentTimeMillis()
+        if (now < storageUnavailableUntilMs.get()) {
+            return null
         }
+        var currentTask: com.google.firebase.storage.UploadTask? = null
+        val uploaded = try {
+            withTimeoutOrNull(2200L) {
+                for (bucketUrl in CANDIDATE_STORAGE_BUCKETS) {
+                    try {
+                        val storage = if (bucketUrl.isBlank()) {
+                            FirebaseStorage.getInstance()
+                        } else {
+                            FirebaseStorage.getInstance(bucketUrl)
+                        }
+                        storage.maxUploadRetryTimeMillis = 1800L
+                        storage.maxOperationRetryTimeMillis = 1800L
+                        val storageRef = storage.reference.child(storagePath)
+                        val metaBuilder = StorageMetadata.Builder().setContentType(mimeType)
+                        customMetadata.forEach { (k, v) -> metaBuilder.setCustomMetadata(k, v) }
+                        val task = storageRef.putBytes(bytes, metaBuilder.build())
+                        currentTask = task
+                        task.await()
+                        val downloadUrl = storageRef.downloadUrl.await()?.toString()
+                        if (!downloadUrl.isNullOrBlank()) {
+                            storageUnavailableUntilMs.set(0L)
+                            return@withTimeoutOrNull downloadUrl
+                        }
+                    } catch (_: Throwable) {
+                        currentTask?.cancel()
+                    }
+                }
+                null
+            }
+        } finally {
+            if (currentTask?.isComplete == false) {
+                currentTask?.cancel()
+            }
+        }
+        if (uploaded.isNullOrBlank()) {
+            storageUnavailableUntilMs.set(System.currentTimeMillis() + 10 * 60 * 1000L)
+        }
+        return uploaded
     }
 
     /**
@@ -471,19 +494,36 @@ object ProfilePhotoHelper {
             val ext = if (isVideoUri) "mp4" else "jpg"
             val fileName = "media_${index}_${System.currentTimeMillis()}.$ext"
             val storagePath = "feed_posts/$safeAuthor/$safePostId/$fileName"
-            val uploadedFromUri = withTimeoutOrNull(4500L) {
+            val uploadedFromUri = if (System.currentTimeMillis() < storageUnavailableUntilMs.get()) {
+                null
+            } else {
+                var fileTask: com.google.firebase.storage.UploadTask? = null
                 try {
-                    val storageRef = FirebaseStorage.getInstance().reference.child(storagePath)
-                    val metadata = StorageMetadata.Builder()
-                        .setContentType(mimeType)
-                        .setCustomMetadata("authorId", safeAuthor)
-                        .setCustomMetadata("postId", safePostId)
-                        .setCustomMetadata("mediaType", mediaType)
-                        .build()
-                    storageRef.putFile(Uri.parse(item), metadata).await()
-                    storageRef.downloadUrl.await()?.toString()
-                } catch (_: Exception) {
-                    null
+                    withTimeoutOrNull(2200L) {
+                        try {
+                            val storage = FirebaseStorage.getInstance()
+                            storage.maxUploadRetryTimeMillis = 1800L
+                            storage.maxOperationRetryTimeMillis = 1800L
+                            val storageRef = storage.reference.child(storagePath)
+                            val metadata = StorageMetadata.Builder()
+                                .setContentType(mimeType)
+                                .setCustomMetadata("authorId", safeAuthor)
+                                .setCustomMetadata("postId", safePostId)
+                                .setCustomMetadata("mediaType", mediaType)
+                                .build()
+                            val task = storageRef.putFile(Uri.parse(item), metadata)
+                            fileTask = task
+                            task.await()
+                            storageRef.downloadUrl.await()?.toString()
+                        } catch (_: Throwable) {
+                            fileTask?.cancel()
+                            null
+                        }
+                    }
+                } finally {
+                    if (fileTask?.isComplete == false) {
+                        fileTask?.cancel()
+                    }
                 }
             }
             results.add(

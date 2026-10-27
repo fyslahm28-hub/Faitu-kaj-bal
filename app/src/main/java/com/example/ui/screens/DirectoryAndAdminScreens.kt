@@ -827,6 +827,8 @@ fun MessagesScreen(
     userGroups: List<ChatGroup> = emptyList(),
     initialSelectedImages: List<String> = emptyList(),
     isSubmitting: Boolean,
+    failedMessageDraft: com.example.ui.viewmodel.FailedMessageDraft? = null,
+    onClearFailedMessageDraft: () -> Unit = {},
     onSendMessage: (receiverId: String, receiverName: String, subject: String, body: String) -> Unit,
     onSendMessageWithImages: (
         receiverId: String,
@@ -873,6 +875,30 @@ fun MessagesScreen(
         mutableStateOf(initialSelectedImages.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE))
     }
     var photoLimitWarning by remember { mutableStateOf<String?>(null) }
+
+    // Periodic clock tick so online/offline freshness updates automatically every 30s
+    var presenceNowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(30_000L)
+            presenceNowMillis = System.currentTimeMillis()
+        }
+    }
+
+    // Restore message body and images if sending failed so user input is never lost
+    LaunchedEffect(failedMessageDraft?.timestampMs) {
+        val draft = failedMessageDraft ?: return@LaunchedEffect
+        if (body.isBlank() && draft.body.isNotBlank()) {
+            body = draft.body
+        }
+        if (selectedImages.isEmpty() && draft.imageUrls.isNotEmpty()) {
+            selectedImages = draft.imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
+        }
+        if (receiverId.isBlank() && draft.partnerId.isNotBlank()) {
+            receiverId = draft.partnerId
+        }
+        onClearFailedMessageDraft()
+    }
 
     // State for Long-Press Message Action Sheet, Edit Dialog, Delete Confirmation, Reaction Details, Reply, Emoji Picker, 3-Dot Menu, Theme Picker, Group Dialogs, and Image Viewer
     var selectedMessageForAction by remember { mutableStateOf<DirectMessage?>(null) }
@@ -1003,7 +1029,7 @@ fun MessagesScreen(
     }
 
     // Group messages into Conversation Threads (both 1-on-1 and Group conversations)
-    val conversationThreads = remember(allMessages, currentUserId, partnerProfiles, effectiveGroups) {
+    val conversationThreads = remember(allMessages, currentUserId, partnerProfiles, effectiveGroups, presenceNowMillis) {
         val directThreads = allMessages
             .filter { it.groupId.isBlank() && !it.receiverId.startsWith("GROUP:") }
             .groupBy { msg ->
@@ -1035,9 +1061,9 @@ fun MessagesScreen(
                     partnerId = partnerId,
                     partnerName = liveProfile?.fullName?.takeIf { it.isNotBlank() } ?: fallbackName,
                     partnerPhotoUrl = liveProfile?.photoUrl?.takeIf { it.isNotBlank() } ?: fallbackPhoto,
-                    isPartnerOnline = liveProfile?.isOnline == true,
+                    isPartnerOnline = liveProfile?.isCurrentlyOnline(presenceNowMillis) == true,
                     isPartnerTyping = isPartnerCurrentlyTypingToMe(liveProfile, currentUserId),
-                    partnerLastSeenAt = liveProfile?.lastSeenAt,
+                    partnerLastSeenAt = liveProfile?.effectiveLastSeenTimestamp(),
                     latestMessage = latest,
                     unreadCount = unreadFromPartner,
                     isGroup = false,
@@ -1211,9 +1237,10 @@ fun MessagesScreen(
     } else {
         resolvedPartnerProfile?.photoUrl.orEmpty()
     }
-    val isPartnerOnline = if (isGroupConversation) true else (resolvedPartnerProfile?.isOnline == true)
+    val isPartnerOnline = if (isGroupConversation) true else (resolvedPartnerProfile?.isCurrentlyOnline(presenceNowMillis) == true)
     val isPartnerTyping = if (isGroupConversation) false else isPartnerCurrentlyTypingToMe(resolvedPartnerProfile, currentUserId)
-    val partnerStatusText = remember(isGroupConversation, activeGroup, isPartnerTyping, isPartnerOnline, resolvedPartnerProfile?.lastSeenAt) {
+    val effectivePartnerLastSeen = resolvedPartnerProfile?.effectiveLastSeenTimestamp()
+    val partnerStatusText = remember(isGroupConversation, activeGroup, isPartnerTyping, isPartnerOnline, effectivePartnerLastSeen, presenceNowMillis) {
         if (isGroupConversation) {
             val count = activeGroup?.memberIds?.size ?: 1
             "গ্রুপ কথোপকথন • সদস্য: ${IslamicDateAndPrayerHelper.toBanglaDigits(count.toString())} জন"
@@ -1221,8 +1248,8 @@ fun MessagesScreen(
             "টাইপ করছেন… • • •"
         } else if (isPartnerOnline) {
             "অনলাইন (এখন সক্রিয়)"
-        } else if (resolvedPartnerProfile?.lastSeenAt != null) {
-            "অফলাইন • সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(resolvedPartnerProfile.lastSeenAt)}"
+        } else if (effectivePartnerLastSeen != null) {
+            "অফলাইন • সর্বশেষ সক্রিয়: ${IslamicDateAndPrayerHelper.formatRelativeTimeBangla(effectivePartnerLastSeen)}"
         } else {
             "অফলাইন"
         }
