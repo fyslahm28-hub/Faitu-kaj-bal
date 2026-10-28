@@ -126,7 +126,7 @@ class QawmiViewModel(
     }
 
     private fun runSubmittingAction(
-        timeoutMs: Long = 15_000L,
+        timeoutMs: Long = 30_000L,
         onTimeoutOrError: ((Throwable) -> Unit)? = null,
         block: suspend () -> Unit
     ) {
@@ -641,7 +641,21 @@ class QawmiViewModel(
         }
     }
 
+    private var lastTypingTargetId: String = ""
+    private var lastTypingState: Boolean = false
+    private var lastTypingSentAtMs: Long = 0L
+
     fun setTypingStatus(targetUserId: String, isTyping: Boolean) {
+        val now = System.currentTimeMillis()
+        if (isTyping && targetUserId == lastTypingTargetId && lastTypingState && (now - lastTypingSentAtMs) < 4_000L) {
+            return
+        }
+        if (!isTyping && !lastTypingState && targetUserId == lastTypingTargetId) {
+            return
+        }
+        lastTypingTargetId = if (isTyping) targetUserId else ""
+        lastTypingState = isTyping
+        lastTypingSentAtMs = now
         viewModelScope.launch {
             repository.updateTypingStatus(
                 targetUserId = targetUserId,
@@ -747,7 +761,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে পোস্টের শিরোনাম বা বিবরণ লিখুন।"
             return
         }
-        runSubmittingAction(timeoutMs = 18_000L) {
+        runSubmittingAction(timeoutMs = 35_000L) {
             val resolvedTitle = title.trim().ifBlank {
                 description.trim().lineSequence().firstOrNull()?.take(80)?.ifBlank { "দ্বীনি খেদমত ও আলোচনা" }
                     ?: "দ্বীনি খেদমত ও আলোচনা"
@@ -838,7 +852,7 @@ class QawmiViewModel(
             _errorBanner.value = "‘অন্যান্য’ বিভাগ নির্বাচন করলে অনুগ্রহ করে খেদমতের ধরনটি লিখুন।"
             return
         }
-        runSubmittingAction(timeoutMs = 18_000L) {
+        runSubmittingAction(timeoutMs = 35_000L) {
             val res = repository.updateOwnFeedPost(
                 post = post,
                 title = title,
@@ -1138,7 +1152,7 @@ class QawmiViewModel(
             return
         }
         runSubmittingAction(
-            timeoutMs = 15_000L,
+            timeoutMs = 30_000L,
             onTimeoutOrError = {
                 _failedMessageDraft.value = FailedMessageDraft(
                     partnerId = receiverId,
@@ -1711,7 +1725,7 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে বিজ্ঞপ্তির শিরোনাম ও বিবরণ পূরণ করুন।"
             return
         }
-        runSubmittingAction(timeoutMs = 18_000L) {
+        runSubmittingAction(timeoutMs = 35_000L) {
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
             val isFeatured = noticeType == "প্রধান" || noticeType == "জরুরি"
             val result = repository.createFeedPost(

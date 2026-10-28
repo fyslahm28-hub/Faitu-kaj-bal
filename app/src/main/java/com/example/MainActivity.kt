@@ -366,16 +366,19 @@ fun AppNavigation(
                     ensureFirebaseInitialized(app)
                     val databaseId = runCatching {
                         app.getString(R.string.firestore_database_id).trim()
-                    }.getOrDefault("")
-                    val db = runCatching {
-                        if (databaseId.isNotBlank() && databaseId != "(default)") {
-                            FirebaseFirestore.getInstance(databaseId)
+                    }.getOrDefault("").let { id ->
+                        if (id.isBlank() || id == "(default)") {
+                            "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c"
                         } else {
-                            FirebaseFirestore.getInstance()
+                            id
                         }
+                    }
+                    val db = runCatching {
+                        FirebaseFirestore.getInstance(databaseId)
                     }.getOrElse {
                         FirebaseFirestore.getInstance()
                     }
+                    runCatching { db.enableNetwork() }
                     val repository = QawmiRepository(db, resolvedAuth)
                     QawmiViewModel(
                         repository = repository,

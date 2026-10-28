@@ -105,7 +105,7 @@ class QawmiRepository(
                 "verifiedByAuthToken" to true,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(8_000L)
 
             enqueueAndDispatchTelegramNotification(
                 eventType = "ADMIN_LOGIN",
@@ -170,7 +170,7 @@ class QawmiRepository(
         }
 
         return try {
-            auth.sendPasswordResetEmail(normalizedEmail).await()
+            auth.sendPasswordResetEmail(normalizedEmail).awaitWithTimeout(8_000L)
             AdminSecurityHelper.recordPasswordResetRequest(normalizedEmail)
             if (auth.currentUser != null && AdminSecurityHelper.verifyServerTokenAdminClaims(auth.currentUser)) {
                 enqueueAndDispatchTelegramNotification(
@@ -248,8 +248,8 @@ class QawmiRepository(
     suspend fun getUserProfile(userId: String): UserProfile? {
         val path = "users/$userId"
         return try {
-            val snap = db.collection("users").document(userId).get().await()
-            if (snap.exists()) {
+            val snap = db.collection("users").document(userId).get().awaitWithTimeout(8_000L)
+            if (snap != null && snap.exists()) {
                 snap.toUserProfileOrNull()
             } else {
                 null
@@ -268,8 +268,8 @@ class QawmiRepository(
         val resolvedName = profile.fullName.trim().ifBlank { "আবদুল্লাহ" }
         val resolvedPhoto = profile.photoUrl.trim()
         return try {
-            val existingSnap = docRef.get().await()
-            if (!existingSnap.exists()) {
+            val existingSnap = docRef.getFastOrNull(3_500L)
+            if (existingSnap == null || !existingSnap.exists()) {
                 val payload = mapOf(
                     "userId" to uid,
                     "fullName" to resolvedName,
@@ -289,7 +289,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).await()
+                docRef.set(payload).awaitWithTimeout(8_000L)
             } else {
                 val existingPhoto = existingSnap.getString("photoUrl").orEmpty()
                 val finalPhoto = resolvedPhoto.ifBlank { existingPhoto }
@@ -309,7 +309,7 @@ class QawmiRepository(
                     "lastSeenAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.update(updatePayload).await()
+                docRef.update(updatePayload).awaitWithTimeout(8_000L)
             }
 
             // Propagate updated author photo (compacted/uploaded for feed) and name to user's authored feed posts
@@ -335,7 +335,7 @@ class QawmiRepository(
                         }
                         batch.update(postDoc.reference, updates)
                     }
-                    batch.commit().await()
+                    batch.commit().awaitWithTimeout(8_000L)
                 }
             } catch (_: Exception) {
                 // Non-fatal if user has no posts yet
@@ -354,8 +354,8 @@ class QawmiRepository(
         val uid = requireUserId()
         val docRef = db.collection("users").document(uid)
         return try {
-            val existingSnap = docRef.get().await()
-            if (!existingSnap.exists()) {
+            val existingSnap = docRef.getFastOrNull(3_500L)
+            if (existingSnap == null || !existingSnap.exists()) {
                 val payload = mapOf(
                     "userId" to uid,
                     "fullName" to fallbackName.trim().ifBlank { "আবদুল্লাহ" },
@@ -375,7 +375,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).await()
+                docRef.set(payload).awaitWithTimeout(8_000L)
             } else {
                 docRef.update(
                     mapOf(
@@ -384,7 +384,7 @@ class QawmiRepository(
                         "lastSeenAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
             }
 
             try {
@@ -404,7 +404,7 @@ class QawmiRepository(
                             )
                         )
                     }
-                    batch.commit().await()
+                    batch.commit().awaitWithTimeout(8_000L)
                 }
             } catch (_: Exception) {
             }
@@ -422,8 +422,8 @@ class QawmiRepository(
         val uid = auth.currentUser?.uid ?: return Result.success(Unit)
         val docRef = db.collection("users").document(uid)
         return try {
-            val snap = docRef.get().await()
-            if (snap.exists()) {
+            val snap = docRef.getFastOrNull(3_500L)
+            if (snap != null && snap.exists()) {
                 val updates = mutableMapOf<String, Any>(
                     "isOnline" to isOnline,
                     "lastSeenAt" to FieldValue.serverTimestamp(),
@@ -432,7 +432,7 @@ class QawmiRepository(
                 if (!isOnline) {
                     updates["typingToUserId"] = ""
                 }
-                docRef.update(updates).await()
+                docRef.update(updates).awaitWithTimeout(8_000L)
             } else {
                 val payload = mapOf(
                     "userId" to uid,
@@ -454,7 +454,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).await()
+                docRef.set(payload).awaitWithTimeout(8_000L)
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -474,8 +474,8 @@ class QawmiRepository(
         val resolvedTarget = if (isTyping && targetUserId.isNotBlank() && targetUserId != uid) targetUserId else ""
         val docRef = db.collection("users").document(uid)
         return try {
-            val snap = docRef.get().await()
-            if (snap.exists()) {
+            val snap = docRef.getFastOrNull(3_500L)
+            if (snap != null && snap.exists()) {
                 val existingTyping = snap.getString("typingToUserId").orEmpty()
                 if (!isTyping && existingTyping.isEmpty()) {
                     return Result.success(Unit)
@@ -488,7 +488,7 @@ class QawmiRepository(
                         "lastSeenAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
             } else if (isTyping) {
                 val payload = mapOf(
                     "userId" to uid,
@@ -511,7 +511,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).await()
+                docRef.set(payload).awaitWithTimeout(8_000L)
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -974,8 +974,8 @@ class QawmiRepository(
         if (attachmentId.isBlank()) return null
         val path = "feed_post_attachments/$attachmentId"
         return try {
-            val snap = db.collection("feed_post_attachments").document(attachmentId).get().await()
-            if (snap.exists()) {
+            val snap = db.collection("feed_post_attachments").document(attachmentId).get().awaitWithTimeout(8_000L)
+            if (snap != null && snap.exists()) {
                 val obj = snap.toObject(FeedPostExtendedAttachment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                 if (obj != null && obj.mediaDataUrl.isNotBlank()) {
                     ProfilePhotoHelper.cacheAttachmentDataUrl(attachmentId, obj.mediaDataUrl)
@@ -1043,7 +1043,7 @@ class QawmiRepository(
                                 "createdAt" to FieldValue.serverTimestamp(),
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
-                        ).await()
+                        ).awaitWithTimeout(8_000L)
                         itemDocId = attachDocId
                         if (primaryAttachId.isBlank()) primaryAttachId = attachDocId
                     }
@@ -1063,7 +1063,7 @@ class QawmiRepository(
                         "attachmentDocId" to primaryAttachId,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
                 sanitizedCount++
             }
             Result.success(sanitizedCount)
@@ -1082,8 +1082,8 @@ class QawmiRepository(
         val uid = requireUserId()
         val docRef = db.collection("feed_posts").document(post.id)
         return try {
-            val snap = docRef.get().await()
-            val existingPost = if (snap.exists()) {
+            val snap = docRef.getFastOrNull(3_500L)
+            val existingPost = if (snap != null && snap.exists()) {
                 snap.safeToObject(FeedPost::class.java) ?: post
             } else {
                 post
@@ -1106,7 +1106,7 @@ class QawmiRepository(
                     "userReactionNames" to updatedNames,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1165,17 +1165,17 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            commentRef.set(payload).await()
+            commentRef.set(payload).awaitWithTimeout(8_000L)
 
             try {
-                val postSnap = postRef.get().await()
-                val currentCount = (postSnap.getLong("commentCount")?.toInt() ?: post.commentCount).coerceAtLeast(0)
+                val postSnap = postRef.getFastOrNull(3_000L)
+                val currentCount = (postSnap?.getLong("commentCount")?.toInt() ?: post.commentCount).coerceAtLeast(0)
                 postRef.update(
                     mapOf(
                         "commentCount" to (currentCount + 1),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
             } catch (_: Exception) {
                 // Non-fatal if post counter update is skipped
             }
@@ -1217,7 +1217,7 @@ class QawmiRepository(
                     "isEdited" to true,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1235,18 +1235,18 @@ class QawmiRepository(
         requireUserId()
         val commentRef = db.collection("post_comments").document(commentId)
         return try {
-            commentRef.delete().await()
+            commentRef.delete().awaitWithTimeout(8_000L)
             if (postId.isNotBlank()) {
                 try {
                     val postRef = db.collection("feed_posts").document(postId)
-                    val snap = postRef.get().await()
-                    val existingCount = (snap.getLong("commentCount")?.toInt() ?: currentCommentCount).coerceAtLeast(1)
+                    val snap = postRef.getFastOrNull(3_000L)
+                    val existingCount = (snap?.getLong("commentCount")?.toInt() ?: currentCommentCount).coerceAtLeast(1)
                     postRef.update(
                         mapOf(
                             "commentCount" to (existingCount - 1).coerceAtLeast(0),
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                    ).await()
+                    ).awaitWithTimeout(8_000L)
                 } catch (_: Exception) {
                 }
             }
@@ -1306,14 +1306,14 @@ class QawmiRepository(
         createRes.onSuccess {
             try {
                 val origRef = db.collection("feed_posts").document(originalPost.id)
-                val snap = origRef.get().await()
-                val currentShares = (snap.getLong("shareCount")?.toInt() ?: originalPost.shareCount).coerceAtLeast(0)
+                val snap = origRef.getFastOrNull(3_000L)
+                val currentShares = (snap?.getLong("shareCount")?.toInt() ?: originalPost.shareCount).coerceAtLeast(0)
                 origRef.update(
                     mapOf(
                         "shareCount" to (currentShares + 1),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
             } catch (_: Exception) {
             }
         }
@@ -1346,7 +1346,7 @@ class QawmiRepository(
         requireUserId()
         val docRef = db.collection("feed_posts").document(postId)
         return try {
-            docRef.delete().await()
+            docRef.delete().awaitWithTimeout(8_000L)
             val currentUser = auth.currentUser
             if (currentUser != null && AdminSecurityHelper.verifyServerTokenAdminClaims(currentUser)) {
                 enqueueAndDispatchTelegramNotification(
@@ -1381,7 +1381,7 @@ class QawmiRepository(
                     "approvalStatus" to approvalStatus,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
 
             if (isVerified && post.authorId.isNotBlank() && post.authorId != uid) {
                 createNotification(
@@ -1422,7 +1422,7 @@ class QawmiRepository(
                     "isBoosted" to isBoosted,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
 
             if (isBoosted && post.authorId.isNotBlank() && post.authorId != uid) {
                 createNotification(
@@ -1472,7 +1472,7 @@ class QawmiRepository(
         val docRef = db.collection("users").document(uid).collection("bookmarks").document(post.id)
         return try {
             if (currentlyBookmarked) {
-                docRef.delete().await()
+                docRef.delete().awaitWithTimeout(8_000L)
                 Result.success(false)
             } else {
                 val payload = mapOf(
@@ -1488,7 +1488,7 @@ class QawmiRepository(
                     "authorId" to post.authorId,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).await()
+                docRef.set(payload).awaitWithTimeout(8_000L)
                 Result.success(true)
             }
         } catch (e: CancellationException) {
@@ -1728,7 +1728,7 @@ class QawmiRepository(
                     "status" to newStatus,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
 
             if (submission.applicantId.isNotBlank() && submission.applicantId != uid) {
                 val statusBangla = when (newStatus) {
@@ -1851,7 +1851,7 @@ class QawmiRepository(
                     "photoUrl" to photoUrl.trim(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1883,7 +1883,7 @@ class QawmiRepository(
                     "memberNames" to updatedNames,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1915,7 +1915,7 @@ class QawmiRepository(
                     "memberNames" to updatedNames,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2045,9 +2045,7 @@ class QawmiRepository(
         return try {
             if (!isGroupMessage) {
                 // Check block status between sender and receiver before sending 1-on-1 message
-                val senderSnap = kotlinx.coroutines.withTimeoutOrNull(3500L) {
-                    runCatching { db.collection("users").document(uid).get().await() }.getOrNull()
-                }
+                val senderSnap = db.collection("users").document(uid).getFastOrNull(1_800L)
                 val senderBlockedList = (senderSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -2057,9 +2055,7 @@ class QawmiRepository(
                     )
                 }
 
-                val receiverSnap = kotlinx.coroutines.withTimeoutOrNull(3500L) {
-                    runCatching { db.collection("users").document(receiverId).get().await() }.getOrNull()
-                }
+                val receiverSnap = db.collection("users").document(receiverId).getFastOrNull(1_800L)
                 val receiverBlockedList = (receiverSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -2162,7 +2158,7 @@ class QawmiRepository(
                         mapOf("readByUserIds" to updatedReadBy)
                     )
                 }
-                batch.commit().await()
+                batch.commit().awaitWithTimeout(8_000L)
                 Result.success(Unit)
             } catch (e: CancellationException) {
                 throw e
@@ -2204,7 +2200,7 @@ class QawmiRepository(
                         )
                     )
                 }
-                batch.commit().await()
+                batch.commit().awaitWithTimeout(8_000L)
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -2249,7 +2245,7 @@ class QawmiRepository(
             } else if (uid != message.senderId && uid == message.receiverId && message.receiverReaction.isNotBlank()) {
                 updates["receiverReaction"] = ""
             }
-            docRef.update(updates).await()
+            docRef.update(updates).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2287,7 +2283,7 @@ class QawmiRepository(
                     "isEdited" to true,
                     "editedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2313,15 +2309,15 @@ class QawmiRepository(
                         "deletedForSender" to true,
                         "deletedForUserIds" to updatedDeletedList
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
                 uid == message.receiverId -> docRef.update(
                     mapOf(
                         "deletedForReceiver" to true,
                         "deletedForUserIds" to updatedDeletedList
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
                 message.groupMemberIds.contains(uid) || message.groupId.isNotBlank() -> {
-                    docRef.update("deletedForUserIds", updatedDeletedList).await()
+                    docRef.update("deletedForUserIds", updatedDeletedList).awaitWithTimeout(8_000L)
                 }
                 else -> return Result.failure(IllegalStateException("অনুমোদনহীন অনুরোধ।"))
             }
@@ -2354,7 +2350,7 @@ class QawmiRepository(
                     "senderReaction" to "",
                     "userReactions" to emptyMap<String, String>()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2379,8 +2375,8 @@ class QawmiRepository(
         }
         val docRef = db.collection("users").document(uid)
         return try {
-            val snap = docRef.get().await()
-            if (!snap.exists()) {
+            val snap = docRef.getFastOrNull(3_500L)
+            if (snap == null || !snap.exists()) {
                 val initialBlocked = if (block) listOf(targetUserId) else emptyList()
                 val payload = mapOf(
                     "userId" to uid,
@@ -2403,7 +2399,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).await()
+                docRef.set(payload).awaitWithTimeout(8_000L)
             } else {
                 val currentBlocked = (snap.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
@@ -2419,7 +2415,7 @@ class QawmiRepository(
                         "typingToUserId" to "",
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
             }
             Result.success(block)
         } catch (e: CancellationException) {
@@ -2445,8 +2441,8 @@ class QawmiRepository(
         val safeTheme = themeSpec.trim().ifBlank { "EMERALD_CLASSIC" }
         val docRef = db.collection("users").document(uid)
         return try {
-            val snap = docRef.get().await()
-            if (!snap.exists()) {
+            val snap = docRef.getFastOrNull(3_500L)
+            if (snap == null || !snap.exists()) {
                 val payload = mapOf(
                     "userId" to uid,
                     "fullName" to defaultFullName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" },
@@ -2468,7 +2464,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).await()
+                docRef.set(payload).awaitWithTimeout(8_000L)
             } else {
                 val existingThemes = (snap.get("chatThemes") as? Map<*, *>)
                     ?.entries
@@ -2486,7 +2482,7 @@ class QawmiRepository(
                         "chatThemes" to existingThemes,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).await()
+                ).awaitWithTimeout(8_000L)
             }
             Result.success(safeTheme)
         } catch (e: CancellationException) {
@@ -2579,7 +2575,7 @@ class QawmiRepository(
                 "isRead" to false,
                 "createdAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(8_000L)
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
@@ -2629,7 +2625,7 @@ class QawmiRepository(
                 "notificationId" to notification.id,
                 "readAt" to FieldValue.serverTimestamp()
             )
-            readDocRef.set(readPayload).await()
+            readDocRef.set(readPayload).awaitWithTimeout(8_000L)
 
             if (notification.recipientId == uid) {
                 db.collection("notifications")
@@ -2671,7 +2667,7 @@ class QawmiRepository(
                     batch.update(notifRef, "isRead", true)
                 }
             }
-            batch.commit().await()
+            batch.commit().awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2777,7 +2773,7 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).await()
+            docRef.set(payload).awaitWithTimeout(8_000L)
             if (requireTelegramDeliverySuccess && !delivered) {
                 Result.failure(IllegalStateException(dispatchDiag.diagnosticMessageBangla))
             } else if (delivered) {
@@ -2930,7 +2926,7 @@ class QawmiRepository(
                     "isVerified" to verified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
 
             val resolvedAdmin = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" }
             val eventType = if (verified) "ADMIN_VERIFICATION" else "CONTENT_MODERATION"
@@ -3049,7 +3045,7 @@ class QawmiRepository(
                     )
                 )
             }
-            batch.commit().await()
+            batch.commit().awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -3080,7 +3076,7 @@ class QawmiRepository(
                     )
                 )
             }
-            batch.commit().await()
+            batch.commit().awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -3105,7 +3101,7 @@ class QawmiRepository(
                     "notificationId" to docId,
                     "readAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -3201,7 +3197,7 @@ class QawmiRepository(
             val batch = db.batch()
             batch.set(latestRef, latestPayload)
             batch.set(versionRef, versionPayload)
-            batch.commit().await()
+            batch.commit().awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
