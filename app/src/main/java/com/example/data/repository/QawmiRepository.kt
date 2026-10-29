@@ -477,10 +477,13 @@ class QawmiRepository(
         val resolvedTarget = if (isTyping && targetUserId.isNotBlank() && targetUserId != uid) targetUserId else ""
         val docRef = db.collection("users").document(uid)
         return try {
-            val snap = docRef.getFastOrNull(3_500L)
+            val snap = docRef.getCacheFirstOrNull(600L)
             if (snap != null && snap.exists()) {
                 val existingTyping = snap.getString("typingToUserId").orEmpty()
                 if (!isTyping && existingTyping.isEmpty()) {
+                    return Result.success(Unit)
+                }
+                if (isTyping && existingTyping == resolvedTarget) {
                     return Result.success(Unit)
                 }
                 docRef.update(
@@ -491,7 +494,7 @@ class QawmiRepository(
                         "lastSeenAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).awaitWithTimeout(8_000L)
+                ).awaitWithTimeout(4_000L)
             } else if (isTyping) {
                 val payload = mapOf(
                     "userId" to uid,
@@ -514,7 +517,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.set(payload).awaitWithTimeout(8_000L)
+                docRef.set(payload).awaitWithTimeout(4_000L)
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -2057,14 +2060,23 @@ class QawmiRepository(
             db.collection("messages").document()
         }
         return try {
+            // Idempotency check on retry: if this preallocated message ID was already saved by the sender,
+            // return success immediately without re-writing createdAt or duplicating work.
+            if (preallocatedMessageId.isNotBlank()) {
+                val existingDoc = docRef.getCacheFirstOrNull(500L)
+                if (existingDoc != null && existingDoc.exists() && existingDoc.getString("senderId") == uid) {
+                    return Result.success(docRef.id)
+                }
+            }
+
             if (!isGroupMessage) {
                 // Check block status between sender and receiver concurrently using cache-first reads
                 val (senderSnap, receiverSnap) = coroutineScope {
                     val senderDeferred = async {
-                        db.collection("users").document(uid).getCacheFirstOrNull(1_000L)
+                        runCatching { db.collection("users").document(uid).getCacheFirstOrNull(800L) }.getOrNull()
                     }
                     val receiverDeferred = async {
-                        db.collection("users").document(receiverId).getCacheFirstOrNull(1_000L)
+                        runCatching { db.collection("users").document(receiverId).getCacheFirstOrNull(800L) }.getOrNull()
                     }
                     senderDeferred.await() to receiverDeferred.await()
                 }
@@ -2098,10 +2110,13 @@ class QawmiRepository(
                 return Result.failure(IllegalArgumentException("অনুগ্রহ করে পয়গাম লিখুন অথবা ছবি নির্বাচন করুন।"))
             }
 
+            // Compact senderPhotoUrl synchronously so we never upload 100KB-240KB of raw Base64 avatar data on every chat message
+            val compactSenderPhoto = ProfilePhotoHelper.compactSenderPhotoForMessage(senderPhotoUrl.trim())
+
             val payload = mutableMapOf<String, Any>(
                 "senderId" to uid,
                 "senderName" to safeSenderName,
-                "senderPhotoUrl" to senderPhotoUrl.trim(),
+                "senderPhotoUrl" to compactSenderPhoto,
                 "receiverId" to if (isGroupMessage) "GROUP:$resolvedGroupId" else receiverId,
                 "receiverName" to safeReceiverName,
                 "subject" to subject.trim().ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }.take(195),
@@ -2120,14 +2135,7 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
-            docRef.set(payload).awaitStrictWithTimeout(10_000L)
-
-            // Clear typing status quickly without blocking message completion
-            kotlinx.coroutines.withTimeoutOrNull(600L) {
-                runCatching {
-                    updateTypingStatus(targetUserId = "", isTyping = false, defaultFullName = safeSenderName)
-                }
-            }
+            docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 8_000L)
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.
             // Bell icon notifications are strictly reserved for general notifications (NEW_CIRCULAR, APPLICATION, ANNOUNCEMENT, etc.).
@@ -2177,11 +2185,16 @@ class QawmiRepository(
     }
 
     suspend fun markMessageAsRead(messageId: String): Result<Unit> {
-        requireUserId()
+        val uid = requireUserId()
         if (messageId.isBlank()) return Result.success(Unit)
         val docRef = db.collection("messages").document(messageId)
         return try {
-            docRef.update("isRead", true).awaitWithTimeout(6_000L)
+            docRef.update(
+                mapOf(
+                    "isRead" to true,
+                    "readByUserIds" to FieldValue.arrayUnion(uid)
+                )
+            ).awaitWithTimeout(6_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

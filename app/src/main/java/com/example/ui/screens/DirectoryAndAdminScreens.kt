@@ -1203,14 +1203,19 @@ fun MessagesScreen(
         }
     }
 
-    // Real-time typing status broadcast to Firestore with auto-timeout (for 1-on-1 chats)
+    // Real-time typing status broadcast to Firestore with debounce and auto-timeout (for 1-on-1 chats)
+    var wasTypingInCurrentSession by remember(receiverId) { mutableStateOf(false) }
     LaunchedEffect(receiverId, body, isGroupConversation) {
         if (receiverId.isNotBlank() && !isGroupConversation) {
             if (body.isNotBlank()) {
+                delay(350L)
+                wasTypingInCurrentSession = true
                 onTypingStatusChanged(receiverId, true)
                 delay(2500L)
+                wasTypingInCurrentSession = false
                 onTypingStatusChanged(receiverId, false)
-            } else {
+            } else if (wasTypingInCurrentSession) {
+                wasTypingInCurrentSession = false
                 onTypingStatusChanged(receiverId, false)
             }
         }
@@ -3357,7 +3362,8 @@ fun MessagesScreen(
                                         photoLimitWarning = null
                                         replyingToMessage = null
                                         showEmojiPicker = false
-                                        if (!isGroupConversation) {
+                                        if (!isGroupConversation && wasTypingInCurrentSession) {
+                                            wasTypingInCurrentSession = false
                                             onTypingStatusChanged(receiverId, false)
                                         }
                                         onSendMessageWithImages(

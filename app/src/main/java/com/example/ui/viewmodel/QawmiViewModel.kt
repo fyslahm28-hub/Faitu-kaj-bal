@@ -363,7 +363,12 @@ class QawmiViewModel(
             .distinctBy { it.id }
             .map { msg ->
                 val localOverrideState = optimisticById[msg.id]?.localDeliveryState.orEmpty()
+                val isDeliveredOrSeenRemotely = msg.id in remoteIds && (
+                    msg.isRead ||
+                        msg.readByUserIds.any { it.isNotBlank() && it != currentUserId }
+                    )
                 val resolvedState = when {
+                    isDeliveredOrSeenRemotely -> "SENT"
                     localOverrideState == "SENDING" || localOverrideState == "FAILED" -> localOverrideState
                     else -> msg.localDeliveryState
                 }
@@ -1317,7 +1322,7 @@ class QawmiViewModel(
                     groupName = groupName.ifBlank { receiverName },
                     groupMemberIds = groupMemberIds
                 )
-                _errorBanner.value = "নেটওয়ার্ক ধীর হওয়ায় মেসেজটি পাঠানো যায়নি। 'পুনরায় পাঠান' বাটনে চাপ দিন।"
+                _errorBanner.value = "সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

@@ -54,39 +54,67 @@ fun handleFirestoreError(exception: Exception, operationType: OperationType, pat
 }
 
 fun translateFirestoreExceptionToBangla(exception: Exception): Exception {
-    val msg = exception.message.orEmpty()
+    var rootFirestoreEx: com.google.firebase.firestore.FirebaseFirestoreException? = null
+    var current: Throwable? = exception
+    while (current != null) {
+        if (current is com.google.firebase.firestore.FirebaseFirestoreException) {
+            rootFirestoreEx = current
+            break
+        }
+        current = current.cause
+    }
+
+    val codeName = runCatching { rootFirestoreEx?.code?.name }.getOrNull().orEmpty()
+    val msg = (rootFirestoreEx?.message ?: exception.message).orEmpty()
+
     if (msg.contains("exceeds", ignoreCase = true) ||
         msg.contains("1 MiB", ignoreCase = true) ||
         msg.contains("1048576", ignoreCase = true) ||
         msg.contains("maximum size", ignoreCase = true) ||
-        (msg.contains("INVALID_ARGUMENT", ignoreCase = true) && msg.contains("feed_posts", ignoreCase = true))
+        ((codeName == "INVALID_ARGUMENT" || msg.contains("INVALID_ARGUMENT", ignoreCase = true)) &&
+            msg.contains("feed_posts", ignoreCase = true))
     ) {
         return IllegalArgumentException(
             com.example.ui.util.ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA,
             exception
         )
     }
-    if (msg.contains("PERMISSION_DENIED", ignoreCase = true) ||
+    if (codeName == "PERMISSION_DENIED" ||
+        msg.contains("PERMISSION_DENIED", ignoreCase = true) ||
         msg.contains("Missing or insufficient permissions", ignoreCase = true)
     ) {
         return IllegalStateException(
-            "নিরাপত্তা বিধিমালার কারণে অনুরোধটি সম্পন্ন করা যায়নি। অনুগ্রহ করে লগইন ও প্রয়োজনীয় তথ্য যাচাই করে পুনরায় চেষ্টা করুন।",
+            "নিরাপত্তা বিধিমালার (Permission Denied) কারণে অনুরোধটি সম্পন্ন করা যায়নি। অনুগ্রহ করে লগইন ও প্রয়োজনীয় তথ্য যাচাই করে পুনরায় চেষ্টা করুন।",
             exception
         )
     }
-    if (msg.contains("UNAUTHENTICATED", ignoreCase = true)) {
+    if (codeName == "UNAUTHENTICATED" ||
+        msg.contains("UNAUTHENTICATED", ignoreCase = true)
+    ) {
         return IllegalStateException(
             "আপনার লগইন সেশন মেয়াদোত্তীর্ণ হয়েছে। অনুগ্রহ করে পুনরায় সাইন-ইন করে চেষ্টা করুন।",
             exception
         )
     }
-    if (msg.contains("NOT_FOUND", ignoreCase = true)) {
+    if (codeName == "INVALID_ARGUMENT" ||
+        msg.contains("INVALID_ARGUMENT", ignoreCase = true)
+    ) {
+        return IllegalArgumentException(
+            "প্রদত্ত তথ্যের ফরম্যাট বা আকার সঠিক নয়। অনুগ্রহ করে তথ্য যাচাই করে পুনরায় চেষ্টা করুন।",
+            exception
+        )
+    }
+    if (codeName == "NOT_FOUND" ||
+        msg.contains("NOT_FOUND", ignoreCase = true)
+    ) {
         return IllegalStateException(
             "কাঙ্ক্ষিত তথ্যটি সার্ভারে পাওয়া যায়নি। অনুগ্রহ করে পৃষ্ঠাটি রিফ্রেশ করে পুনরায় চেষ্টা করুন।",
             exception
         )
     }
-    if (msg.contains("UNAVAILABLE", ignoreCase = true) ||
+    if (codeName == "UNAVAILABLE" ||
+        codeName == "DEADLINE_EXCEEDED" ||
+        msg.contains("UNAVAILABLE", ignoreCase = true) ||
         msg.contains("DEADLINE_EXCEEDED", ignoreCase = true) ||
         msg.contains("Unable to resolve host", ignoreCase = true)
     ) {
@@ -127,27 +155,49 @@ suspend fun DocumentReference.getCacheFirstOrNull(serverTimeoutMs: Long = 1_200L
 }
 
 /**
- * Strictly awaits a Firestore write task within [timeoutMs] and throws an exception if the server
- * does not acknowledge the write in time or if the task fails. Used where UI must show genuine
- * server confirmation (`Sent ✓` vs `Failed !`) rather than optimistic background queuing.
+ * Awaits a Firestore message write task within [timeoutMs].
+ *
+ * - Immediately propagates any real server/security exception (`PERMISSION_DENIED`,
+ *   `UNAUTHENTICATED`, `INVALID_ARGUMENT`, `UNAVAILABLE`, etc.).
+ * - If the gRPC write stream takes longer than [timeoutMs] due to queued background mutations
+ *   even though the internet connection is active and the message document is staged in
+ *   Firestore's local cache without error, confirms local staging rather than throwing a false
+ *   "network disconnected" error.
  */
 @Suppress("UNCHECKED_CAST")
-suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitStrictWithTimeout(
+suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmation(
+    docRef: DocumentReference,
     timeoutMs: Long = 8_000L
 ): T {
     return try {
         kotlinx.coroutines.withTimeout(timeoutMs) {
-            this@awaitStrictWithTimeout.await()
+            this@awaitMessageWriteConfirmation.await()
         }
     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-        val taskException = this@awaitStrictWithTimeout.exception
+        val taskException = this@awaitMessageWriteConfirmation.exception
         if (taskException != null) {
             throw taskException
         }
-        if (this@awaitStrictWithTimeout.isSuccessful) {
-            return this@awaitStrictWithTimeout.result as T
+        if (this@awaitMessageWriteConfirmation.isSuccessful) {
+            return this@awaitMessageWriteConfirmation.result as T
         }
-        throw IllegalStateException("ইন্টারনেট সংযোগ ধীর বা বিচ্ছিন্ন হওয়ায় মেসেজটি পাঠানো যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।", e)
+        val stagedInCache = kotlinx.coroutines.withTimeoutOrNull(800L) {
+            runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
+        }
+        val postCheckException = this@awaitMessageWriteConfirmation.exception
+        if (postCheckException != null) {
+            throw postCheckException
+        }
+        if (stagedInCache != null && stagedInCache.exists()) {
+            this@awaitMessageWriteConfirmation.addOnFailureListener { asyncErr ->
+                Log.e("FirestoreError", "Async message write rejected by server: ${asyncErr.message}", asyncErr)
+            }
+            return null as T
+        }
+        throw IllegalStateException(
+            "সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। অনুগ্রহ করে 'পুনরায় পাঠান' বাটনে চাপ দিন।",
+            e
+        )
     }
 }
 

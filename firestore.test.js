@@ -219,7 +219,30 @@ test("DirectMessage: supports Islamic reactions, sender-only edit and delete-for
       subject: "খেদমত সংক্রান্ত যোগাযোগ",
       body: "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ",
       isRead: false,
+      readByUserIds: [ALICE_UID],
       createdAt: createdTs,
+    })
+  );
+
+  // Sender (Alice) can idempotently retry set() on the same preallocated messageId without PERMISSION_DENIED
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("msg_adv_1").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: BOB_UID,
+      receiverName: "জামিয়া দারুল উলুম",
+      subject: "খেদমত সংক্রান্ত যোগাযোগ",
+      body: "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ",
+      isRead: false,
+      readByUserIds: [ALICE_UID],
+      createdAt: nowDate(),
+    })
+  );
+
+  // Receiver (Bob) can acknowledge delivery via readByUserIds (`DELIVERED:<uid>`)
+  await assertSucceeds(
+    bobDb.collection("messages").doc("msg_adv_1").update({
+      readByUserIds: [ALICE_UID, `DELIVERED:${BOB_UID}`],
     })
   );
 
@@ -227,6 +250,7 @@ test("DirectMessage: supports Islamic reactions, sender-only edit and delete-for
   await assertSucceeds(
     bobDb.collection("messages").doc("msg_adv_1").update({
       isRead: true,
+      readByUserIds: [ALICE_UID, `DELIVERED:${BOB_UID}`, BOB_UID],
       receiverReaction: "DUA",
     })
   );
@@ -258,6 +282,15 @@ test("DirectMessage: supports Islamic reactions, sender-only edit and delete-for
   await assertSucceeds(
     bobDb.collection("messages").doc("msg_adv_1").update({
       deletedForReceiver: true,
+    })
+  );
+
+  // Outsider (not sender or receiver) CANNOT read or update a 1-on-1 message (even when groupMemberIds is omitted)
+  const outsiderDb = testEnv.authenticatedContext("outsider_uid_789").firestore();
+  await assertFails(outsiderDb.collection("messages").doc("msg_adv_1").get());
+  await assertFails(
+    outsiderDb.collection("messages").doc("msg_adv_1").update({
+      isRead: true,
     })
   );
 

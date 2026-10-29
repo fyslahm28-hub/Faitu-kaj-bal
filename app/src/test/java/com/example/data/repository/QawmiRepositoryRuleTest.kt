@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import com.example.base.FirestoreEmulatorTestBase
+import com.example.data.model.MessageDeliveryStatus
 import com.example.data.model.UserProfile
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.flow.first
@@ -236,6 +237,8 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("Self-messaging must be rejected", selfMsgRes.isFailure)
 
+        val preallocatedId = repo.generateMessageDocumentId()
+        val largeSenderAvatar = "data:image/jpeg;base64," + "A".repeat(120_000)
         val send1Res = withTimeout(5000L) {
             repo.sendDirectMessage(
                 senderName = "জামিয়া ইসলামিয়া মাদরাসা",
@@ -243,33 +246,66 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
                 receiverName = "মাওলানা মাহমুদুল হাসান",
                 subject = "সাক্ষাৎকারের আমন্ত্রণ",
                 body = "আসসালামু আলাইকুম, আগামী শুক্রবার সকাল ১০টায় মাদরাসায় তাশরীফ আনার অনুরোধ।",
-                senderPhotoUrl = "preset:muhtamim_royal"
+                senderPhotoUrl = largeSenderAvatar,
+                preallocatedMessageId = preallocatedId
             )
         }
         assertTrue("User A -> User B message failed: ${send1Res.exceptionOrNull()}", send1Res.isSuccess)
         val msg1Id = send1Res.getOrThrow()
+        assertEquals(preallocatedId, msg1Id)
+
+        // Idempotent retry with the exact same preallocatedMessageId must succeed and never duplicate
+        val retrySend1Res = withTimeout(5000L) {
+            repo.sendDirectMessage(
+                senderName = "জামিয়া ইসলামিয়া মাদরাসা",
+                receiverId = userBUid,
+                receiverName = "মাওলানা মাহমুদুল হাসান",
+                subject = "সাক্ষাৎকারের আমন্ত্রণ",
+                body = "আসসালামু আলাইকুম, আগামী শুক্রবার সকাল ১০টায় মাদরাসায় তাশরীফ আনার অনুরোধ।",
+                senderPhotoUrl = largeSenderAvatar,
+                preallocatedMessageId = preallocatedId
+            )
+        }
+        assertTrue("Idempotent retry of message failed: ${retrySend1Res.exceptionOrNull()}", retrySend1Res.isSuccess)
+        assertEquals(preallocatedId, retrySend1Res.getOrThrow())
 
         signInTestUser(userBEmail)
         val userBMessages = withTimeout(5000L) {
             repo.observeUserMessages(userBUid).first { list -> list.any { it.id == msg1Id } }
         }
+        assertEquals("Message should not be duplicated after retry", 1, userBMessages.count { it.id == msg1Id })
         val receivedMsg1 = userBMessages.first { it.id == msg1Id }
         assertEquals(userAUid, receivedMsg1.senderId)
         assertEquals(userBUid, receivedMsg1.receiverId)
-        assertEquals("preset:muhtamim_royal", receivedMsg1.senderPhotoUrl)
         assertFalse("Message 1 should initially be unread for User B", receivedMsg1.isRead)
 
-        val unreadForB = userBMessages.count { it.receiverId == userBUid && !it.isRead }
+        // User B's client acknowledges delivery (transitions sender status from SENT ✓ to DELIVERED ✓✓)
+        val ackRes = withTimeout(5000L) {
+            repo.acknowledgeMessagesDelivered(userBMessages)
+        }
+        assertTrue("acknowledgeMessagesDelivered failed: ${ackRes.exceptionOrNull()}", ackRes.isSuccess)
+
+        val userBMessagesAfterAck = withTimeout(5000L) {
+            repo.observeUserMessages(userBUid).first { list ->
+                list.any { it.id == msg1Id && it.resolveDeliveryStatus() == MessageDeliveryStatus.DELIVERED }
+            }
+        }
+        assertEquals(
+            MessageDeliveryStatus.DELIVERED,
+            userBMessagesAfterAck.first { it.id == msg1Id }.resolveDeliveryStatus()
+        )
+
+        val unreadForB = userBMessagesAfterAck.count { it.receiverId == userBUid && !it.isRead }
         assertEquals(1, unreadForB)
 
         val markConvRes = withTimeout(5000L) {
-            repo.markConversationMessagesAsRead(userAUid, userBMessages)
+            repo.markConversationMessagesAsRead(userAUid, userBMessagesAfterAck)
         }
         assertTrue("markConversationMessagesAsRead failed: ${markConvRes.exceptionOrNull()}", markConvRes.isSuccess)
 
         val userBMessagesAfterRead = withTimeout(5000L) {
             repo.observeUserMessages(userBUid).first { list ->
-                list.any { it.id == msg1Id && it.isRead }
+                list.any { it.id == msg1Id && it.isRead && it.resolveDeliveryStatus() == MessageDeliveryStatus.SEEN }
             }
         }
         assertEquals(0, userBMessagesAfterRead.count { it.receiverId == userBUid && !it.isRead })
@@ -296,8 +332,15 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         val msg1SeenByA = userAMessages.first { it.id == msg1Id }
         val msg2SeenByA = userAMessages.first { it.id == msg2Id }
         assertTrue("User A should see that msg1 was read by User B", msg1SeenByA.isRead)
+        assertEquals(MessageDeliveryStatus.SEEN, msg1SeenByA.resolveDeliveryStatus())
         assertFalse("User B's reply should initially be unread for User A", msg2SeenByA.isRead)
         assertEquals("ওয়া আলাইকুমুস সালাম, ইনশাআল্লাহ আমি যথাসময়ে উপস্থিত থাকব।", msg2SeenByA.body)
+
+        // User A marks msg2 as read via markMessageAsRead
+        val singleMarkReadRes = withTimeout(5000L) {
+            repo.markMessageAsRead(msg2Id)
+        }
+        assertTrue("markMessageAsRead failed: ${singleMarkReadRes.exceptionOrNull()}", singleMarkReadRes.isSuccess)
     }
 
     @Test

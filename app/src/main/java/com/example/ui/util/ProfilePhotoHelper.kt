@@ -243,7 +243,6 @@ object ProfilePhotoHelper {
         if (now < storageUnavailableUntilMs.get()) {
             return null
         }
-        var currentTask: com.google.firebase.storage.UploadTask? = null
         val uploaded = try {
             withTimeoutOrNull(2200L) {
                 for (bucketUrl in CANDIDATE_STORAGE_BUCKETS) {
@@ -259,7 +258,6 @@ object ProfilePhotoHelper {
                         val metaBuilder = StorageMetadata.Builder().setContentType(mimeType)
                         customMetadata.forEach { (k, v) -> metaBuilder.setCustomMetadata(k, v) }
                         val task = storageRef.putBytes(bytes, metaBuilder.build())
-                        currentTask = task
                         task.await()
                         val downloadUrl = storageRef.downloadUrl.await()?.toString()
                         if (!downloadUrl.isNullOrBlank()) {
@@ -267,15 +265,13 @@ object ProfilePhotoHelper {
                             return@withTimeoutOrNull downloadUrl
                         }
                     } catch (_: Throwable) {
-                        currentTask?.cancel()
+                        // Ignore and try next candidate or fall back locally
                     }
                 }
                 null
             }
-        } finally {
-            if (currentTask?.isComplete == false) {
-                currentTask?.cancel()
-            }
+        } catch (_: Throwable) {
+            null
         }
         if (uploaded.isNullOrBlank()) {
             storageUnavailableUntilMs.set(System.currentTimeMillis() + 10 * 60 * 1000L)
@@ -499,7 +495,6 @@ object ProfilePhotoHelper {
             val uploadedFromUri = if (System.currentTimeMillis() < storageUnavailableUntilMs.get()) {
                 null
             } else {
-                var fileTask: com.google.firebase.storage.UploadTask? = null
                 try {
                     withTimeoutOrNull(2200L) {
                         try {
@@ -514,18 +509,14 @@ object ProfilePhotoHelper {
                                 .setCustomMetadata("mediaType", mediaType)
                                 .build()
                             val task = storageRef.putFile(Uri.parse(item), metadata)
-                            fileTask = task
                             task.await()
                             storageRef.downloadUrl.await()?.toString()
                         } catch (_: Throwable) {
-                            fileTask?.cancel()
                             null
                         }
                     }
-                } finally {
-                    if (fileTask?.isComplete == false) {
-                        fileTask?.cancel()
-                    }
+                } catch (_: Throwable) {
+                    null
                 }
             }
             results.add(
@@ -581,6 +572,32 @@ object ProfilePhotoHelper {
                     }
                 }
             }
+            val compacted = ensureDataUrlFitsBudget(trimmed, MAX_INLINE_AVATAR_CHARS_IN_POST)
+            return if (compacted.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) {
+                compacted
+            } else {
+                ""
+            }
+        }
+        return trimmed.take(MAX_INLINE_AVATAR_CHARS_IN_POST)
+    }
+
+    /**
+     * Synchronously compacts `senderPhotoUrl` for direct/group messages without making any
+     * Firebase Storage network request. Ensures that 100KB–240KB raw Base64 profile photos
+     * never bloat message payloads or cause write timeouts.
+     */
+    fun compactSenderPhotoForMessage(senderPhotoUrl: String): String {
+        val trimmed = senderPhotoUrl.trim()
+        if (trimmed.isBlank()) return ""
+        if (trimmed.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) return trimmed
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("preset:", ignoreCase = true)
+        ) {
+            return trimmed.take(2000)
+        }
+        if (trimmed.startsWith("data:image", ignoreCase = true)) {
             val compacted = ensureDataUrlFitsBudget(trimmed, MAX_INLINE_AVATAR_CHARS_IN_POST)
             return if (compacted.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) {
                 compacted

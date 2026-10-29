@@ -31,7 +31,9 @@ service cloud.firestore {
 
     function hasUserBlocked(blockerUid, targetUid) {
       let path = /databases/$(database)/documents/users/$(blockerUid);
-      return exists(path) &&
+      return isValidId(blockerUid) &&
+             isValidId(targetUid) &&
+             exists(path) &&
              ('blockedUserIds' in get(path).data) &&
              get(path).data.blockedUserIds is list &&
              (targetUid in get(path).data.blockedUserIds);
@@ -403,21 +405,35 @@ service cloud.firestore {
 
       allow update: if isSignedIn() &&
                        isValidId(userId) &&
-                       isValidUserProfile(incoming()) &&
-                       incoming().userId == existing().userId &&
-                       incoming().createdAt == existing().createdAt && (
+                       (
+                         (isValidUserProfile(incoming()) &&
+                          incoming().userId == existing().userId &&
+                          incoming().createdAt == existing().createdAt && (
+                            (request.auth.uid == userId &&
+                             incoming().isVerified == existing().isVerified &&
+                             incoming().diff(existing()).affectedKeys().hasOnly([
+                               'fullName', 'accountType', 'district', 'designation',
+                               'qualification', 'experience', 'preferredDistricts', 'bio',
+                               'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
+                               'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
+                               'blockedUserIds', 'chatThemes', 'updatedAt'
+                             ])) ||
+                            (isAdmin() &&
+                             incoming().diff(existing()).affectedKeys().hasOnly([
+                               'isVerified', 'updatedAt'
+                             ]))
+                          )) ||
                          (request.auth.uid == userId &&
-                          incoming().isVerified == existing().isVerified &&
+                          (!('isOnline' in incoming()) || incoming().isOnline is bool) &&
+                          (!('lastSeenAt' in incoming()) || incoming().lastSeenAt == null || isValidTimestamp(incoming().lastSeenAt)) &&
+                          (!('typingToUserId' in incoming()) || (incoming().typingToUserId is string && incoming().typingToUserId.size() <= 128)) &&
+                          (!('typingUpdatedAt' in incoming()) || incoming().typingUpdatedAt == null || isValidTimestamp(incoming().typingUpdatedAt)) &&
+                          (!('blockedUserIds' in incoming()) || (incoming().blockedUserIds is list && incoming().blockedUserIds.size() <= 200)) &&
+                          (!('chatThemes' in incoming()) || (incoming().chatThemes is map && incoming().chatThemes.size() <= 200)) &&
+                          (!('updatedAt' in incoming()) || isValidTimestamp(incoming().updatedAt)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'fullName', 'accountType', 'district', 'designation',
-                            'qualification', 'experience', 'preferredDistricts', 'bio',
-                            'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
-                            'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
+                            'isOnline', 'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
                             'blockedUserIds', 'chatThemes', 'updatedAt'
-                          ])) ||
-                         (isAdmin() &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'isVerified', 'updatedAt'
                           ]))
                        );
 
@@ -777,10 +793,10 @@ service cloud.firestore {
       function isMessageParticipant(data) {
         return data.senderId == request.auth.uid ||
                data.receiverId == request.auth.uid ||
-               request.auth.uid in data.groupMemberIds;
+               ('groupMemberIds' in data && data.groupMemberIds is list && request.auth.uid in data.groupMemberIds);
       }
 
-      allow get: if isSignedIn() && isValidId(messageId) && isMessageParticipant(existing());
+      allow get: if isSignedIn() && isValidId(messageId) && (resource == null || isMessageParticipant(existing()));
       allow list: if isSignedIn() && isMessageParticipant(existing());
 
       allow create: if isSignedIn() &&
@@ -812,7 +828,8 @@ service cloud.firestore {
                        isMessageParticipant(existing()) &&
                        incoming().senderId == existing().senderId &&
                        incoming().receiverId == existing().receiverId &&
-                       incoming().createdAt == existing().createdAt &&
+                       (incoming().createdAt == existing().createdAt ||
+                        (request.auth.uid == existing().senderId && isValidTimestamp(incoming().createdAt))) &&
                        (!('senderReaction' in incoming()) || isValidReactionCode(incoming().senderReaction)) &&
                        (!('receiverReaction' in incoming()) || isValidReactionCode(incoming().receiverReaction)) &&
                        (!('userReactions' in incoming()) || (incoming().userReactions is map && incoming().userReactions.size() <= 50)) &&
@@ -833,9 +850,11 @@ service cloud.firestore {
                           incoming().body is string &&
                           incoming().body.size() <= 1500 &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'body', 'imageUrls', 'isEdited', 'editedAt', 'senderReaction',
-                            'userReactions', 'deletedForSender', 'deletedForUserIds',
-                            'isDeletedForEveryone', 'readByUserIds'
+                            'body', 'subject', 'senderName', 'senderPhotoUrl', 'receiverName',
+                            'groupId', 'groupName', 'groupMemberIds', 'imageUrls', 'isRead',
+                            'isEdited', 'editedAt', 'senderReaction', 'userReactions',
+                            'deletedForSender', 'deletedForUserIds', 'isDeletedForEveryone',
+                            'readByUserIds', 'createdAt'
                           ]))
                        );
 

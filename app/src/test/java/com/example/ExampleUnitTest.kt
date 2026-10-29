@@ -457,6 +457,35 @@ class ExampleUnitTest {
             com.example.ui.screens.detectAttachmentMediaCategory("https://example.com/cv_biodata.pdf")
         )
     }
+
+    @Test
+    fun firestoreErrorHandler_translatesDistinctErrorCodesWithoutFalseNetworkBlame() {
+        val permDenied = com.example.data.repository.translateFirestoreExceptionToBangla(
+            RuntimeException("PERMISSION_DENIED: Missing or insufficient permissions.")
+        )
+        assertTrue(permDenied.message.orEmpty().contains("Permission Denied"))
+        assertFalse(permDenied.message.orEmpty().contains("ইন্টারনেট সংযোগ ধীর"))
+
+        val unauth = com.example.data.repository.translateFirestoreExceptionToBangla(
+            RuntimeException("UNAUTHENTICATED: Request had invalid authentication credentials.")
+        )
+        assertTrue(unauth.message.orEmpty().contains("লগইন সেশন"))
+
+        val invalidArg = com.example.data.repository.translateFirestoreExceptionToBangla(
+            RuntimeException("INVALID_ARGUMENT: Document field value is invalid")
+        )
+        assertTrue(invalidArg.message.orEmpty().contains("ফরম্যাট বা আকার সঠিক নয়"))
+
+        val notFound = com.example.data.repository.translateFirestoreExceptionToBangla(
+            RuntimeException("NOT_FOUND: Some requested document was not found.")
+        )
+        assertTrue(notFound.message.orEmpty().contains("সার্ভারে পাওয়া যায়নি"))
+
+        val unavailable = com.example.data.repository.translateFirestoreExceptionToBangla(
+            RuntimeException("UNAVAILABLE: io exception")
+        )
+        assertTrue(unavailable.message.orEmpty().contains("সার্ভারের সাথে সংযোগ"))
+    }
 }
 
 
