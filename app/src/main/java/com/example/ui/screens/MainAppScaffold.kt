@@ -1148,6 +1148,9 @@ fun MainAppScaffold(
                                 },
                                 onRemoveGroupMember = { groupId, memberId ->
                                     viewModel.removeMemberFromChatGroup(groupId, memberId)
+                                },
+                                onRetryFailedMessage = { msg ->
+                                    viewModel.retryFailedMessage(msg)
                                 }
                             )
                         }

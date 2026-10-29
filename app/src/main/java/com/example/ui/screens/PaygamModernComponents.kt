@@ -53,6 +53,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -90,6 +91,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
 import com.example.data.model.IslamicReaction
+import com.example.data.model.MessageDeliveryStatus
 import com.example.data.model.ReplyQuoteInfo
 import com.example.data.model.UserProfile
 import com.example.ui.components.ChatAttachmentImage
@@ -958,10 +960,9 @@ fun PaygamReplyComposerBanner(
     onCancelReply: () -> Unit
 ) {
     val snippet = remember(replyingTo) {
-        if (replyingTo.imageUrls.isNotEmpty() && replyingTo.body.startsWith("📷")) {
-            "📷 ছবি (${IslamicDateAndPrayerHelper.toBanglaDigits(replyingTo.imageUrls.size.toString())}টি)"
-        } else {
-            replyingTo.body.ifBlank { "📷 ছবি" }
+        val cleanText = replyingTo.cleanDisplayBody()
+        cleanText.ifBlank {
+            formatAttachmentFallbackPreview(replyingTo.imageUrls)
         }
     }
     Surface(
@@ -1150,6 +1151,283 @@ fun PaygamEmojiPickerStrip(
                     }
                 }
             }
+        }
+    }
+}
+
+enum class AttachmentMediaCategory {
+    IMAGE,
+    VIDEO,
+    AUDIO,
+    DOCUMENT,
+    OTHER_FILE
+}
+
+fun detectAttachmentMediaCategory(urlOrUri: String): AttachmentMediaCategory {
+    val lower = urlOrUri.trim().lowercase().substringBefore('?')
+    return when {
+        lower.startsWith("data:video") ||
+            lower.endsWith(".mp4") ||
+            lower.endsWith(".mov") ||
+            lower.endsWith(".mkv") ||
+            lower.endsWith(".webm") ||
+            lower.endsWith(".avi") ||
+            lower.contains("/video/") -> AttachmentMediaCategory.VIDEO
+        lower.startsWith("data:audio") ||
+            lower.endsWith(".mp3") ||
+            lower.endsWith(".wav") ||
+            lower.endsWith(".ogg") ||
+            lower.endsWith(".m4a") ||
+            lower.endsWith(".aac") ||
+            lower.contains("/audio/") -> AttachmentMediaCategory.AUDIO
+        lower.startsWith("data:application/pdf") ||
+            lower.endsWith(".pdf") ||
+            lower.endsWith(".doc") ||
+            lower.endsWith(".docx") ||
+            lower.endsWith(".xls") ||
+            lower.endsWith(".xlsx") ||
+            lower.endsWith(".ppt") ||
+            lower.endsWith(".pptx") ||
+            lower.endsWith(".txt") -> AttachmentMediaCategory.DOCUMENT
+        lower.endsWith(".zip") ||
+            lower.endsWith(".rar") ||
+            lower.endsWith(".7z") ||
+            lower.startsWith("attachment:") -> AttachmentMediaCategory.OTHER_FILE
+        else -> AttachmentMediaCategory.IMAGE
+    }
+}
+
+fun formatAttachmentFallbackPreview(attachments: List<String>): String {
+    if (attachments.isEmpty()) return ""
+    val firstCategory = detectAttachmentMediaCategory(attachments.first())
+    return when (firstCategory) {
+        AttachmentMediaCategory.VIDEO -> "🎬 ভিডিও"
+        AttachmentMediaCategory.AUDIO -> "🎵 অডিও"
+        AttachmentMediaCategory.DOCUMENT -> "📄 ডকুমেন্ট"
+        AttachmentMediaCategory.OTHER_FILE -> "📎 ফাইল"
+        AttachmentMediaCategory.IMAGE -> "📷 ছবি"
+    }
+}
+
+/**
+ * Formats the conversation preview text in the Inbox list:
+ * - Plain text message -> shows only the text (never any image/file label).
+ * - Image/video/audio/document without caption -> shows concise media indicator.
+ */
+fun formatMessagePreviewForInbox(message: DirectMessage): String {
+    if (message.isDeletedForEveryone) {
+        return "🚫 মেসেজটি প্রত্যাহার করা হয়েছে"
+    }
+    val cleanBody = message.cleanDisplayBody()
+    if (cleanBody.isNotBlank()) {
+        return cleanBody
+    }
+    return formatAttachmentFallbackPreview(message.imageUrls)
+}
+
+/**
+ * Compact preview/icon card for Video, Audio, Document, or other file attachments inside a chat bubble.
+ */
+@Composable
+fun PaygamNonImageAttachmentCard(
+    urlOrUri: String,
+    category: AttachmentMediaCategory,
+    sentByMe: Boolean,
+    isUploading: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val (iconEmoji, typeLabel) = when (category) {
+        AttachmentMediaCategory.VIDEO -> "🎬" to "ভিডিও ফাইল"
+        AttachmentMediaCategory.AUDIO -> "🎵" to "অডিও ফাইল"
+        AttachmentMediaCategory.DOCUMENT -> "📄" to "ডকুমেন্ট ফাইল"
+        AttachmentMediaCategory.OTHER_FILE -> "📎" to "সংযুক্ত ফাইল"
+        AttachmentMediaCategory.IMAGE -> "📷" to "ছবি"
+    }
+    val fileName = remember(urlOrUri, typeLabel) {
+        val rawName = urlOrUri.substringBefore('?').substringAfterLast('/').trim()
+        if (rawName.isNotBlank() && !rawName.startsWith("data:") && rawName.length <= 45) {
+            rawName
+        } else {
+            typeLabel
+        }
+    }
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (sentByMe) Color(0x28FFFFFF) else Color(0xFFF1F7F4),
+        modifier = modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = if (sentByMe) Color(0x44FFFFFF) else QawmiMintBorder,
+                shape = RoundedCornerShape(10.dp)
+            )
+            .testTag("attachment_file_card_${category.name.lowercase()}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = if (sentByMe) Color(0x33FFFFFF) else QawmiMintSurface,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(text = iconEmoji, fontSize = 15.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = fileName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (sentByMe) Color.White else QawmiTextDark,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = typeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                        color = if (sentByMe) Color(0xFFD7E8E2) else QawmiTextSecondary
+                    )
+                }
+            }
+            if (isUploading) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .size(16.dp)
+                        .testTag("attachment_upload_progress_indicator"),
+                    color = if (sentByMe) QawmiGold else QawmiDeepGreen,
+                    strokeWidth = 2.dp
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Facebook Messenger-style Message Delivery Status Indicator for both Chat Bubbles and Inbox Thread Cards:
+ * - FAILED (`পাঠানো হয়নি`): Small red warning icon (`!`) + retry action (`পুনরায় পাঠান`)
+ * - SENDING: Compact spinner
+ * - SENT (`✓`): Single tick
+ * - DELIVERED (`✓✓`): Double tick
+ * - SEEN (`✓✓`): Colored double tick
+ */
+@Composable
+fun PaygamMessageStatusIndicator(
+    message: DirectMessage,
+    partnerProfile: UserProfile?,
+    isInBubble: Boolean,
+    nowMillis: Long,
+    onRetry: (() -> Unit)? = null
+) {
+    val status = message.resolveDeliveryStatus(partnerProfile = partnerProfile, nowMillis = nowMillis)
+    when (status) {
+        MessageDeliveryStatus.SENDING -> {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .size(11.dp)
+                    .testTag("message_status_sending_${message.id}"),
+                color = if (isInBubble) Color(0xFFE0F2F1) else QawmiDeepGreen,
+                strokeWidth = 1.6.dp
+            )
+        }
+        MessageDeliveryStatus.FAILED -> {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.testTag("message_status_failed_${message.id}")
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = QawmiAlertRed,
+                    modifier = Modifier.size(14.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "!",
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+                Text(
+                    text = "পাঠানো হয়নি",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    color = if (isInBubble) Color(0xFFFFCDD2) else QawmiAlertRed,
+                    fontWeight = FontWeight.Bold
+                )
+                if (onRetry != null) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = if (isInBubble) Color(0x33FFFFFF) else Color(0xFFFFEBEE),
+                        modifier = Modifier
+                            .clickable { onRetry() }
+                            .testTag("retry_failed_message_${message.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "পুনরায় পাঠান",
+                                tint = if (isInBubble) Color.White else QawmiAlertRed,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Text(
+                                text = "পুনরায় পাঠান",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 10.sp,
+                                color = if (isInBubble) Color.White else QawmiAlertRed,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        MessageDeliveryStatus.SENT -> {
+            Text(
+                text = "✓",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = if (isInBubble) 11.sp else 12.sp,
+                color = if (isInBubble) Color(0xFFD7E8E2) else QawmiTextSecondary,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testTag("message_status_sent_${message.id}")
+            )
+        }
+        MessageDeliveryStatus.DELIVERED -> {
+            Text(
+                text = "✓✓",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = if (isInBubble) 11.sp else 12.sp,
+                color = if (isInBubble) Color(0xFFE0F2F1) else QawmiTextSecondary,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testTag("message_status_delivered_${message.id}")
+            )
+        }
+        MessageDeliveryStatus.SEEN -> {
+            Text(
+                text = "✓✓",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = if (isInBubble) 11.sp else 12.sp,
+                color = if (isInBubble) Color(0xFF4FC3F7) else Color(0xFF0284C7),
+                fontWeight = FontWeight.ExtraBold,
+                modifier = Modifier.testTag("message_status_seen_${message.id}")
+            )
         }
     }
 }

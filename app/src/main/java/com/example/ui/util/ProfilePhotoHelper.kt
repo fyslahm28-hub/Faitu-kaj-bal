@@ -16,6 +16,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.firestore
 import com.google.firebase.storage.FirebaseStorage
 import com.google.firebase.storage.StorageMetadata
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
@@ -678,37 +680,41 @@ object ProfilePhotoHelper {
     suspend fun uploadChatImagesToFirebaseStorage(
         imageItems: List<String>,
         senderId: String
-    ): List<String> {
+    ): List<String> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
         val capped = imageItems.map { it.trim() }.filter { it.isNotBlank() }.take(MAX_CHAT_IMAGES_PER_MESSAGE)
-        if (capped.isEmpty()) return emptyList()
-        val maxBase64CharsPerImage = (560_000 / capped.size.coerceAtLeast(1)).coerceIn(95_000, 520_000)
+        if (capped.isEmpty()) return@withContext emptyList()
+        val maxBase64CharsPerImage = (360_000 / capped.size.coerceAtLeast(1)).coerceIn(85_000, 260_000)
         val safeSender = senderId.ifBlank { "user" }.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
 
-        return capped.mapIndexed { index, item ->
-            if (!item.startsWith("data:image")) {
-                item
-            } else {
-                val compactedItem = ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
-                val commaIdx = compactedItem.indexOf(',')
-                val bytes = if (commaIdx != -1) {
-                    try {
-                        Base64.decode(compactedItem.substring(commaIdx + 1), Base64.DEFAULT)
-                    } catch (_: Exception) {
-                        null
+        coroutineScope {
+            capped.mapIndexed { index, item ->
+                async {
+                    if (!item.startsWith("data:image")) {
+                        item
+                    } else {
+                        val compactedItem = ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
+                        val commaIdx = compactedItem.indexOf(',')
+                        val bytes = if (commaIdx != -1) {
+                            try {
+                                Base64.decode(compactedItem.substring(commaIdx + 1), Base64.DEFAULT)
+                            } catch (_: Exception) {
+                                null
+                            }
+                        } else null
+
+                        val uploadedUrl = if (bytes != null && bytes.isNotEmpty()) {
+                            tryUploadBytesToFirebaseStorage(
+                                storagePath = "chat_images/$safeSender/${System.currentTimeMillis()}_$index.jpg",
+                                bytes = bytes,
+                                mimeType = "image/jpeg",
+                                customMetadata = mapOf("senderId" to safeSender)
+                            )
+                        } else null
+
+                        uploadedUrl?.takeIf { it.isNotBlank() } ?: compactedItem
                     }
-                } else null
-
-                val uploadedUrl = if (bytes != null && bytes.isNotEmpty()) {
-                    tryUploadBytesToFirebaseStorage(
-                        storagePath = "chat_images/$safeSender/${System.currentTimeMillis()}_$index.jpg",
-                        bytes = bytes,
-                        mimeType = "image/jpeg",
-                        customMetadata = mapOf("senderId" to safeSender)
-                    )
-                } else null
-
-                uploadedUrl?.takeIf { it.isNotBlank() } ?: compactedItem
-            }
+                }
+            }.map { it.await() }
         }
     }
 

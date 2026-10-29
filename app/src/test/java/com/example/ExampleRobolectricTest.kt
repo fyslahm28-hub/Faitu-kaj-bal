@@ -1938,7 +1938,141 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("হোম স্ক্রিনে স্বাগতম").assertIsDisplayed()
     }
+
+    @Test
+    fun `MessagesScreen shows Facebook style Sent Delivered Seen and Failed statuses removes wrong image labels and retries without duplicates`() {
+        val myUid = "user_me_1"
+        val partnerUid = "user_partner_2"
+        val partnerName = "মাওলানা সালমান"
+        val nowSec = System.currentTimeMillis() / 1000L
+
+        var messagesList by mutableStateOf(
+            listOf(
+                // 1. Plain text message -> SENT (✓)
+                DirectMessage(
+                    id = "msg_sent_1",
+                    senderId = myUid,
+                    senderName = "আমি",
+                    receiverId = partnerUid,
+                    receiverName = partnerName,
+                    body = "শুধু সাধারণ টেক্সট মেসেজ",
+                    imageUrls = emptyList(),
+                    isRead = false,
+                    readByUserIds = listOf(myUid),
+                    createdAt = Timestamp(nowSec - 120, 0)
+                ),
+                // 2. Image message (with legacy auto-label in body) -> DELIVERED (✓✓), shows image preview only, no auto-label text
+                DirectMessage(
+                    id = "msg_deliv_2",
+                    senderId = myUid,
+                    senderName = "আমি",
+                    receiverId = partnerUid,
+                    receiverName = partnerName,
+                    body = "📷 ১ টি ছবি প্রেরণ করা হয়েছে",
+                    imageUrls = listOf("https://example.com/madrasa_view.jpg"),
+                    isRead = false,
+                    readByUserIds = listOf(myUid, "DELIVERED:$partnerUid"),
+                    createdAt = Timestamp(nowSec - 90, 0)
+                ),
+                // 3. Document + Seen message -> SEEN (colored ✓✓) & Document card
+                DirectMessage(
+                    id = "msg_seen_3",
+                    senderId = myUid,
+                    senderName = "আমি",
+                    receiverId = partnerUid,
+                    receiverName = partnerName,
+                    body = "",
+                    imageUrls = listOf("https://example.com/cv_biodata.pdf"),
+                    isRead = true,
+                    readByUserIds = listOf(myUid, partnerUid),
+                    createdAt = Timestamp(nowSec - 60, 0)
+                ),
+                // 4. Failed message -> FAILED (! + পাঠানো হয়নি + পুনরায় পাঠান)
+                DirectMessage(
+                    id = "msg_fail_4",
+                    senderId = myUid,
+                    senderName = "আমি",
+                    receiverId = partnerUid,
+                    receiverName = partnerName,
+                    body = "নেটওয়ার্ক বিচ্ছিন্ন থাকায় ব্যর্থ মেসেজ",
+                    imageUrls = emptyList(),
+                    isRead = false,
+                    readByUserIds = listOf(myUid),
+                    createdAt = Timestamp(nowSec - 20, 0)
+                ).apply {
+                    localDeliveryState = "FAILED"
+                }
+            )
+        )
+
+        var retriedMessageIds = mutableListOf<String>()
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1600.dp)) {
+                    MessagesScreen(
+                        messagesState = UiState.Success(messagesList),
+                        currentUserId = myUid,
+                        targetUser = partnerUid to partnerName,
+                        isSubmitting = true, // Even when isSubmitting=true, no wrong "পয়গাম ও ছবি প্রেরিত হচ্ছে…" banner should appear
+                        onSendMessage = { _, _, _, _ -> },
+                        onSelectRecipient = { _, _ -> },
+                        onMarkRead = {},
+                        onRetryFailedMessage = { failedMsg ->
+                            retriedMessageIds.add(failedMsg.id)
+                            // Update in-place using the exact same ID (never adding a duplicate item)
+                            messagesList = messagesList.map { existing ->
+                                if (existing.id == failedMsg.id) {
+                                    existing.copy().apply { localDeliveryState = "SENT" }
+                                } else {
+                                    existing
+                                }
+                            }.distinctBy { it.id }
+                        }
+                    )
+                }
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        // A. Scroll to index 0: Plain text message shows only text + SENT (✓); wrong banners/labels must NOT exist
+        composeTestRule.onNodeWithTag("conversation_messages_list").performScrollToIndex(0)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("শুধু সাধারণ টেক্সট মেসেজ", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithText("পয়গাম ও ছবি প্রেরিত হচ্ছে…", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithText("ছবি মেসেজ পাঠানো হচ্ছে", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("message_status_sent_msg_sent_1", useUnmergedTree = true).assertExists()
+
+        // B. Scroll to index 1: Image message shows image preview thumbnail + DELIVERED (✓✓), and NO auto-label text
+        composeTestRule.onNodeWithTag("conversation_messages_list").performScrollToIndex(1)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("message_image_msg_deliv_2_0", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithText("📷 ১ টি ছবি প্রেরণ করা হয়েছে", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("message_status_delivered_msg_deliv_2", useUnmergedTree = true).assertExists()
+
+        // C. Scroll to index 2: Document attachment card + SEEN (colored ✓✓)
+        composeTestRule.onNodeWithTag("conversation_messages_list").performScrollToIndex(2)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("attachment_file_card_document", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("message_status_seen_msg_seen_3", useUnmergedTree = true).assertExists()
+
+        // D. Scroll to index 3: Failed message shows FAILED (! + পাঠানো হয়নি + পুনরায় পাঠান) and retries in-place without duplicates
+        composeTestRule.onNodeWithTag("conversation_messages_list").performScrollToIndex(3)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("message_status_failed_msg_fail_4", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("retry_failed_message_msg_fail_4", useUnmergedTree = true).assertExists()
+
+        assertEquals(4, messagesList.size)
+        composeTestRule.onNodeWithTag("retry_failed_message_msg_fail_4", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(listOf("msg_fail_4"), retriedMessageIds)
+        assertEquals("Retrying a failed message must never create duplicate messages", 4, messagesList.size)
+        composeTestRule.onNodeWithTag("message_status_failed_msg_fail_4", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("message_status_sent_msg_fail_4", useUnmergedTree = true).assertExists()
+    }
 }
+
 
 
 

@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -39,6 +40,12 @@ data class FailedMessageDraft(
     val partnerId: String,
     val body: String,
     val imageUrls: List<String>,
+    val messageId: String = "",
+    val receiverName: String = "",
+    val subject: String = "খেদমত সংক্রান্ত যোগাযোগ",
+    val groupId: String = "",
+    val groupName: String = "",
+    val groupMemberIds: List<String> = emptyList(),
     val timestampMs: Long = System.currentTimeMillis()
 )
 
@@ -343,6 +350,7 @@ class QawmiViewModel(
         _localOptimisticMessages
     ) { list, locallyReadIds, optimisticMsgs ->
         val remoteIds = list.map { it.id }.toSet()
+        val optimisticById = optimisticMsgs.associateBy { it.id }
         val pendingOptimistic = optimisticMsgs.filter { it.id.isNotBlank() && it.id !in remoteIds }
         val combinedList = pendingOptimistic + list
         val deduplicated = combinedList
@@ -354,13 +362,22 @@ class QawmiViewModel(
             }
             .distinctBy { it.id }
             .map { msg ->
+                val localOverrideState = optimisticById[msg.id]?.localDeliveryState.orEmpty()
+                val resolvedState = when {
+                    localOverrideState == "SENDING" || localOverrideState == "FAILED" -> localOverrideState
+                    else -> msg.localDeliveryState
+                }
                 if (locallyReadIds.contains(msg.id)) {
                     msg.copy(
                         isRead = true,
                         readByUserIds = (msg.readByUserIds + currentUserId).distinct()
-                    )
+                    ).apply {
+                        localDeliveryState = resolvedState
+                    }
                 } else {
-                    msg
+                    msg.copy().apply {
+                        localDeliveryState = resolvedState
+                    }
                 }
             }
             .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
@@ -392,27 +409,34 @@ class QawmiViewModel(
             partnerIds.addAll(group.memberIds)
         }
         targetUser?.first?.takeIf { it.isNotBlank() && !it.startsWith("GROUP:") }?.let { partnerIds.add(it) }
-        partnerIds.filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
-    }.flatMapLatest { validIds ->
-        if (validIds.isEmpty()) {
-            flowOf(emptyMap())
-        } else {
-            val flows = validIds.map { partnerUid ->
-                repository.observeUserProfile(partnerUid)
-                    .map { profile -> partnerUid to profile }
-                    .catch { emit(partnerUid to null) }
-            }
-            combine(flows) { pairs ->
-                pairs.mapNotNull { (uid, profile) ->
-                    if (profile != null) uid to profile else null
-                }.toMap()
+        partnerIds
+            .filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
+            .sorted()
+            .take(30)
+    }
+        .distinctUntilChanged()
+        .flatMapLatest { validIds ->
+            if (validIds.isEmpty()) {
+                flowOf(emptyMap())
+            } else {
+                val flows = validIds.map { partnerUid ->
+                    repository.observeUserProfile(partnerUid)
+                        .map { profile -> partnerUid to profile }
+                        .catch { emit(partnerUid to null) }
+                }
+                combine(flows) { pairs ->
+                    pairs.mapNotNull { (uid, profile) ->
+                        if (profile != null) uid to profile else null
+                    }.toMap()
+                }
             }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     val activeChatPartnerProfileState: StateFlow<UserProfile?> = _messageTargetUser
-        .flatMapLatest { target ->
-            val uid = target?.first.orEmpty()
+        .map { it?.first.orEmpty() }
+        .distinctUntilChanged()
+        .flatMapLatest { uid ->
             if (uid.isBlank() || uid == currentUserId || uid.startsWith("GROUP:")) {
                 flowOf(null)
             } else {
@@ -503,10 +527,36 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
+    private val acknowledgedDeliveredIds = mutableSetOf<String>()
+
     init {
         setUserOnlineStatus(true)
         verifyAndSyncAdminIdentity()
         sanitizeExistingFeedPostsIfNeeded()
+        observeAndAcknowledgeDeliveredMessages()
+    }
+
+    private fun observeAndAcknowledgeDeliveredMessages() {
+        if (currentUserId.isBlank()) return
+        viewModelScope.launch {
+            val deliveredToken = "DELIVERED:$currentUserId"
+            messagesState.collect { state ->
+                val list = (state as? UiState.Success)?.data ?: return@collect
+                val unacknowledged = list.filter { msg ->
+                    msg.id.isNotBlank() &&
+                        msg.id !in acknowledgedDeliveredIds &&
+                        msg.senderId != currentUserId &&
+                        msg.receiverId == currentUserId &&
+                        !msg.isRead &&
+                        !msg.readByUserIds.contains(currentUserId) &&
+                        !msg.readByUserIds.contains(deliveredToken)
+                }
+                if (unacknowledged.isNotEmpty()) {
+                    unacknowledged.forEach { acknowledgedDeliveredIds.add(it.id) }
+                    repository.acknowledgeMessagesDelivered(unacknowledged)
+                }
+            }
+        }
     }
 
     private fun sanitizeExistingFeedPostsIfNeeded() {
@@ -1136,6 +1186,7 @@ class QawmiViewModel(
         groupId: String = "",
         groupName: String = "",
         groupMemberIds: List<String> = emptyList(),
+        existingMessageId: String = "",
         onSent: () -> Unit = {}
     ) {
         val isGroupMsg = groupId.isNotBlank() || receiverId.startsWith("GROUP:")
@@ -1143,7 +1194,9 @@ class QawmiViewModel(
             _errorBanner.value = "সঠিক প্রাপক নির্বাচন করুন।"
             return
         }
-        if (body.isBlank() && imageUrls.isEmpty()) {
+        val cleanBody = body.trim()
+        val cappedImages = imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5)
+        if (cleanBody.isBlank() && cappedImages.isEmpty()) {
             _errorBanner.value = "অনুগ্রহ করে পয়গামের কথা লিখুন অথবা ছবি যুক্ত করুন।"
             return
         }
@@ -1151,73 +1204,162 @@ class QawmiViewModel(
             _errorBanner.value = "একবারে সর্বোচ্চ ৫টি ছবি পাঠানো যাবে।"
             return
         }
-        runSubmittingAction(
-            timeoutMs = 30_000L,
-            onTimeoutOrError = {
-                _failedMessageDraft.value = FailedMessageDraft(
-                    partnerId = receiverId,
-                    body = body,
-                    imageUrls = imageUrls
-                )
-            }
-        ) {
-            val senderName = resolveActorDisplayName("দ্বীনি ভাই")
-            val senderPhoto = resolveActorPhotoUrl()
-            val resolvedGroupId = groupId.ifBlank {
-                if (receiverId.startsWith("GROUP:")) receiverId.removePrefix("GROUP:") else ""
-            }
-            val result = repository.sendDirectMessage(
-                senderName = senderName,
-                receiverId = receiverId,
-                receiverName = receiverName,
-                subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                body = body,
-                senderPhotoUrl = senderPhoto,
-                imageUrls = imageUrls.take(5),
-                groupId = resolvedGroupId,
-                groupName = groupName.ifBlank { receiverName },
-                groupMemberIds = groupMemberIds
-            )
-            result.onSuccess { msgId ->
-                _failedMessageDraft.value = null
-                if (msgId.isNotBlank()) {
-                    val optimisticBody = body.trim().ifBlank {
-                        if (imageUrls.isNotEmpty()) "📷 ${imageUrls.size} টি ছবি প্রেরণ করা হয়েছে" else ""
-                    }
-                    val optimisticMsg = DirectMessage(
-                        id = msgId,
-                        senderId = currentUserId,
-                        senderName = senderName,
-                        senderPhotoUrl = senderPhoto,
-                        receiverId = if (isGroupMsg) "GROUP:$resolvedGroupId" else receiverId,
-                        receiverName = receiverName,
-                        groupId = resolvedGroupId,
-                        groupName = groupName.ifBlank { receiverName },
-                        groupMemberIds = if (isGroupMsg) (groupMemberIds + currentUserId).distinct() else emptyList(),
-                        subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                        body = optimisticBody,
-                        imageUrls = imageUrls.take(5),
-                        isRead = false,
-                        readByUserIds = listOf(currentUserId),
-                        createdAt = Timestamp.now()
-                    )
-                    _localOptimisticMessages.value = (listOf(optimisticMsg) + _localOptimisticMessages.value).distinctBy { it.id }
-                }
-                _feedbackBanner.value = if (imageUrls.isNotEmpty()) {
-                    "আলহামদুলিল্লাহ, ছবিসহ আপনার পয়গাম প্রেরিত হয়েছে।"
-                } else {
-                    "আলহামদুলিল্লাহ, আপনার পয়গাম প্রেরিত হয়েছে।"
-                }
-                onSent()
-            }.onFailure { err ->
-                _failedMessageDraft.value = FailedMessageDraft(
-                    partnerId = receiverId,
-                    body = body,
-                    imageUrls = imageUrls
-                )
-                _errorBanner.value = err.localizedMessage ?: "পয়গাম পাঠাতে ত্রুটি হয়েছে।"
+
+        val senderName = resolveActorDisplayName("দ্বীনি ভাই")
+        val senderPhoto = resolveActorPhotoUrl()
+        val resolvedGroupId = groupId.ifBlank {
+            if (receiverId.startsWith("GROUP:")) receiverId.removePrefix("GROUP:") else ""
+        }
+        val messageId = existingMessageId.trim().ifBlank {
+            runCatching { repository.generateMessageDocumentId() }.getOrDefault("").ifBlank {
+                "msg_${currentUserId.take(6)}_${System.currentTimeMillis()}"
             }
         }
+
+        // Preserve original timestamp when retrying a failed message so message order never jumps
+        val existingCreatedAt = _localOptimisticMessages.value
+            .firstOrNull { it.id == messageId }
+            ?.createdAt
+            ?: Timestamp.now()
+
+        val optimisticMsg = DirectMessage(
+            id = messageId,
+            senderId = currentUserId,
+            senderName = senderName,
+            senderPhotoUrl = senderPhoto,
+            receiverId = if (isGroupMsg) "GROUP:$resolvedGroupId" else receiverId,
+            receiverName = receiverName,
+            groupId = resolvedGroupId,
+            groupName = groupName.ifBlank { receiverName },
+            groupMemberIds = if (isGroupMsg) (groupMemberIds + currentUserId).distinct() else emptyList(),
+            subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+            body = cleanBody,
+            imageUrls = cappedImages,
+            isRead = false,
+            readByUserIds = listOf(currentUserId),
+            createdAt = existingCreatedAt
+        ).apply {
+            localDeliveryState = "SENDING"
+        }
+
+        // Insert or update in-place by messageId so retrying NEVER duplicates the message
+        _localOptimisticMessages.value = (
+            listOf(optimisticMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
+        ).distinctBy { it.id }
+
+        // Clear composer draft immediately so the user can continue typing without UI freeze
+        onSent()
+
+        viewModelScope.launch {
+            _errorBanner.value = null
+            try {
+                val result = withTimeout(22_000L) {
+                    repository.sendDirectMessage(
+                        senderName = senderName,
+                        receiverId = receiverId,
+                        receiverName = receiverName,
+                        subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+                        body = cleanBody,
+                        senderPhotoUrl = senderPhoto,
+                        imageUrls = cappedImages,
+                        groupId = resolvedGroupId,
+                        groupName = groupName.ifBlank { receiverName },
+                        groupMemberIds = groupMemberIds,
+                        preallocatedMessageId = messageId
+                    )
+                }
+                result.onSuccess { confirmedId ->
+                    val finalId = confirmedId.ifBlank { messageId }
+                    if (_failedMessageDraft.value?.messageId == finalId || _failedMessageDraft.value?.partnerId == receiverId) {
+                        _failedMessageDraft.value = null
+                    }
+                    val sentMsg = optimisticMsg.copy(id = finalId).apply {
+                        localDeliveryState = "SENT"
+                    }
+                    _localOptimisticMessages.value = (
+                        listOf(sentMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId || it.id == finalId }
+                    ).distinctBy { it.id }
+                }.onFailure { err ->
+                    val failedMsg = optimisticMsg.copy().apply {
+                        localDeliveryState = "FAILED"
+                    }
+                    _localOptimisticMessages.value = (
+                        listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
+                    ).distinctBy { it.id }
+                    _failedMessageDraft.value = FailedMessageDraft(
+                        partnerId = receiverId,
+                        body = cleanBody,
+                        imageUrls = cappedImages,
+                        messageId = messageId,
+                        receiverName = receiverName,
+                        subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+                        groupId = resolvedGroupId,
+                        groupName = groupName.ifBlank { receiverName },
+                        groupMemberIds = groupMemberIds
+                    )
+                    _errorBanner.value = err.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
+                }
+            } catch (e: TimeoutCancellationException) {
+                val failedMsg = optimisticMsg.copy().apply {
+                    localDeliveryState = "FAILED"
+                }
+                _localOptimisticMessages.value = (
+                    listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
+                ).distinctBy { it.id }
+                _failedMessageDraft.value = FailedMessageDraft(
+                    partnerId = receiverId,
+                    body = cleanBody,
+                    imageUrls = cappedImages,
+                    messageId = messageId,
+                    receiverName = receiverName,
+                    subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+                    groupId = resolvedGroupId,
+                    groupName = groupName.ifBlank { receiverName },
+                    groupMemberIds = groupMemberIds
+                )
+                _errorBanner.value = "নেটওয়ার্ক ধীর হওয়ায় মেসেজটি পাঠানো যায়নি। 'পুনরায় পাঠান' বাটনে চাপ দিন।"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val failedMsg = optimisticMsg.copy().apply {
+                    localDeliveryState = "FAILED"
+                }
+                _localOptimisticMessages.value = (
+                    listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
+                ).distinctBy { it.id }
+                _failedMessageDraft.value = FailedMessageDraft(
+                    partnerId = receiverId,
+                    body = cleanBody,
+                    imageUrls = cappedImages,
+                    messageId = messageId,
+                    receiverName = receiverName,
+                    subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+                    groupId = resolvedGroupId,
+                    groupName = groupName.ifBlank { receiverName },
+                    groupMemberIds = groupMemberIds
+                )
+                _errorBanner.value = e.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
+            }
+        }
+    }
+
+    /**
+     * Retries a failed message in-place using its existing document ID so duplicate messages are never created.
+     */
+    fun retryFailedMessage(message: DirectMessage) {
+        if (message.id.isBlank()) return
+        val cleanBody = message.cleanDisplayBody()
+        sendMessage(
+            receiverId = message.receiverId,
+            receiverName = message.receiverName,
+            subject = message.subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+            body = cleanBody,
+            imageUrls = message.imageUrls,
+            groupId = message.groupId,
+            groupName = message.groupName,
+            groupMemberIds = message.groupMemberIds,
+            existingMessageId = message.id
+        )
     }
 
     fun createChatGroup(

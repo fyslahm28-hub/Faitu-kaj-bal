@@ -29,10 +29,13 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.QuerySnapshot
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 class QawmiRepository(
@@ -734,7 +737,7 @@ class QawmiRepository(
 
             docRef.set(payload).awaitWithTimeout(10_000L)
 
-            // Deliver community notification to other users (observeNotifications excludes senderId == uid)
+            // Deliver community notification and Telegram Admin log concurrently with bounded timeout so post publishing returns fast
             val isCircular = postType == "JOB_CIRCULAR"
             val isGeneral = postType == "GENERAL_POST"
             val notifTitle = when {
@@ -748,29 +751,31 @@ class QawmiRepository(
                 else -> "${title.trim()} (${qualification.trim()}) '${resolvedDesignation}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
             }
             val resolvedSender = authorName.trim().ifBlank { title.trim() }
-            kotlinx.coroutines.withTimeoutOrNull(3000L) {
-                runCatching {
-                    createNotification(
-                        recipientId = "ALL_USERS",
-                        senderName = resolvedSender,
-                        title = notifTitle,
-                        message = notifMsg.take(500),
-                        type = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
-                        referenceId = docRef.id
-                    )
-                }
-            }
-
-            // Enqueue & dispatch Telegram notification for Admin oversight with bounded timeout so post publishing never hangs
-            kotlinx.coroutines.withTimeoutOrNull(3500L) {
-                runCatching {
-                    enqueueAndDispatchTelegramNotification(
-                        eventType = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
-                        title = notifTitle,
-                        message = "$notifMsg (যোগাযোগ: ${contactNumber.trim().ifBlank { "অপ্রদত্ত" }})",
-                        actorName = resolvedSender,
-                        referenceId = docRef.id
-                    )
+            kotlinx.coroutines.withTimeoutOrNull(2_500L) {
+                coroutineScope {
+                    launch {
+                        runCatching {
+                            createNotification(
+                                recipientId = "ALL_USERS",
+                                senderName = resolvedSender,
+                                title = notifTitle,
+                                message = notifMsg.take(500),
+                                type = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
+                                referenceId = docRef.id
+                            )
+                        }
+                    }
+                    launch {
+                        runCatching {
+                            enqueueAndDispatchTelegramNotification(
+                                eventType = if (isCircular) "NEW_CIRCULAR" else "NEW_APPLICATION",
+                                title = notifTitle,
+                                message = "$notifMsg (যোগাযোগ: ${contactNumber.trim().ifBlank { "অপ্রদত্ত" }})",
+                                actorName = resolvedSender,
+                                referenceId = docRef.id
+                            )
+                        }
+                    }
                 }
             }
 
@@ -2016,6 +2021,10 @@ class QawmiRepository(
         }
     }
 
+    fun generateMessageDocumentId(): String {
+        return db.collection("messages").document().id
+    }
+
     suspend fun sendDirectMessage(
         senderName: String,
         receiverId: String,
@@ -2026,7 +2035,8 @@ class QawmiRepository(
         imageUrls: List<String> = emptyList(),
         groupId: String = "",
         groupName: String = "",
-        groupMemberIds: List<String> = emptyList()
+        groupMemberIds: List<String> = emptyList(),
+        preallocatedMessageId: String = ""
     ): Result<String> {
         val uid = requireUserId()
         val isGroupMessage = groupId.isNotBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
@@ -2041,11 +2051,23 @@ class QawmiRepository(
         val safeReceiverName = receiverName.trim().ifBlank {
             if (isGroupMessage) groupName.trim().ifBlank { "গ্রুপ কথোপকথন" } else "সম্মানিত প্রাপক"
         }
-        val docRef = db.collection("messages").document()
+        val docRef = if (preallocatedMessageId.isNotBlank()) {
+            db.collection("messages").document(preallocatedMessageId.trim())
+        } else {
+            db.collection("messages").document()
+        }
         return try {
             if (!isGroupMessage) {
-                // Check block status between sender and receiver before sending 1-on-1 message
-                val senderSnap = db.collection("users").document(uid).getFastOrNull(1_800L)
+                // Check block status between sender and receiver concurrently using cache-first reads
+                val (senderSnap, receiverSnap) = coroutineScope {
+                    val senderDeferred = async {
+                        db.collection("users").document(uid).getCacheFirstOrNull(1_000L)
+                    }
+                    val receiverDeferred = async {
+                        db.collection("users").document(receiverId).getCacheFirstOrNull(1_000L)
+                    }
+                    senderDeferred.await() to receiverDeferred.await()
+                }
                 val senderBlockedList = (senderSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -2055,7 +2077,6 @@ class QawmiRepository(
                     )
                 }
 
-                val receiverSnap = db.collection("users").document(receiverId).getFastOrNull(1_800L)
                 val receiverBlockedList = (receiverSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -2070,14 +2091,10 @@ class QawmiRepository(
                 imageItems = imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE),
                 senderId = uid
             )
-            val resolvedBody = body.trim().ifBlank {
-                if (uploadedImages.isNotEmpty()) {
-                    "📷 ${uploadedImages.size} টি ছবি প্রেরণ করা হয়েছে"
-                } else {
-                    ""
-                }
-            }
-            if (resolvedBody.isBlank()) {
+            // Keep body strictly as the user's actual text (empty string when sending images without caption)
+            // so no artificial "📷 ১ টি ছবি প্রেরণ করা হয়েছে" or "ছবি মেসেজ পাঠানো হচ্ছে" text is injected.
+            val resolvedBody = body.trim()
+            if (resolvedBody.isBlank() && uploadedImages.isEmpty()) {
                 return Result.failure(IllegalArgumentException("অনুগ্রহ করে পয়গাম লিখুন অথবা ছবি নির্বাচন করুন।"))
             }
 
@@ -2103,10 +2120,10 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
-            docRef.set(payload).awaitWithTimeout(10_000L)
+            docRef.set(payload).awaitStrictWithTimeout(10_000L)
 
-            // Clear typing status immediately upon sending a message without blocking completion
-            kotlinx.coroutines.withTimeoutOrNull(1500L) {
+            // Clear typing status quickly without blocking message completion
+            kotlinx.coroutines.withTimeoutOrNull(600L) {
                 runCatching {
                     updateTypingStatus(targetUserId = "", isTyping = false, defaultFullName = safeSenderName)
                 }
@@ -2120,6 +2137,42 @@ class QawmiRepository(
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
             Result.failure(translateFirestoreExceptionToBangla(e))
+        }
+    }
+
+    /**
+     * Marks incoming unread messages as delivered (`DELIVERED:<uid>` in `readByUserIds` while keeping
+     * `isRead = false`) so the sender's real-time snapshot listener immediately transitions from
+     * Sent (`✓`) to Delivered (`✓✓`) when the recipient's device receives the message.
+     */
+    suspend fun acknowledgeMessagesDelivered(messages: List<DirectMessage>): Result<Unit> {
+        val uid = auth.currentUser?.uid?.takeIf { it.isNotBlank() } ?: return Result.success(Unit)
+        val deliveredToken = "DELIVERED:$uid"
+        val pendingDelivery = messages.filter { msg ->
+            msg.id.isNotBlank() &&
+                msg.senderId != uid &&
+                msg.receiverId == uid &&
+                !msg.isRead &&
+                !msg.readByUserIds.contains(uid) &&
+                !msg.readByUserIds.contains(deliveredToken) &&
+                msg.readByUserIds.size < 48
+        }.take(20)
+        if (pendingDelivery.isEmpty()) return Result.success(Unit)
+        return try {
+            val batch = db.batch()
+            for (msg in pendingDelivery) {
+                val updatedReadBy = (msg.readByUserIds + deliveredToken).distinct().take(50)
+                batch.update(
+                    db.collection("messages").document(msg.id),
+                    mapOf("readByUserIds" to updatedReadBy)
+                )
+            }
+            batch.commit().awaitWithTimeout(5_000L)
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
@@ -2174,17 +2227,22 @@ class QawmiRepository(
             .forEach { unreadMap[it.id] = it.readByUserIds }
 
         return try {
-            // Also verify against Firestore directly in case messagesState had not finished emitting when called
-            val receivedSnap = db.collection("messages")
-                .whereEqualTo("receiverId", uid)
-                .get()
-                .await()
-            for (doc in receivedSnap.documents) {
-                val docSender = doc.getString("senderId").orEmpty()
-                val docRead = doc.getBoolean("isRead") ?: doc.getBoolean("read") ?: false
-                val docReadBy = (doc.get("readByUserIds") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
-                if (docSender == otherUserId && (!docRead || !docReadBy.contains(uid)) && doc.id.isNotBlank()) {
-                    unreadMap[doc.id] = docReadBy
+            // Only query Firestore directly if the in-memory messages list had no matching unread items
+            // (e.g., if called before messagesState emitted), avoiding redundant full-collection downloads.
+            if (unreadMap.isEmpty()) {
+                val receivedSnap = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                    db.collection("messages")
+                        .whereEqualTo("receiverId", uid)
+                        .get()
+                        .await()
+                }
+                for (doc in receivedSnap?.documents.orEmpty()) {
+                    val docSender = doc.getString("senderId").orEmpty()
+                    val docRead = doc.getBoolean("isRead") ?: doc.getBoolean("read") ?: false
+                    val docReadBy = (doc.get("readByUserIds") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+                    if (docSender == otherUserId && (!docRead || !docReadBy.contains(uid)) && doc.id.isNotBlank()) {
+                        unreadMap[doc.id] = docReadBy
+                    }
                 }
             }
 

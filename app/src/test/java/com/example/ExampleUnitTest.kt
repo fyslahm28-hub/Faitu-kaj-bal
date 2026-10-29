@@ -363,6 +363,101 @@ class ExampleUnitTest {
         assertFalse(helper.isUpdateAvailable(140, "1.0.40", mergedSameVersion))
         assertFalse(helper.isUpdateAvailable(141, "1.0.41", mergedSameVersion))
     }
+
+    @Test
+    fun messageDeliveryStatusAndCleanDisplayBody_resolvesSentDeliveredSeenFailedAndStripsWrongLabels() {
+        val nowMs = 1_750_000_000_000L
+        val msgCreatedTs = com.google.firebase.Timestamp(nowMs / 1000L, 0)
+
+        // 1. Plain text message -> shows only text, status = SENT (✓)
+        val plainTextMsg = com.example.data.model.DirectMessage(
+            id = "msg_text_1",
+            senderId = "user_a",
+            receiverId = "user_b",
+            body = "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ",
+            imageUrls = emptyList(),
+            isRead = false,
+            readByUserIds = listOf("user_a"),
+            createdAt = msgCreatedTs
+        )
+        assertEquals("আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ", plainTextMsg.cleanDisplayBody())
+        assertEquals(
+            "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ",
+            com.example.ui.screens.formatMessagePreviewForInbox(plainTextMsg)
+        )
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.SENT,
+            plainTextMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+        )
+
+        // 2. Image message without caption (even if legacy auto-label was stored) -> cleanDisplayBody is empty so only thumbnail renders
+        val imageOnlyMsg = com.example.data.model.DirectMessage(
+            id = "msg_img_1",
+            senderId = "user_a",
+            receiverId = "user_b",
+            body = "📷 ১ টি ছবি প্রেরণ করা হয়েছে",
+            imageUrls = listOf("https://example.com/chat_photo.jpg"),
+            isRead = false,
+            readByUserIds = listOf("user_a"),
+            createdAt = msgCreatedTs
+        )
+        assertEquals("", imageOnlyMsg.cleanDisplayBody())
+        assertEquals("📷 ছবি", com.example.ui.screens.formatMessagePreviewForInbox(imageOnlyMsg))
+
+        val imageWithSendingLabel = imageOnlyMsg.copy(body = "ছবি মেসেজ পাঠানো হচ্ছে")
+        assertEquals("", imageWithSendingLabel.cleanDisplayBody())
+
+        // 3. Delivered status (✓✓) when recipient device acknowledges delivery ("DELIVERED:user_b") or recipient is online
+        val deliveredMsg = plainTextMsg.copy(
+            readByUserIds = listOf("user_a", "DELIVERED:user_b")
+        )
+        assertFalse("DELIVERED marker must keep message unread for recipient until opened", !deliveredMsg.isUnreadForUser("user_b"))
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.DELIVERED,
+            deliveredMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+        )
+
+        // 4. Seen/Read status (colored ✓✓) when recipient opens conversation
+        val seenMsg = plainTextMsg.copy(
+            isRead = true,
+            readByUserIds = listOf("user_a", "user_b")
+        )
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.SEEN,
+            seenMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+        )
+
+        // 5. Failed status (!) and Sending status
+        val failedMsg = plainTextMsg.copy().apply { localDeliveryState = "FAILED" }
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.FAILED,
+            failedMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+        )
+        val sendingMsg = plainTextMsg.copy().apply { localDeliveryState = "SENDING" }
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.SENDING,
+            sendingMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+        )
+
+        // 6. Media attachment category detection for Image, Video, Audio, Document
+        assertEquals(
+            com.example.ui.screens.AttachmentMediaCategory.IMAGE,
+            com.example.ui.screens.detectAttachmentMediaCategory("https://example.com/photo.jpg")
+        )
+        assertEquals(
+            com.example.ui.screens.AttachmentMediaCategory.VIDEO,
+            com.example.ui.screens.detectAttachmentMediaCategory("https://example.com/lecture.mp4")
+        )
+        assertEquals(
+            com.example.ui.screens.AttachmentMediaCategory.AUDIO,
+            com.example.ui.screens.detectAttachmentMediaCategory("https://example.com/tilawat.mp3")
+        )
+        assertEquals(
+            com.example.ui.screens.AttachmentMediaCategory.DOCUMENT,
+            com.example.ui.screens.detectAttachmentMediaCategory("https://example.com/cv_biodata.pdf")
+        )
+    }
 }
+
 
 

@@ -2,6 +2,7 @@ package com.example.data.model
 
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentId
+import com.google.firebase.firestore.Exclude
 import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
@@ -313,6 +314,14 @@ data class ChatGroup(
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
 
+enum class MessageDeliveryStatus {
+    SENDING,   // মেসেজ বা ফাইল আপলোড/প্রেরণ চলছে
+    FAILED,    // পাঠানো হয়নি (লাল সতর্কতামূলক আইকন ও পুনরায় পাঠানোর সুবিধা)
+    SENT,      // Sent: একটি টিক (✓)
+    DELIVERED, // Delivered: দুটি টিক (✓✓)
+    SEEN       // Seen/Read: দুটি টিকের রঙ পরিবর্তন (✓✓)
+}
+
 @IgnoreExtraProperties
 data class DirectMessage(
     @DocumentId val id: String = "",
@@ -353,8 +362,98 @@ data class DirectMessage(
     @get:PropertyName("isDeletedForEveryone")
     @set:PropertyName("isDeletedForEveryone")
     var isDeletedForEveryone: Boolean = false,
-    @ServerTimestamp val createdAt: Timestamp? = null
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @get:Exclude
+    @set:Exclude
+    var localDeliveryState: String = ""
 ) {
+    /**
+     * Returns the clean message text without any legacy auto-generated photo/file placeholder labels
+     * (such as "📷 ১ টি ছবি প্রেরণ করা হয়েছে" or "ছবি মেসেজ পাঠানো হচ্ছে") when attachments are present.
+     */
+    fun cleanDisplayBody(): String {
+        val trimmed = body.trim()
+        if (trimmed.isEmpty()) return ""
+        if (imageUrls.isNotEmpty()) {
+            val isLegacyAutoPhotoLabel =
+                trimmed.matches(Regex("""^📷\s*[\d০-৯]+\s*টি ছবি প্রেরণ করা হ[য়য়]েছে\.?$""")) ||
+                    trimmed == "ছবি মেসেজ পাঠানো হচ্ছে" ||
+                    trimmed == "পয়গাম ও ছবি প্রেরিত হচ্ছে…" ||
+                    trimmed == "পয়গাম ও ছবি প্রেরিত হচ্ছে…"
+            if (isLegacyAutoPhotoLabel) return ""
+        }
+        if (trimmed == "ছবি মেসেজ পাঠানো হচ্ছে" ||
+            trimmed == "পয়গাম ও ছবি প্রেরিত হচ্ছে…" ||
+            trimmed == "পয়গাম ও ছবি প্রেরিত হচ্ছে…"
+        ) {
+            return ""
+        }
+        return body
+    }
+
+    /**
+     * Resolves Facebook-style message delivery status based on real server/recipient state:
+     * - [MessageDeliveryStatus.FAILED]: failed to send ("পাঠানো হয়নি")
+     * - [MessageDeliveryStatus.SENDING]: currently uploading/sending
+     * - [MessageDeliveryStatus.SEEN]: read by recipient (`isRead == true` or recipient in `readByUserIds`) -> colored ✓✓
+     * - [MessageDeliveryStatus.DELIVERED]: delivered to recipient device (`DELIVERED:<uid>` in `readByUserIds` or recipient active/online after send) -> ✓✓
+     * - [MessageDeliveryStatus.SENT]: written to server (`✓`)
+     */
+    fun resolveDeliveryStatus(
+        partnerProfile: UserProfile? = null,
+        nowMillis: Long = System.currentTimeMillis()
+    ): MessageDeliveryStatus {
+        val stateUpper = localDeliveryState.trim().uppercase()
+        if (stateUpper == "FAILED") return MessageDeliveryStatus.FAILED
+        if (stateUpper == "SENDING") return MessageDeliveryStatus.SENDING
+
+        val isGroupMsg = groupId.isNotBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
+
+        // 1. Check SEEN / READ
+        if (stateUpper == "SEEN" || isRead) {
+            return MessageDeliveryStatus.SEEN
+        }
+        if (isGroupMsg) {
+            val seenByOtherMember = readByUserIds.any { token ->
+                token.isNotBlank() &&
+                    token != senderId &&
+                    !token.startsWith("DELIVERED:", ignoreCase = true)
+            }
+            if (seenByOtherMember) return MessageDeliveryStatus.SEEN
+        } else if (receiverId.isNotBlank() && readByUserIds.contains(receiverId)) {
+            return MessageDeliveryStatus.SEEN
+        }
+
+        // 2. Check DELIVERED (✓✓)
+        if (stateUpper == "DELIVERED") {
+            return MessageDeliveryStatus.DELIVERED
+        }
+        if (isGroupMsg) {
+            val deliveredToOtherMember = readByUserIds.any { token ->
+                token.startsWith("DELIVERED:", ignoreCase = true) &&
+                    !token.equals("DELIVERED:$senderId", ignoreCase = true)
+            }
+            if (deliveredToOtherMember) return MessageDeliveryStatus.DELIVERED
+        } else {
+            if (receiverId.isNotBlank() && readByUserIds.contains("DELIVERED:$receiverId")) {
+                return MessageDeliveryStatus.DELIVERED
+            }
+            if (partnerProfile != null) {
+                if (partnerProfile.isCurrentlyOnline(nowMillis)) {
+                    return MessageDeliveryStatus.DELIVERED
+                }
+                val partnerLastSeenMs = partnerProfile.effectiveLastSeenTimestamp()?.toDate()?.time ?: 0L
+                val msgCreatedMs = createdAt?.toDate()?.time ?: 0L
+                if (partnerLastSeenMs > 0L && msgCreatedMs > 0L && partnerLastSeenMs >= msgCreatedMs) {
+                    return MessageDeliveryStatus.DELIVERED
+                }
+            }
+        }
+
+        // 3. Default: SENT (✓)
+        return MessageDeliveryStatus.SENT
+    }
+
     fun isVisibleForUser(userId: String): Boolean {
         if (userId.isBlank()) return true
         if (userId == senderId && deletedForSender) return false

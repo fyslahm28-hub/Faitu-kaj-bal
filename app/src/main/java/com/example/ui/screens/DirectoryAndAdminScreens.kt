@@ -862,7 +862,8 @@ fun MessagesScreen(
     ) -> Unit = { _, _, _, _ -> },
     onUpdateGroupDetails: (groupId: String, newName: String, newPhotoUrl: String) -> Unit = { _, _, _ -> },
     onAddGroupMember: (groupId: String, memberId: String, memberName: String) -> Unit = { _, _, _ -> },
-    onRemoveGroupMember: (groupId: String, memberId: String) -> Unit = { _, _ -> }
+    onRemoveGroupMember: (groupId: String, memberId: String) -> Unit = { _, _ -> },
+    onRetryFailedMessage: (DirectMessage) -> Unit = {}
 ) {
     val context = LocalContext.current
     var receiverId by remember(targetUser) { mutableStateOf(targetUser?.first.orEmpty()) }
@@ -885,17 +886,19 @@ fun MessagesScreen(
         }
     }
 
-    // Restore message body and images if sending failed so user input is never lost
+    // Restore message body and images only if no in-bubble failed message exists (so retry never duplicates)
     LaunchedEffect(failedMessageDraft?.timestampMs) {
         val draft = failedMessageDraft ?: return@LaunchedEffect
-        if (body.isBlank() && draft.body.isNotBlank()) {
-            body = draft.body
-        }
-        if (selectedImages.isEmpty() && draft.imageUrls.isNotEmpty()) {
-            selectedImages = draft.imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
-        }
-        if (receiverId.isBlank() && draft.partnerId.isNotBlank()) {
-            receiverId = draft.partnerId
+        if (draft.messageId.isBlank()) {
+            if (body.isBlank() && draft.body.isNotBlank()) {
+                body = draft.body
+            }
+            if (selectedImages.isEmpty() && draft.imageUrls.isNotEmpty()) {
+                selectedImages = draft.imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
+            }
+            if (receiverId.isBlank() && draft.partnerId.isNotBlank()) {
+                receiverId = draft.partnerId
+            }
         }
         onClearFailedMessageDraft()
     }
@@ -993,6 +996,7 @@ fun MessagesScreen(
                 }
             }
             .map { msg ->
+                val preservedDeliveryState = msg.localDeliveryState
                 var updated = msg
                 localReactionOverrides[msg.id]?.let { reaction ->
                     val updatedUserReactions = updated.userReactions.toMutableMap()
@@ -1020,6 +1024,7 @@ fun MessagesScreen(
                         userReactions = emptyMap()
                     )
                 }
+                updated.localDeliveryState = preservedDeliveryState
                 updated
             }
     }
@@ -1193,11 +1198,6 @@ fun MessagesScreen(
         if (receiverId.isNotBlank()) {
             QawmiNotificationHelper.cancelConversationNotification(context, receiverId, currentUserId)
             if (unreadInActiveChatCount > 0) {
-                if (!isGroupConversation) {
-                    activeConversationMessages
-                        .filter { it.senderId == receiverId && it.receiverId == currentUserId && !it.isRead && it.id.isNotBlank() }
-                        .forEach { unreadMsg -> onMarkRead(unreadMsg.id) }
-                }
                 onMarkConversationRead(receiverId)
             }
         }
@@ -2887,47 +2887,91 @@ fun MessagesScreen(
                                             )
                                         }
 
-                                        // Attached Images (1-5 photos) inside the message bubble
+                                        val displayBody = chatMsg.cleanDisplayBody()
+                                        val isMessageActivelySending = chatMsg.localDeliveryState == "SENDING"
+
+                                        // Attached Media (Images, Videos, Audio, Documents, or Files) inside the message bubble
                                         if (chatMsg.imageUrls.isNotEmpty() && !chatMsg.isDeletedForEveryone) {
+                                            val imageAttachments = chatMsg.imageUrls.mapIndexedNotNull { idx, url ->
+                                                if (detectAttachmentMediaCategory(url) == AttachmentMediaCategory.IMAGE) idx to url else null
+                                            }
+                                            val fileAttachments = chatMsg.imageUrls.mapNotNull { url ->
+                                                val cat = detectAttachmentMediaCategory(url)
+                                                if (cat != AttachmentMediaCategory.IMAGE) url to cat else null
+                                            }
+
                                             Column(
                                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .padding(bottom = if (chatMsg.body.isNotBlank()) 6.dp else 2.dp)
+                                                    .padding(bottom = if (displayBody.isNotBlank()) 6.dp else 2.dp)
                                                     .testTag("message_images_grid_${chatMsg.id}")
                                             ) {
-                                                chatMsg.imageUrls.chunked(2).forEachIndexed { rowIdx, rowImgs ->
-                                                    Row(
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                    ) {
-                                                        rowImgs.forEachIndexed { colIdx, imgUrl ->
-                                                            val globalIdx = rowIdx * 2 + colIdx
-                                                            val isSinglePhoto = chatMsg.imageUrls.size == 1
-                                                            ChatAttachmentImage(
-                                                                imageUrl = imgUrl,
-                                                                contentDescription = "পয়গামের ছবি ${globalIdx + 1}",
-                                                                contentScale = if (isSinglePhoto) ContentScale.Fit else ContentScale.Crop,
-                                                                modifier = Modifier
-                                                                    .weight(1f)
-                                                                    .then(
-                                                                        if (isSinglePhoto) {
-                                                                            Modifier.heightIn(min = 190.dp, max = 310.dp)
-                                                                        } else {
-                                                                            Modifier.height(145.dp)
+                                                if (imageAttachments.isNotEmpty()) {
+                                                    val allImageUrlsOnly = imageAttachments.map { it.second }
+                                                    imageAttachments.chunked(2).forEach { rowPairs ->
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                        ) {
+                                                            rowPairs.forEach { (globalIdx, imgUrl) ->
+                                                                val isSinglePhoto = imageAttachments.size == 1
+                                                                Box(
+                                                                    modifier = Modifier
+                                                                        .weight(1f)
+                                                                        .then(
+                                                                            if (isSinglePhoto) {
+                                                                                Modifier.heightIn(min = 190.dp, max = 310.dp)
+                                                                            } else {
+                                                                                Modifier.height(145.dp)
+                                                                            }
+                                                                        )
+                                                                        .clip(RoundedCornerShape(10.dp))
+                                                                        .background(Color(0xFFF7FBF9))
+                                                                        .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
+                                                                        .clickable {
+                                                                            fullScreenViewerSourceMessage = chatMsg
+                                                                            val viewerIdx = allImageUrlsOnly.indexOf(imgUrl).coerceAtLeast(0)
+                                                                            fullScreenViewerImages = allImageUrlsOnly to viewerIdx
                                                                         }
+                                                                        .testTag("message_image_${chatMsg.id}_$globalIdx"),
+                                                                    contentAlignment = Alignment.Center
+                                                                ) {
+                                                                    ChatAttachmentImage(
+                                                                        imageUrl = imgUrl,
+                                                                        contentDescription = "পয়গামের ছবি ${globalIdx + 1}",
+                                                                        contentScale = if (isSinglePhoto) ContentScale.Fit else ContentScale.Crop,
+                                                                        modifier = Modifier.fillMaxSize()
                                                                     )
-                                                                    .clip(RoundedCornerShape(10.dp))
-                                                                    .background(Color(0xFFF7FBF9))
-                                                                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(10.dp))
-                                                                    .clickable {
-                                                                        fullScreenViewerSourceMessage = chatMsg
-                                                                        fullScreenViewerImages = chatMsg.imageUrls to globalIdx
+                                                                    if (isMessageActivelySending) {
+                                                                        Surface(
+                                                                            shape = CircleShape,
+                                                                            color = Color(0x88000000),
+                                                                            modifier = Modifier
+                                                                                .size(32.dp)
+                                                                                .testTag("attachment_upload_progress_${chatMsg.id}")
+                                                                        ) {
+                                                                            Box(contentAlignment = Alignment.Center) {
+                                                                                CircularProgressIndicator(
+                                                                                    modifier = Modifier.size(18.dp),
+                                                                                    color = Color.White,
+                                                                                    strokeWidth = 2.dp
+                                                                                )
+                                                                            }
+                                                                        }
                                                                     }
-                                                                    .testTag("message_image_${chatMsg.id}_$globalIdx")
-                                                            )
+                                                                }
+                                                            }
                                                         }
                                                     }
+                                                }
+                                                fileAttachments.forEach { (fileUrl, category) ->
+                                                    PaygamNonImageAttachmentCard(
+                                                        urlOrUri = fileUrl,
+                                                        category = category,
+                                                        sentByMe = sentByMe,
+                                                        isUploading = isMessageActivelySending
+                                                    )
                                                 }
                                             }
                                         }
@@ -2947,12 +2991,12 @@ fun MessagesScreen(
                                                     )
                                                     Spacer(modifier = Modifier.height(2.dp))
                                                 }
-                                                if (chatMsg.isDeletedForEveryone || chatMsg.body.isNotBlank()) {
+                                                if (chatMsg.isDeletedForEveryone || displayBody.isNotBlank()) {
                                                     Text(
                                                         text = if (chatMsg.isDeletedForEveryone) {
                                                             "এই পয়গামটি প্রত্যাহার করা হয়েছে"
                                                         } else {
-                                                            chatMsg.body
+                                                            displayBody
                                                         },
                                                         style = MaterialTheme.typography.bodyMedium,
                                                         color = if (chatMsg.isDeletedForEveryone) {
@@ -3003,12 +3047,7 @@ fun MessagesScreen(
                                                 )
                                             }
                                             Text(
-                                                text = buildString {
-                                                    append(IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt))
-                                                    if (sentByMe && !isGroupConversation) {
-                                                        append(if (chatMsg.isRead) " • ✓✓ পঠিত" else " • ✓ প্রেরিত")
-                                                    }
-                                                },
+                                                text = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(chatMsg.createdAt),
                                                 style = MaterialTheme.typography.labelSmall,
                                                 fontSize = 10.sp,
                                                 color = if (chatMsg.isDeletedForEveryone) {
@@ -3019,6 +3058,16 @@ fun MessagesScreen(
                                                     QawmiTextMuted
                                                 }
                                             )
+                                            if (sentByMe && !chatMsg.isDeletedForEveryone) {
+                                                Spacer(modifier = Modifier.width(5.dp))
+                                                PaygamMessageStatusIndicator(
+                                                    message = chatMsg,
+                                                    partnerProfile = if (isGroupConversation) null else resolvedPartnerProfile,
+                                                    isInBubble = true,
+                                                    nowMillis = presenceNowMillis,
+                                                    onRetry = { onRetryFailedMessage(chatMsg) }
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -3150,31 +3199,6 @@ fun MessagesScreen(
                                 },
                                 onClose = { showEmojiPicker = false }
                             )
-                        }
-
-                        // Upload / Sending Progress Indicator
-                        if (isSubmitting) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(QawmiMintSurface)
-                                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                                    .testTag("message_sending_progress_banner"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    color = QawmiDeepGreen,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = "পয়গাম ও ছবি প্রেরিত হচ্ছে…",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = QawmiDeepGreen,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
                         }
 
                         // Selected Images Preview Strip (1-5 photos) with individual Remove button before sending
@@ -3312,15 +3336,15 @@ fun MessagesScreen(
                                 shape = RoundedCornerShape(22.dp)
                             )
 
-                            val canSend = !isSubmitting && (body.isNotBlank() || selectedImages.isNotEmpty())
+                            val canSend = body.isNotBlank() || selectedImages.isNotEmpty()
                             Button(
                                 onClick = {
                                     if (body.isNotBlank() || selectedImages.isNotEmpty()) {
                                         val messageToSend = body
                                         val imagesToSend = selectedImages.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
                                         val effectiveSubject = replyingToMessage?.let { target ->
-                                            val snippet = target.body.ifBlank {
-                                                if (target.imageUrls.isNotEmpty()) "📷 ছবি" else "পয়গাম"
+                                            val snippet = target.cleanDisplayBody().ifBlank {
+                                                formatAttachmentFallbackPreview(target.imageUrls).ifBlank { "পয়গাম" }
                                             }
                                             ReplyQuoteInfo.encodeSubject(
                                                 replyToMessageId = target.id,
@@ -3719,33 +3743,43 @@ fun MessagesScreen(
 
                                                 Spacer(modifier = Modifier.height(3.dp))
 
-                                                val previewBody = if (latestMsg.isDeletedForEveryone) {
-                                                    "এই পয়গামটি প্রত্যাহার করা হয়েছে"
-                                                } else if (latestMsg.imageUrls.isNotEmpty() && latestMsg.body.isBlank()) {
-                                                    "📷 ${IslamicDateAndPrayerHelper.toBanglaDigits(latestMsg.imageUrls.size.toString())}টি ছবি"
-                                                } else {
-                                                    latestMsg.body
-                                                }
+                                                val previewBody = formatMessagePreviewForInbox(latestMsg)
 
                                                 Row(
                                                     modifier = Modifier.fillMaxWidth(),
                                                     horizontalArrangement = Arrangement.SpaceBetween,
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Text(
-                                                        text = if (thread.isPartnerTyping) {
-                                                            "টাইপ করছেন… • • •"
-                                                        } else if (isLatestSentByMe) {
-                                                            "আপনি: $previewBody"
-                                                        } else {
-                                                            previewBody
-                                                        },
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        color = if (thread.isPartnerTyping) QawmiDeepGreen else QawmiTextDark,
-                                                        fontWeight = if (thread.unreadCount > 0 || thread.isPartnerTyping) FontWeight.Bold else FontWeight.Normal,
-                                                        maxLines = 1,
-                                                        modifier = Modifier.weight(1f)
-                                                    )
+                                                    Row(
+                                                        modifier = Modifier.weight(1f),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = if (thread.isPartnerTyping) {
+                                                                "টাইপ করছেন… • • •"
+                                                            } else if (isLatestSentByMe) {
+                                                                "আপনি: $previewBody"
+                                                            } else {
+                                                                previewBody
+                                                            },
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            color = if (thread.isPartnerTyping) QawmiDeepGreen else QawmiTextDark,
+                                                            fontWeight = if (thread.unreadCount > 0 || thread.isPartnerTyping) FontWeight.Bold else FontWeight.Normal,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            modifier = Modifier.weight(1f, fill = false)
+                                                        )
+                                                        if (isLatestSentByMe && !thread.isPartnerTyping && !latestMsg.isDeletedForEveryone) {
+                                                            PaygamMessageStatusIndicator(
+                                                                message = latestMsg,
+                                                                partnerProfile = if (thread.isGroup) null else partnerProfiles[thread.partnerId],
+                                                                isInBubble = false,
+                                                                nowMillis = presenceNowMillis,
+                                                                onRetry = { onRetryFailedMessage(latestMsg) }
+                                                            )
+                                                        }
+                                                    }
 
                                                     if (thread.unreadCount > 0) {
                                                         Spacer(modifier = Modifier.width(8.dp))

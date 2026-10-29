@@ -113,6 +113,45 @@ suspend fun DocumentReference.getFastOrNull(timeoutMs: Long = 3_500L): DocumentS
 }
 
 /**
+ * Fetches a [DocumentSnapshot] from local Firestore cache (`Source.CACHE`) first for zero-latency
+ * checks, falling back to a bounded server fetch only if the document is not yet cached locally.
+ */
+suspend fun DocumentReference.getCacheFirstOrNull(serverTimeoutMs: Long = 1_200L): DocumentSnapshot? {
+    val fromCache = kotlinx.coroutines.withTimeoutOrNull(400L) {
+        runCatching { this@getCacheFirstOrNull.get(Source.CACHE).await() }.getOrNull()
+    }
+    if (fromCache != null && fromCache.exists()) return fromCache
+    return kotlinx.coroutines.withTimeoutOrNull(serverTimeoutMs) {
+        runCatching { this@getCacheFirstOrNull.get().await() }.getOrNull()
+    }
+}
+
+/**
+ * Strictly awaits a Firestore write task within [timeoutMs] and throws an exception if the server
+ * does not acknowledge the write in time or if the task fails. Used where UI must show genuine
+ * server confirmation (`Sent ✓` vs `Failed !`) rather than optimistic background queuing.
+ */
+@Suppress("UNCHECKED_CAST")
+suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitStrictWithTimeout(
+    timeoutMs: Long = 8_000L
+): T {
+    return try {
+        kotlinx.coroutines.withTimeout(timeoutMs) {
+            this@awaitStrictWithTimeout.await()
+        }
+    } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+        val taskException = this@awaitStrictWithTimeout.exception
+        if (taskException != null) {
+            throw taskException
+        }
+        if (this@awaitStrictWithTimeout.isSuccessful) {
+            return this@awaitStrictWithTimeout.result as T
+        }
+        throw IllegalStateException("ইন্টারনেট সংযোগ ধীর বা বিচ্ছিন্ন হওয়ায় মেসেজটি পাঠানো যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।", e)
+    }
+}
+
+/**
  * Awaits a Firestore Task (typically a write operation such as set/update/delete/batch.commit).
  *
  * In the Firebase Firestore Android SDK, write operations are immediately staged into the local
