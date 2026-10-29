@@ -287,5 +287,82 @@ class ExampleUnitTest {
         assertTrue(sylhetOct23.waqts[1].startMinutes < dhakaOct23.waqts[1].startMinutes)
         assertTrue(rajshahiOct23.waqts[1].startMinutes > dhakaOct23.waqts[1].startMinutes)
     }
+
+    @Test
+    fun appUpdateManagerHelper_parsesGitHubAndFirestoreReleasesAndPicksNewestVersion() {
+        val helper = com.example.ui.util.AppUpdateManagerHelper
+
+        // 1. Parse GitHub Releases API JSON for v1.0.40 (Build #140)
+        val githubJson = """
+            {
+              "tag_name": "v1.0.40",
+              "name": "কওমি কর্মসংস্থান বাংলাদেশ v1.0.40 (Build #40)",
+              "draft": false,
+              "prerelease": false,
+              "body": "## কওমি কর্মসংস্থান বাংলাদেশ — নতুন আপডেট (v1.0.40)\n- **ভার্সন:** 1.0.40\n- **ভার্সন কোড:** 140\nনতুন অটো আপডেট ও পারফরম্যান্স উন্নয়ন।",
+              "assets": [
+                {
+                  "name": "Qawmi-Kormosangsthan-Bangladesh.apk",
+                  "size": 26107235,
+                  "browser_download_url": "https://github.com/fyslahm28-hub/Faitu-kaj-bal/releases/download/v1.0.40/Qawmi-Kormosangsthan-Bangladesh.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsedGitHub = helper.parseGitHubReleaseJson(githubJson)
+        assertNotNull("Expected GitHub Release JSON to parse", parsedGitHub)
+        assertEquals(140, parsedGitHub!!.versionCode)
+        assertEquals("1.0.40", parsedGitHub.versionName)
+        assertEquals("v1.0.40", parsedGitHub.githubReleaseTag)
+        assertEquals(
+            "https://github.com/fyslahm28-hub/Faitu-kaj-bal/releases/download/v1.0.40/Qawmi-Kormosangsthan-Bangladesh.apk",
+            parsedGitHub.apkDownloadUrl
+        )
+        assertEquals(26107235L, parsedGitHub.apkFileSizeBytes)
+
+        // 2. Parse Firestore REST API JSON for /app_releases/latest
+        val firestoreRestJson = """
+            {
+              "name": "projects/gen-lang-client-0048059944/databases/ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c/documents/app_releases/latest",
+              "fields": {
+                "versionCode": { "integerValue": "140" },
+                "versionName": { "stringValue": "1.0.40" },
+                "apkDownloadUrl": { "stringValue": "https://github.com/fyslahm28-hub/Faitu-kaj-bal/releases/download/v1.0.40/Qawmi-Kormosangsthan-Bangladesh.apk" },
+                "apkSha256": { "stringValue": "b4591d1e09a8a5aed8bd8992f35b74bf5681bbd9854fb68c4e3708aa47b7a108" },
+                "apkFileSizeBytes": { "integerValue": "26107235" },
+                "releaseNotes": { "stringValue": "নতুন আপডেট ও বাগ ফিক্স।" },
+                "githubReleaseTag": { "stringValue": "v1.0.40" },
+                "isMandatory": { "booleanValue": true },
+                "isPublished": { "booleanValue": true },
+                "releaseStatus": { "stringValue": "PUBLISHED" }
+              }
+            }
+        """.trimIndent()
+        val parsedFirestore = helper.parseFirestoreRestReleaseJson(firestoreRestJson)
+        assertNotNull("Expected Firestore REST JSON to parse", parsedFirestore)
+        assertEquals(140, parsedFirestore!!.versionCode)
+        assertEquals("1.0.40", parsedFirestore.versionName)
+        assertEquals("b4591d1e09a8a5aed8bd8992f35b74bf5681bbd9854fb68c4e3708aa47b7a108", parsedFirestore.apkSha256)
+        assertTrue(parsedFirestore.isMandatory)
+
+        // 3. Stale local cache (versionCode 136) must NEVER override newer remote release (versionCode 140)
+        val staleCachedRelease = parsedFirestore.copy(versionCode = 136, versionName = "1.0.36")
+        val picked = helper.pickMoreRecentRelease(staleCachedRelease, parsedGitHub)
+        assertNotNull(picked)
+        assertEquals(140, picked!!.versionCode)
+        assertEquals("1.0.40", picked.versionName)
+
+        // 4. Same version merges richer metadata (e.g. SHA-256 from Firestore + GitHub release)
+        val mergedSameVersion = helper.pickMoreRecentRelease(parsedGitHub, parsedFirestore)
+        assertEquals(140, mergedSameVersion!!.versionCode)
+        assertEquals("b4591d1e09a8a5aed8bd8992f35b74bf5681bbd9854fb68c4e3708aa47b7a108", mergedSameVersion.apkSha256)
+        assertTrue(mergedSameVersion.isMandatory)
+
+        // 5. Version comparison only triggers update prompt when remote > installed
+        assertTrue(helper.isUpdateAvailable(136, "1.0.36", mergedSameVersion))
+        assertFalse(helper.isUpdateAvailable(140, "1.0.40", mergedSameVersion))
+        assertFalse(helper.isUpdateAvailable(141, "1.0.41", mergedSameVersion))
+    }
 }
+
 

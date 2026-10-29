@@ -1572,6 +1572,7 @@ class ExampleRobolectricTest {
             composeTestRule.onNodeWithText("নতুন আপডেট এসেছে").assertIsDisplayed()
             composeTestRule.onNodeWithTag("update_now_button").assertIsDisplayed()
             composeTestRule.onNodeWithTag("update_later_button").assertIsDisplayed()
+            composeTestRule.onNodeWithText("আপডেট নাও").assertIsDisplayed()
             composeTestRule.onNodeWithText("আপডেট নিন").assertIsDisplayed()
             composeTestRule.onNodeWithText("পরে করুন").assertIsDisplayed()
 

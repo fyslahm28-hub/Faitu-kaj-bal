@@ -293,7 +293,7 @@ fun AppNavigation(
             unauthDismissedVersionCode = AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
             val remote = AppUpdateManagerHelper.fetchLatestReleaseSafely(context)
             if (remote != null) {
-                unauthLatestRelease = remote
+                unauthLatestRelease = AppUpdateManagerHelper.pickMoreRecentRelease(unauthLatestRelease, remote)
             }
         }
 
@@ -303,11 +303,13 @@ fun AppNavigation(
                     manualAuthRefresh++
                     unauthDismissedVersionCode = AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
                     val lastCheck = AppUpdateManagerHelper.getLastUpdateCheckTimestampMs(context)
-                    if (System.currentTimeMillis() - lastCheck >= AppUpdateManagerHelper.PERIODIC_CHECK_INTERVAL_MS) {
+                    if (unauthLatestRelease == null ||
+                        System.currentTimeMillis() - lastCheck >= AppUpdateManagerHelper.PERIODIC_CHECK_INTERVAL_MS
+                    ) {
                         unauthScope.launch {
                             val remote = AppUpdateManagerHelper.fetchLatestReleaseSafely(context)
                             if (remote != null) {
-                                unauthLatestRelease = remote
+                                unauthLatestRelease = AppUpdateManagerHelper.pickMoreRecentRelease(unauthLatestRelease, remote)
                             }
                         }
                     }

@@ -21,6 +21,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -63,6 +65,14 @@ object AppUpdateManagerHelper {
     const val PERIODIC_CHECK_INTERVAL_MS = 15 * 60 * 1000L // 15 minutes periodic update check interval
     const val OFFICIAL_SIGNING_CERT_SHA256 = "b1a449cdb9ca663b9a94af5081aba1cb463621712f8730b68449bc221cf8100c"
 
+    const val GITHUB_OWNER = "fyslahm28-hub"
+    const val GITHUB_REPO = "Faitu-kaj-bal"
+    const val GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
+    const val GITHUB_LATEST_RELEASE_WEB_URL = "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
+    const val DEFAULT_APK_ASSET_NAME = "Qawmi-Kormosangsthan-Bangladesh.apk"
+    const val DEFAULT_FIREBASE_PROJECT_ID = "gen-lang-client-0048059944"
+    const val DEFAULT_FIRESTORE_DATABASE_ID = "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c"
+
     private val updateCheckMutex = Mutex()
     private val apkDownloadMutex = Mutex()
     private val activeDownloadFlag = AtomicBoolean(false)
@@ -84,6 +94,15 @@ object AppUpdateManagerHelper {
 
     @Volatile
     var pendingInstallReleaseInfo: AppReleaseInfo? = null
+
+    @Volatile
+    var lastUpdateCheckErrorMessage: String? = null
+
+    /**
+     * Optional override for testing remote release fetching.
+     */
+    @Volatile
+    var customReleaseFetcher: (suspend (Context) -> AppReleaseInfo?)? = null
 
     /**
      * Optional override for testing or custom APK download stream injection.
@@ -112,6 +131,7 @@ object AppUpdateManagerHelper {
     fun isDownloadInProgress(): Boolean = activeDownloadFlag.get()
 
     fun resetTestHooks() {
+        customReleaseFetcher = null
         customApkFetcher = null
         customArchiveInspector = null
         customInstalledSignatureProvider = null
@@ -122,6 +142,7 @@ object AppUpdateManagerHelper {
         lastLaunchedExternalBrowserIntent = null
         pendingInstallApkFile = null
         pendingInstallReleaseInfo = null
+        lastUpdateCheckErrorMessage = null
     }
 
     private fun isRobolectricRuntime(): Boolean {
@@ -261,6 +282,86 @@ object AppUpdateManagerHelper {
             if (a != b) return a.compareTo(b)
         }
         return 0
+    }
+
+    /**
+     * Selects the more recent release between two sources (e.g., Firestore local/live stream vs
+     * direct server/GitHub release check). Prevents stale Firestore SQLite cached documents
+     * from masking a newly published release, while preserving richer metadata (SHA-256, size,
+     * admin pause/disable flags) when both represent the same version.
+     */
+    fun pickMoreRecentRelease(primary: AppReleaseInfo?, secondary: AppReleaseInfo?): AppReleaseInfo? {
+        if (primary == null) return secondary
+        if (secondary == null) return primary
+
+        val codeDiff = primary.versionCode.compareTo(secondary.versionCode)
+        if (codeDiff != 0) {
+            return if (codeDiff > 0) primary else secondary
+        }
+
+        val semDiff = compareSemanticVersion(primary.versionName, secondary.versionName)
+        if (semDiff != 0) {
+            return if (semDiff > 0) primary else secondary
+        }
+
+        // Both represent the same version: merge richer metadata & respect admin PAUSED/DISABLED state
+        val primaryPausedOrDisabled = !primary.isPublished ||
+            primary.releaseStatus.trim().uppercase() in setOf("PAUSED", "DISABLED")
+        val secondaryPausedOrDisabled = !secondary.isPublished ||
+            secondary.releaseStatus.trim().uppercase() in setOf("PAUSED", "DISABLED")
+        val effectiveStatus = when {
+            primaryPausedOrDisabled -> primary.releaseStatus.trim().uppercase().ifBlank { "PAUSED" }
+            secondaryPausedOrDisabled -> secondary.releaseStatus.trim().uppercase().ifBlank { "PAUSED" }
+            else -> "PUBLISHED"
+        }
+        val effectivePublished = !primaryPausedOrDisabled && !secondaryPausedOrDisabled
+
+        return primary.copy(
+            apkDownloadUrl = primary.apkDownloadUrl.ifBlank { secondary.apkDownloadUrl },
+            apkSha256 = primary.apkSha256.ifBlank { secondary.apkSha256 },
+            apkFileSizeBytes = if (primary.apkFileSizeBytes > 0L) primary.apkFileSizeBytes else secondary.apkFileSizeBytes,
+            releaseNotes = primary.releaseNotes.ifBlank { secondary.releaseNotes },
+            commitSha = primary.commitSha.ifBlank { secondary.commitSha },
+            githubReleaseTag = primary.githubReleaseTag.ifBlank { secondary.githubReleaseTag },
+            isMandatory = primary.isMandatory || secondary.isMandatory,
+            isPublished = effectivePublished,
+            releaseStatus = effectiveStatus,
+            publishedAt = primary.publishedAt ?: secondary.publishedAt,
+            updatedAt = primary.updatedAt ?: secondary.updatedAt
+        )
+    }
+
+    /**
+     * Derives versionCode from semantic version name (e.g., "1.0.40" -> 140) matching
+     * the GitHub Actions workflow formula `VERSION_CODE=$((100 + RUN_NUMBER))` when explicit
+     * versionCode is not present.
+     */
+    fun deriveVersionCodeFromSemanticName(versionName: String, explicitBodyText: String = ""): Int {
+        if (explicitBodyText.isNotBlank()) {
+            val banglaOrEngCodeRegex = Regex(
+                """(?:ভার্সন কোড|Version\s*Code|versionCode)[\s*_:=\-]*(\d+)""",
+                RegexOption.IGNORE_CASE
+            )
+            banglaOrEngCodeRegex.find(explicitBodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { code ->
+                if (code > 0) return code
+            }
+        }
+        val parts = versionName.trim().removePrefix("v").removePrefix("V")
+            .split(".", "-", "_")
+            .mapNotNull { it.toIntOrNull() }
+        if (parts.size >= 3 && parts[0] == 1 && parts[1] == 0 && parts[2] > 0) {
+            return 100 + parts[2]
+        }
+        if (parts.size >= 3 && parts[0] >= 1) {
+            return parts[0] * 100 + parts[1] * 10 + parts[2]
+        }
+        if (explicitBodyText.isNotBlank()) {
+            val buildNumRegex = Regex("""Build\s*#(\d+)""", RegexOption.IGNORE_CASE)
+            buildNumRegex.find(explicitBodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { buildNum ->
+                if (buildNum > 0) return if (buildNum < 100) 100 + buildNum else buildNum
+            }
+        }
+        return parts.firstOrNull()?.takeIf { it > 0 } ?: 1
     }
 
     fun normalizeSha256(raw: String): String {
@@ -485,42 +586,409 @@ object AppUpdateManagerHelper {
     }
 
     /**
-     * Safely fetches `/app_releases/latest` from Firestore on startup (including on AuthScreen before login)
-     * and at periodic intervals, guarded by a single-flight [Mutex] so concurrent checks do not collide.
-     * Never throws or blocks app usage if offline or uninitialized.
+     * Safely fetches the latest app release on startup (including on AuthScreen before login)
+     * and on resume/periodic intervals, guarded by a single-flight [Mutex].
+     * Combines Firestore SDK (`Source.SERVER`), direct Firestore REST API, and GitHub Releases
+     * (`fyslahm28-hub/Faitu-kaj-bal`) so stale local SQLite caches or single-source hiccups
+     * never prevent detecting a new update. Never throws or crashes the app on failure.
      */
     suspend fun fetchLatestReleaseSafely(context: Context): AppReleaseInfo? {
+        customReleaseFetcher?.let { fetcher ->
+            return try {
+                val res = fetcher(context)
+                lastUpdateCheckErrorMessage = if (res == null) {
+                    "আপডেট যাচাই করা সম্ভব হয়নি। ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+                } else {
+                    null
+                }
+                res
+            } catch (_: Throwable) {
+                lastUpdateCheckErrorMessage = "আপডেট যাচাই করা সম্ভব হয়নি। ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+                null
+            }
+        }
+
         return updateCheckMutex.withLock {
             withContext(Dispatchers.IO) {
                 try {
                     val dbId = try {
                         context.applicationContext.getString(R.string.firestore_database_id).trim()
                     } catch (_: Throwable) {
-                        ""
-                    }
-                    val db = if (dbId.isNotBlank() && dbId != "(default)") {
-                        FirebaseFirestore.getInstance(dbId)
-                    } else {
-                        FirebaseFirestore.getInstance()
-                    }
-                    val docRef = db.collection("app_releases").document("latest")
-                    val snap = try {
-                        docRef.get(Source.SERVER).await()
+                        DEFAULT_FIRESTORE_DATABASE_ID
+                    }.ifBlank { DEFAULT_FIRESTORE_DATABASE_ID }
+
+                    // 1. Try Firestore SDK with explicit SERVER source (bounded timeout so slow gRPC never blocks)
+                    val sdkServerRelease: AppReleaseInfo? = try {
+                        val db = if (dbId.isNotBlank() && dbId != "(default)") {
+                            FirebaseFirestore.getInstance(dbId)
+                        } else {
+                            FirebaseFirestore.getInstance()
+                        }
+                        val docRef = db.collection("app_releases").document("latest")
+                        val serverSnap = withTimeoutOrNull(4_500L) {
+                            docRef.get(Source.SERVER).await()
+                        }
+                        parseReleaseSnapshotSafely(serverSnap)
                     } catch (_: Throwable) {
-                        docRef.get().await()
+                        null
                     }
-                    runCatching {
-                        context.applicationContext
-                            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                            .edit()
-                            .putLong(KEY_LAST_CHECK_TIMESTAMP_MS, System.currentTimeMillis())
-                            .apply()
+
+                    if (isRobolectricRuntime()) {
+                        // In local JVM unit tests, avoid real external HTTP calls; fall back to local Firestore instance if needed
+                        val fallbackSnapRelease = sdkServerRelease ?: try {
+                            val db = if (dbId.isNotBlank() && dbId != "(default)") {
+                                FirebaseFirestore.getInstance(dbId)
+                            } else {
+                                FirebaseFirestore.getInstance()
+                            }
+                            val snap = withTimeoutOrNull(1_500L) {
+                                db.collection("app_releases").document("latest").get().await()
+                            }
+                            parseReleaseSnapshotSafely(snap)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        return@withContext fallbackSnapRelease
                     }
-                    parseReleaseSnapshotSafely(snap)
+
+                    // 2. Query direct Firestore REST API (bypasses local SQLite cache and gRPC connection delays)
+                    val restFirestoreRelease: AppReleaseInfo? = fetchFromFirestoreRestApi(dbId)
+
+                    // 3. Query GitHub Releases API (with web redirect fallback for GitHub rate limits)
+                    val githubRelease: AppReleaseInfo? = fetchFromGitHubReleases()
+
+                    var bestRelease = pickMoreRecentRelease(sdkServerRelease, restFirestoreRelease)
+                    bestRelease = pickMoreRecentRelease(bestRelease, githubRelease)
+
+                    // 4. Last resort if all live network sources failed (e.g., offline)
+                    if (bestRelease == null) {
+                        bestRelease = try {
+                            val db = if (dbId.isNotBlank() && dbId != "(default)") {
+                                FirebaseFirestore.getInstance(dbId)
+                            } else {
+                                FirebaseFirestore.getInstance()
+                            }
+                            val cachedSnap = withTimeoutOrNull(2_000L) {
+                                db.collection("app_releases").document("latest").get().await()
+                            }
+                            parseReleaseSnapshotSafely(cachedSnap)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+
+                    if (bestRelease != null) {
+                        lastUpdateCheckErrorMessage = null
+                        runCatching {
+                            context.applicationContext
+                                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                .edit()
+                                .putLong(KEY_LAST_CHECK_TIMESTAMP_MS, System.currentTimeMillis())
+                                .apply()
+                        }
+                    } else {
+                        lastUpdateCheckErrorMessage =
+                            "আপডেট যাচাই করা সম্ভব হয়নি। ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+                    }
+                    bestRelease
                 } catch (_: Throwable) {
+                    lastUpdateCheckErrorMessage =
+                        "আপডেট যাচাই করা সম্ভব হয়নি। ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
                     null
                 }
             }
+        }
+    }
+
+    /**
+     * Fetches `/app_releases/latest` directly via the Firestore REST API so stale local caches
+     * or slow gRPC channels cannot mask a newly published update.
+     */
+    fun fetchFromFirestoreRestApi(
+        databaseId: String = DEFAULT_FIRESTORE_DATABASE_ID,
+        projectId: String = DEFAULT_FIREBASE_PROJECT_ID
+    ): AppReleaseInfo? {
+        val resolvedDb = databaseId.trim().ifBlank { DEFAULT_FIRESTORE_DATABASE_ID }
+        val resolvedProject = projectId.trim().ifBlank { DEFAULT_FIREBASE_PROJECT_ID }
+        val endpoint =
+            "https://firestore.googleapis.com/v1/projects/$resolvedProject/databases/$resolvedDb/documents/app_releases/latest"
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5_000
+                readTimeout = 5_000
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("User-Agent", "QawmiKormosangsthan-AutoUpdater/1.0 (Android)")
+            }
+            if (conn.responseCode !in 200..299) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            parseFirestoreRestReleaseJson(body)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { conn?.disconnect() }
+        }
+    }
+
+    private fun unescapeJsonValue(raw: String): String {
+        val sb = StringBuilder(raw.length)
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c == '\\' && i + 1 < raw.length) {
+                val next = raw[i + 1]
+                when (next) {
+                    'n' -> { sb.append('\n'); i += 2 }
+                    'r' -> { sb.append('\r'); i += 2 }
+                    't' -> { sb.append('\t'); i += 2 }
+                    '"' -> { sb.append('"'); i += 2 }
+                    '\\' -> { sb.append('\\'); i += 2 }
+                    '/' -> { sb.append('/'); i += 2 }
+                    'u' -> {
+                        if (i + 5 < raw.length) {
+                            val hex = raw.substring(i + 2, i + 6)
+                            val codePoint = hex.toIntOrNull(16)
+                            if (codePoint != null) {
+                                sb.append(codePoint.toChar())
+                                i += 6
+                            } else {
+                                sb.append(c)
+                                i++
+                            }
+                        } else {
+                            sb.append(c)
+                            i++
+                        }
+                    }
+                    else -> { sb.append(next); i += 2 }
+                }
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
+
+    fun parseFirestoreRestReleaseJson(jsonString: String): AppReleaseInfo? {
+        if (jsonString.isBlank() || !jsonString.contains("\"fields\"")) return null
+        return try {
+            fun stringField(name: String): String {
+                val regex = Regex(
+                    """"${Regex.escape(name)}"\s*:\s*\{\s*"stringValue"\s*:\s*"((?:\\.|[^"\\])*)""""
+                )
+                val raw = regex.find(jsonString)?.groupValues?.getOrNull(1) ?: return ""
+                return unescapeJsonValue(raw).trim()
+            }
+
+            fun longField(name: String): Long? {
+                val intRegex = Regex(
+                    """"${Regex.escape(name)}"\s*:\s*\{\s*"(?:integerValue|stringValue)"\s*:\s*"?(-?\d+)"?"""
+                )
+                return intRegex.find(jsonString)?.groupValues?.getOrNull(1)?.trim()?.toLongOrNull()
+            }
+
+            fun boolField(name: String): Boolean? {
+                val boolRegex = Regex(
+                    """"${Regex.escape(name)}"\s*:\s*\{\s*"booleanValue"\s*:\s*(true|false)"""
+                )
+                return boolRegex.find(jsonString)?.groupValues?.getOrNull(1)?.toBooleanStrictOrNull()
+            }
+
+            val apkUrl = stringField("apkDownloadUrl")
+            if (apkUrl.isBlank() || !isTrustedHttpsApkUrl(apkUrl)) return null
+
+            val versionName = stringField("versionName").ifBlank { "1.0" }
+            val releaseNotes = stringField("releaseNotes")
+            val versionCode = longField("versionCode")?.toInt()?.takeIf { it > 0 }
+                ?: deriveVersionCodeFromSemanticName(versionName, releaseNotes)
+            val status = stringField("releaseStatus").uppercase()
+                .takeIf { it in setOf("PUBLISHED", "PAUSED", "DISABLED") }
+                ?: "PUBLISHED"
+            val isPublished = (boolField("isPublished") ?: (status == "PUBLISHED")) && status == "PUBLISHED"
+
+            AppReleaseInfo(
+                id = "latest",
+                releaseId = stringField("releaseId").ifBlank { "latest" },
+                versionCode = versionCode,
+                versionName = versionName,
+                apkDownloadUrl = apkUrl,
+                apkSha256 = normalizeSha256(stringField("apkSha256")),
+                apkFileSizeBytes = (longField("apkFileSizeBytes") ?: 0L).coerceAtLeast(0L),
+                releaseNotes = releaseNotes,
+                commitSha = stringField("commitSha"),
+                githubReleaseTag = stringField("githubReleaseTag"),
+                isMandatory = boolField("isMandatory") ?: false,
+                isPublished = isPublished,
+                releaseStatus = status,
+                publishedBy = stringField("publishedBy").ifBlank { "GitHub Actions CI" }
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Fetches the latest published release from GitHub Releases API (`fyslahm28-hub/Faitu-kaj-bal`),
+     * with automatic fallback to GitHub's `/releases/latest` HTTP redirect header if the unauthenticated
+     * GitHub REST API rate limit (HTTP 403/429) is reached.
+     */
+    fun fetchFromGitHubReleases(): AppReleaseInfo? {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(GITHUB_LATEST_RELEASE_API_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5_000
+                readTimeout = 5_000
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("User-Agent", "QawmiKormosangsthan-AutoUpdater/1.0 (Android)")
+            }
+            val code = conn.responseCode
+            if (code in 200..299) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val parsed = parseGitHubReleaseJson(json)
+                if (parsed != null) return parsed
+            }
+        } catch (_: Throwable) {
+            // Fall through to web redirect fallback
+        } finally {
+            runCatching { conn?.disconnect() }
+        }
+        return fetchFromGitHubWebRedirect()
+    }
+
+    /**
+     * Parses a GitHub Releases API `/releases/latest` JSON payload into [AppReleaseInfo].
+     */
+    fun parseGitHubReleaseJson(jsonString: String): AppReleaseInfo? {
+        if (jsonString.isBlank()) return null
+        return try {
+            val isDraft = Regex(""""draft"\s*:\s*true""").containsMatchIn(jsonString)
+            val isPrerelease = Regex(""""prerelease"\s*:\s*true""").containsMatchIn(jsonString)
+            if (isDraft || isPrerelease) return null
+
+            val tagMatch = Regex(""""tag_name"\s*:\s*"((?:\\.|[^"\\])*)"""").find(jsonString)
+            val tagName = tagMatch?.groupValues?.getOrNull(1)?.let { unescapeJsonValue(it).trim() }.orEmpty()
+            if (tagName.isBlank()) return null
+
+            val versionName = tagName.removePrefix("v").removePrefix("V").trim().ifBlank { tagName }
+            val nameMatch = Regex(""""name"\s*:\s*"((?:\\.|[^"\\])*)"""").find(jsonString)
+            val releaseTitle = nameMatch?.groupValues?.getOrNull(1)?.let { unescapeJsonValue(it).trim() }.orEmpty()
+
+            val bodyMatch = Regex(""""body"\s*:\s*"((?:\\.|[^"\\])*)"""").find(jsonString)
+            val rawBody = bodyMatch?.groupValues?.getOrNull(1)?.let { unescapeJsonValue(it).trim() }.orEmpty()
+
+            val combinedText = "$releaseTitle\n$rawBody"
+            val versionCode = deriveVersionCodeFromSemanticName(versionName, combinedText)
+
+            var apkUrl = ""
+            var apkSize = 0L
+
+            val downloadUrlRegex = Regex(""""browser_download_url"\s*:\s*"((?:\\.|[^"\\])*\.apk)"""", RegexOption.IGNORE_CASE)
+            val allDownloadUrls = downloadUrlRegex.findAll(jsonString).mapNotNull { m ->
+                m.groupValues.getOrNull(1)?.let { unescapeJsonValue(it).trim() }?.takeIf { isTrustedHttpsApkUrl(it) }
+            }.toList()
+
+            apkUrl = allDownloadUrls.firstOrNull { it.endsWith("/$DEFAULT_APK_ASSET_NAME", ignoreCase = true) }
+                ?: allDownloadUrls.firstOrNull()
+                ?: "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$tagName/$DEFAULT_APK_ASSET_NAME"
+
+            if (!isTrustedHttpsApkUrl(apkUrl)) return null
+
+            val assetSizeRegex = Regex(""""size"\s*:\s*(\d+)""")
+            apkSize = assetSizeRegex.findAll(jsonString)
+                .mapNotNull { it.groupValues.getOrNull(1)?.toLongOrNull() }
+                .maxOrNull()
+                ?.coerceAtLeast(0L)
+                ?: 0L
+
+            val sha256Regex = Regex("""([0-9a-fA-F]{64})""")
+            val extractedSha256 = sha256Regex.find(rawBody)?.groupValues?.getOrNull(1)?.lowercase().orEmpty()
+
+            val cleanedNotes = rawBody
+                .lineSequence()
+                .filterNot { line ->
+                    val trimmed = line.trim()
+                    trimmed.startsWith("## ") ||
+                        trimmed.startsWith("- **ভার্সন:") ||
+                        trimmed.startsWith("- **ভার্সন কোড:") ||
+                        trimmed.startsWith("- **কমিট:")
+                }
+                .joinToString("\n")
+                .trim()
+                .ifBlank {
+                    "কওমি কর্মসংস্থান বাংলাদেশ অ্যাপের নতুন সংস্করণ ($versionName) প্রকাশিত হয়েছে।"
+                }
+
+            AppReleaseInfo(
+                id = "latest",
+                releaseId = tagName,
+                versionCode = versionCode,
+                versionName = versionName,
+                apkDownloadUrl = apkUrl,
+                apkSha256 = normalizeSha256(extractedSha256),
+                apkFileSizeBytes = apkSize,
+                releaseNotes = cleanedNotes,
+                githubReleaseTag = tagName,
+                isMandatory = false,
+                isPublished = true,
+                releaseStatus = "PUBLISHED",
+                publishedBy = "GitHub Releases"
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Rate-limit-free fallback that inspects the 302 Redirect `Location` header from
+     * `https://github.com/fyslahm28-hub/Faitu-kaj-bal/releases/latest` -> `.../releases/tag/v1.0.40`.
+     */
+    fun fetchFromGitHubWebRedirect(): AppReleaseInfo? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(GITHUB_LATEST_RELEASE_WEB_URL).openConnection() as HttpURLConnection).apply {
+                instanceFollowRedirects = false
+                requestMethod = "GET"
+                connectTimeout = 5_000
+                readTimeout = 5_000
+                setRequestProperty("User-Agent", "QawmiKormosangsthan-AutoUpdater/1.0 (Android)")
+            }
+            conn.connect()
+            val status = conn.responseCode
+            val location = conn.getHeaderField("Location").orEmpty().trim()
+            if (status !in 300..399 || !location.contains("/releases/tag/")) return null
+
+            val tagName = location.substringAfterLast("/releases/tag/")
+                .substringBefore("?")
+                .substringBefore("#")
+                .trim()
+            if (tagName.isBlank()) return null
+
+            val versionName = tagName.removePrefix("v").removePrefix("V").trim()
+            val versionCode = deriveVersionCodeFromSemanticName(versionName)
+            val apkUrl = "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$tagName/$DEFAULT_APK_ASSET_NAME"
+            if (!isTrustedHttpsApkUrl(apkUrl)) return null
+
+            AppReleaseInfo(
+                id = "latest",
+                releaseId = tagName,
+                versionCode = versionCode,
+                versionName = versionName,
+                apkDownloadUrl = apkUrl,
+                releaseNotes = "কওমি কর্মসংস্থান বাংলাদেশ অ্যাপের নতুন সংস্করণ ($versionName) প্রকাশিত হয়েছে।",
+                githubReleaseTag = tagName,
+                isMandatory = false,
+                isPublished = true,
+                releaseStatus = "PUBLISHED",
+                publishedBy = "GitHub Releases"
+            )
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { conn?.disconnect() }
         }
     }
 

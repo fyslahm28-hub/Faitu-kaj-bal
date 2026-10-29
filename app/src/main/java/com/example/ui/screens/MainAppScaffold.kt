@@ -221,12 +221,27 @@ fun MainAppScaffold(
     val dismissedUpdateVersionCode by viewModel.dismissedUpdateVersionCode.collectAsStateWithLifecycle()
     val installedVersion = remember(context) { AppUpdateManagerHelper.getInstalledVersion(context) }
     var fetchedFallbackRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
-    val effectiveLatestRelease = latestAppRelease ?: fetchedFallbackRelease
+    var resumeUpdateCheckTick by remember { mutableStateOf(0) }
+    val effectiveLatestRelease = remember(latestAppRelease, fetchedFallbackRelease) {
+        AppUpdateManagerHelper.pickMoreRecentRelease(latestAppRelease, fetchedFallbackRelease)
+    }
 
-    LaunchedEffect(viewModel.currentUserId) {
+    LaunchedEffect(viewModel.currentUserId, resumeUpdateCheckTick) {
         val remote = AppUpdateManagerHelper.fetchLatestReleaseSafely(context)
         if (remote != null) {
-            fetchedFallbackRelease = remote
+            fetchedFallbackRelease = AppUpdateManagerHelper.pickMoreRecentRelease(fetchedFallbackRelease, remote)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, viewModel.currentUserId) {
+        val updateResumeObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                resumeUpdateCheckTick++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(updateResumeObserver)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(updateResumeObserver)
         }
     }
 
@@ -1265,7 +1280,7 @@ fun MainAppScaffold(
                     }
 
                     // Auto-Update Prompt Overlay (“নতুন আপডেট উপলব্ধ” / “নতুন আপডেট এসেছে” বার্তাসহ “আপডেট নিন” ও “পরে করুন” বাটন)
-                    val persistedCooldownVersion = remember(context, dismissedUpdateVersionCode) {
+                    val persistedCooldownVersion = remember(context, dismissedUpdateVersionCode, resumeUpdateCheckTick) {
                         dismissedUpdateVersionCode
                             ?: AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
                     }
@@ -2062,11 +2077,20 @@ fun AppUpdatePromptOverlay(
                             .defaultMinSize(minHeight = 48.dp)
                             .testTag("update_now_button")
                     ) {
-                        Text(
-                            text = if (isDownloading) "ডাউনলোড হচ্ছে..." else "আপডেট নিন",
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = if (isDownloading) "ডাউনলোড হচ্ছে..." else "আপডেট নাও",
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            if (!isDownloading) {
+                                Text(
+                                    text = "আপডেট নিন",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White.copy(alpha = 0.9f)
+                                )
+                            }
+                        }
                     }
                 }
             }
