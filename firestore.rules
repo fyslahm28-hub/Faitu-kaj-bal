@@ -31,12 +31,11 @@ service cloud.firestore {
 
     function hasUserBlocked(blockerUid, targetUid) {
       let path = /databases/$(database)/documents/users/$(blockerUid);
+      let blocked = exists(path) ? get(path).data.get('blockedUserIds', []) : [];
       return isValidId(blockerUid) &&
              isValidId(targetUid) &&
-             exists(path) &&
-             ('blockedUserIds' in get(path).data) &&
-             get(path).data.blockedUserIds is list &&
-             (targetUid in get(path).data.blockedUserIds);
+             (blocked is list) &&
+             (targetUid in blocked);
     }
 
     function isBlockedBetween(uid1, uid2) {

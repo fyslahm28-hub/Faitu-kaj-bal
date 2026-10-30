@@ -45,7 +45,7 @@ class QawmiRepository(
     private val auth: FirebaseAuth = FirebaseAuth.getInstance()
 ) {
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance(
+        getConfiguredFirestoreInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
         ),
         FirebaseAuth.getInstance()
@@ -426,40 +426,49 @@ class QawmiRepository(
     suspend fun updateUserPresence(isOnline: Boolean, defaultFullName: String = "সম্মানিত দ্বীনি ভাই"): Result<Unit> {
         val uid = auth.currentUser?.uid ?: return Result.success(Unit)
         val docRef = db.collection("users").document(uid)
+        val updates = mutableMapOf<String, Any>(
+            "isOnline" to isOnline,
+            "lastSeenAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        if (!isOnline) {
+            updates["typingToUserId"] = ""
+        }
         return try {
-            val snap = docRef.getFastOrNull(3_500L)
-            if (snap != null && snap.exists()) {
-                val updates = mutableMapOf<String, Any>(
-                    "isOnline" to isOnline,
-                    "lastSeenAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                if (!isOnline) {
-                    updates["typingToUserId"] = ""
+            val cachedSnap = docRef.getFromCacheOnlyOrNull(50L)
+            if (cachedSnap != null && cachedSnap.exists()) {
+                docRef.update(updates).awaitWithTimeout(5_000L)
+                return Result.success(Unit)
+            }
+            try {
+                docRef.update(updates).awaitWithTimeout(5_000L)
+            } catch (updateEx: Exception) {
+                val msg = updateEx.message.orEmpty()
+                if (msg.contains("NOT_FOUND", ignoreCase = true) || msg.contains("No document to update", ignoreCase = true)) {
+                    val payload = mapOf(
+                        "userId" to uid,
+                        "fullName" to defaultFullName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }.take(145),
+                        "accountType" to "khadim",
+                        "district" to "",
+                        "designation" to "",
+                        "qualification" to "",
+                        "experience" to "",
+                        "preferredDistricts" to "",
+                        "bio" to "",
+                        "contactInfo" to "",
+                        "madrasaName" to "",
+                        "photoUrl" to "",
+                        "isOnline" to isOnline,
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        "typingToUserId" to "",
+                        "isVerified" to false,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    docRef.set(payload).awaitWithTimeout(5_000L)
+                } else {
+                    throw updateEx
                 }
-                docRef.update(updates).awaitWithTimeout(8_000L)
-            } else {
-                val payload = mapOf(
-                    "userId" to uid,
-                    "fullName" to defaultFullName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" },
-                    "accountType" to "khadim",
-                    "district" to "",
-                    "designation" to "",
-                    "qualification" to "",
-                    "experience" to "",
-                    "preferredDistricts" to "",
-                    "bio" to "",
-                    "contactInfo" to "",
-                    "madrasaName" to "",
-                    "photoUrl" to "",
-                    "isOnline" to isOnline,
-                    "lastSeenAt" to FieldValue.serverTimestamp(),
-                    "typingToUserId" to "",
-                    "isVerified" to false,
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                docRef.set(payload).awaitWithTimeout(8_000L)
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -1038,22 +1047,26 @@ class QawmiRepository(
                     var itemDocId = ""
                     if (item.separateAttachmentDataUrl.isNotBlank()) {
                         val attachDocId = "${doc.id}_media_$idx"
-                        db.collection("feed_post_attachments").document(attachDocId).set(
-                            mapOf(
-                                "postId" to doc.id,
-                                "authorId" to uid,
-                                "attachmentType" to item.mediaType,
-                                "mimeType" to item.mimeType,
-                                "fileName" to item.fileName,
-                                "downloadUrl" to item.url,
-                                "extendedText" to "",
-                                "mediaDataUrl" to item.separateAttachmentDataUrl,
-                                "sizeBytes" to item.sizeBytes,
-                                "visibility" to "PUBLIC",
-                                "createdAt" to FieldValue.serverTimestamp(),
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        ).awaitWithTimeout(8_000L)
+                        val attachRef = db.collection("feed_post_attachments").document(attachDocId)
+                        val existingAttach = attachRef.getCacheFirstOrNull(1_000L)
+                        if (existingAttach == null || !existingAttach.exists()) {
+                            attachRef.set(
+                                mapOf(
+                                    "postId" to doc.id,
+                                    "authorId" to uid,
+                                    "attachmentType" to item.mediaType,
+                                    "mimeType" to item.mimeType,
+                                    "fileName" to item.fileName,
+                                    "downloadUrl" to item.url,
+                                    "extendedText" to "",
+                                    "mediaDataUrl" to item.separateAttachmentDataUrl,
+                                    "sizeBytes" to item.sizeBytes,
+                                    "visibility" to "PUBLIC",
+                                    "createdAt" to FieldValue.serverTimestamp(),
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).awaitWithTimeout(8_000L)
+                        }
                         itemDocId = attachDocId
                         if (primaryAttachId.isBlank()) primaryAttachId = attachDocId
                     }
@@ -1983,7 +1996,7 @@ class QawmiRepository(
                 isDeletedForEveryone = resolvedDeletedForEveryone,
                 createdAt = resolvedCreatedAt
             ).apply {
-                localDeliveryState = if (hasPending) "SENDING" else "SENT"
+                localDeliveryState = if (hasPending) "PENDING_SYNC" else "SENT"
             }
         } catch (_: Throwable) {
             null
@@ -2051,18 +2064,19 @@ class QawmiRepository(
         preallocatedMessageId: String = ""
     ): Result<String> {
         val uid = requireUserId()
-        val isGroupMessage = groupId.isNotBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
-        val resolvedGroupId = if (groupId.isNotBlank()) groupId else receiverId.substringAfter(":", receiverId)
-        if (!isGroupMessage && (receiverId.isBlank() || receiverId == uid)) {
+        val trimmedReceiverId = receiverId.trim()
+        val isGroupMessage = groupId.isNotBlank() || trimmedReceiverId.startsWith("GROUP:", ignoreCase = true)
+        val resolvedGroupId = if (groupId.isNotBlank()) groupId.trim() else trimmedReceiverId.substringAfter(":", trimmedReceiverId).trim()
+        if (!isGroupMessage && (trimmedReceiverId.isBlank() || trimmedReceiverId == uid)) {
             return Result.failure(IllegalArgumentException("নিজের অ্যাকাউন্টে মেসেজ পাঠানো যাবে না।"))
         }
         if (imageUrls.size > ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE) {
             return Result.failure(IllegalArgumentException("একবারে সর্বোচ্চ ৫টি ছবি পাঠানো যাবে।"))
         }
-        val safeSenderName = senderName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }
+        val safeSenderName = senderName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }.take(145)
         val safeReceiverName = receiverName.trim().ifBlank {
             if (isGroupMessage) groupName.trim().ifBlank { "গ্রুপ কথোপকথন" } else "সম্মানিত প্রাপক"
-        }
+        }.take(145)
         val docRef = if (preallocatedMessageId.isNotBlank()) {
             db.collection("messages").document(preallocatedMessageId.trim())
         } else {
@@ -2070,19 +2084,12 @@ class QawmiRepository(
         }
         return try {
             // Fast local cache idempotency check (0 network round-trips):
-            // If this preallocated message ID already exists in local cache and was confirmed by the server,
-            // return immediately. If it is already staged in the local write queue, wait for pending writes.
+            // Only short-circuit if this message ID already exists in local cache AND has been
+            // genuinely confirmed by the Firestore server (!metadata.hasPendingWrites()).
             if (preallocatedMessageId.isNotBlank()) {
                 val existingDoc = docRef.getFromCacheOnlyOrNull(40L)
-                if (existingDoc != null && existingDoc.getString("senderId") == uid) {
-                    if (!existingDoc.metadata.hasPendingWrites()) {
-                        return Result.success(docRef.id)
-                    } else {
-                        kotlinx.coroutines.withTimeoutOrNull(2_500L) {
-                            runCatching { db.waitForPendingWrites().await() }
-                        }
-                        return Result.success(docRef.id)
-                    }
+                if (existingDoc != null && existingDoc.getString("senderId") == uid && !existingDoc.metadata.hasPendingWrites()) {
+                    return Result.success(docRef.id)
                 }
             }
 
@@ -2093,13 +2100,13 @@ class QawmiRepository(
                 val senderBlockedList = (senderSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
-                if (receiverId in senderBlockedList) {
+                if (trimmedReceiverId in senderBlockedList) {
                     return Result.failure(
                         IllegalStateException("আপনি এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান বিরত (ব্লক) রেখেছেন। পুনরায় পয়গাম পাঠাতে আনব্লক করুন।")
                     )
                 }
 
-                val receiverSnap = db.collection("users").document(receiverId).getFromCacheOnlyOrNull(40L)
+                val receiverSnap = db.collection("users").document(trimmedReceiverId).getFromCacheOnlyOrNull(40L)
                 val receiverBlockedList = (receiverSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -2132,7 +2139,7 @@ class QawmiRepository(
                 "senderId" to uid,
                 "senderName" to safeSenderName,
                 "senderPhotoUrl" to compactSenderPhoto,
-                "receiverId" to if (isGroupMessage) "GROUP:$resolvedGroupId" else receiverId,
+                "receiverId" to if (isGroupMessage) "GROUP:$resolvedGroupId" else trimmedReceiverId,
                 "receiverName" to safeReceiverName,
                 "subject" to subject.trim().ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }.take(195),
                 "body" to resolvedBody.take(1450),
@@ -2145,12 +2152,19 @@ class QawmiRepository(
             }
             if (isGroupMessage) {
                 val finalGroupMembers = (groupMemberIds + uid).map { it.trim() }.filter { it.isNotBlank() }.distinct().take(50)
-                payload["groupId"] = resolvedGroupId
-                payload["groupName"] = groupName.trim().ifBlank { safeReceiverName }
+                payload["groupId"] = resolvedGroupId.take(120)
+                payload["groupName"] = groupName.trim().ifBlank { safeReceiverName }.take(145)
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
-            docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 3_500L)
+            runCatching { db.enableNetwork() }
+            try {
+                docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 6_000L)
+            } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+                // If the gRPC write stream was stalled, kick the network connection so the next retry uses a fresh stream
+                runCatching { db.enableNetwork() }
+                throw timeoutEx
+            }
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.
             // Bell icon notifications are strictly reserved for general notifications (NEW_CIRCULAR, APPLICATION, ANNOUNCEMENT, etc.).

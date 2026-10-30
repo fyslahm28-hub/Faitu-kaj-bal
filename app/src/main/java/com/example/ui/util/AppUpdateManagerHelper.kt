@@ -619,11 +619,7 @@ object AppUpdateManagerHelper {
 
                     // 1. Try Firestore SDK with explicit SERVER source (bounded timeout so slow gRPC never blocks)
                     val sdkServerRelease: AppReleaseInfo? = try {
-                        val db = if (dbId.isNotBlank() && dbId != "(default)") {
-                            FirebaseFirestore.getInstance(dbId)
-                        } else {
-                            FirebaseFirestore.getInstance()
-                        }
+                        val db = com.example.data.repository.getConfiguredFirestoreInstance(dbId)
                         val docRef = db.collection("app_releases").document("latest")
                         val serverSnap = withTimeoutOrNull(4_500L) {
                             docRef.get(Source.SERVER).await()
@@ -636,11 +632,7 @@ object AppUpdateManagerHelper {
                     if (isRobolectricRuntime()) {
                         // In local JVM unit tests, avoid real external HTTP calls; fall back to local Firestore instance if needed
                         val fallbackSnapRelease = sdkServerRelease ?: try {
-                            val db = if (dbId.isNotBlank() && dbId != "(default)") {
-                                FirebaseFirestore.getInstance(dbId)
-                            } else {
-                                FirebaseFirestore.getInstance()
-                            }
+                            val db = com.example.data.repository.getConfiguredFirestoreInstance(dbId)
                             val snap = withTimeoutOrNull(1_500L) {
                                 db.collection("app_releases").document("latest").get().await()
                             }
@@ -663,11 +655,7 @@ object AppUpdateManagerHelper {
                     // 4. Last resort if all live network sources failed (e.g., offline)
                     if (bestRelease == null) {
                         bestRelease = try {
-                            val db = if (dbId.isNotBlank() && dbId != "(default)") {
-                                FirebaseFirestore.getInstance(dbId)
-                            } else {
-                                FirebaseFirestore.getInstance()
-                            }
+                            val db = com.example.data.repository.getConfiguredFirestoreInstance(dbId)
                             val cachedSnap = withTimeoutOrNull(2_000L) {
                                 db.collection("app_releases").document("latest").get().await()
                             }

@@ -3362,10 +3362,6 @@ fun MessagesScreen(
                                         photoLimitWarning = null
                                         replyingToMessage = null
                                         showEmojiPicker = false
-                                        if (!isGroupConversation && wasTypingInCurrentSession) {
-                                            wasTypingInCurrentSession = false
-                                            onTypingStatusChanged(receiverId, false)
-                                        }
                                         onSendMessageWithImages(
                                             receiverId,
                                             resolvedPartnerName,
@@ -3376,6 +3372,10 @@ fun MessagesScreen(
                                             if (isGroupConversation) resolvedPartnerName else "",
                                             activeGroup?.memberIds ?: emptyList()
                                         )
+                                        if (!isGroupConversation && wasTypingInCurrentSession) {
+                                            wasTypingInCurrentSession = false
+                                            onTypingStatusChanged(receiverId, false)
+                                        }
                                     }
                                 },
                                 enabled = canSend,

@@ -375,11 +375,7 @@ fun AppNavigation(
                             id
                         }
                     }
-                    val db = runCatching {
-                        FirebaseFirestore.getInstance(databaseId)
-                    }.getOrElse {
-                        FirebaseFirestore.getInstance()
-                    }
+                    val db = com.example.data.repository.getConfiguredFirestoreInstance(databaseId)
                     runCatching { db.enableNetwork() }
                     val repository = QawmiRepository(db, resolvedAuth)
                     QawmiViewModel(

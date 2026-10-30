@@ -4,10 +4,44 @@ import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
+import com.google.firebase.firestore.MemoryCacheSettings
 import com.google.firebase.firestore.Source
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.tasks.await
 import org.json.JSONArray
 import org.json.JSONObject
+
+private val configuredFirestoreDatabases = ConcurrentHashMap<String, Boolean>()
+
+/**
+ * Returns a [FirebaseFirestore] instance configured with [MemoryCacheSettings] before its first
+ * operation. This guarantees that stale, oversized, or wedged local SQLite mutations from earlier
+ * app sessions on a user's device can never clog Firestore's single FIFO gRPC write stream.
+ */
+fun getConfiguredFirestoreInstance(databaseId: String = ""): FirebaseFirestore {
+    val cleanId = databaseId.trim()
+    val db = runCatching {
+        if (cleanId.isNotBlank() && cleanId != "(default)") {
+            FirebaseFirestore.getInstance(cleanId)
+        } else {
+            FirebaseFirestore.getInstance()
+        }
+    }.getOrElse {
+        FirebaseFirestore.getInstance()
+    }
+    val cacheKey = cleanId.ifBlank { "(default)" }
+    if (configuredFirestoreDatabases.putIfAbsent(cacheKey, true) == null) {
+        runCatching {
+            val settings = FirebaseFirestoreSettings.Builder()
+                .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
+                .build()
+            db.firestoreSettings = settings
+        }
+    }
+    return db
+}
 
 enum class OperationType(val value: String) {
     CREATE("create"),
@@ -218,15 +252,15 @@ fun isRetryableFirestoreMessageError(throwable: Throwable?): Boolean {
  *
  * - Immediately propagates any real server/security exception (`PERMISSION_DENIED`,
  *   `UNAUTHENTICATED`, `INVALID_ARGUMENT`, `UNAVAILABLE`, etc.).
- * - If the gRPC write stream takes longer than [timeoutMs] due to queued background mutations
- *   or temporary offline state while the message document is safely staged in Firestore's
- *   local persistent cache without error, confirms local staging so native Firestore
- *   synchronization and the ViewModel queue can complete delivery seamlessly.
+ * - Only succeeds if the task itself completes or if the document in cache has
+ *   `!metadata.hasPendingWrites()` (genuinely acknowledged by the server).
+ * - Otherwise rethrows [kotlinx.coroutines.TimeoutCancellationException] so the caller can
+ *   retry or transition the message out of `SENDING` instead of leaving the spinner stuck.
  */
 @Suppress("UNCHECKED_CAST")
 suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmation(
     docRef: DocumentReference,
-    timeoutMs: Long = 3_500L
+    timeoutMs: Long = 6_000L
 ): T {
     return try {
         kotlinx.coroutines.withTimeout(timeoutMs) {
@@ -240,21 +274,15 @@ suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmati
         if (this@awaitMessageWriteConfirmation.isSuccessful) {
             return this@awaitMessageWriteConfirmation.result as T
         }
-        val stagedInCache = docRef.getFromCacheOnlyOrNull(80L)
+        val confirmedInCache = docRef.getFromCacheOnlyOrNull(80L)
         val postCheckException = this@awaitMessageWriteConfirmation.exception
         if (postCheckException != null) {
             throw postCheckException
         }
-        if (stagedInCache != null && stagedInCache.exists()) {
-            this@awaitMessageWriteConfirmation.addOnFailureListener { asyncErr ->
-                Log.e("FirestoreError", "Async message write rejected by server: ${asyncErr.message}", asyncErr)
-            }
+        if (confirmedInCache != null && confirmedInCache.exists() && !confirmedInCache.metadata.hasPendingWrites()) {
             return null as T
         }
-        throw IllegalStateException(
-            "সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। অনুগ্রহ করে 'পুনরায় পাঠান' বাটনে চাপ দিন।",
-            e
-        )
+        throw e
     }
 }
 

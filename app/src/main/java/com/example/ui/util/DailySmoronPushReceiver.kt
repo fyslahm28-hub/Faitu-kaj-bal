@@ -87,7 +87,7 @@ class DailySmoronPushReceiver : BroadcastReceiver() {
     ) {
         try {
             val databaseId = context.applicationContext.getString(R.string.firestore_database_id)
-            val db = FirebaseFirestore.getInstance(databaseId)
+            val db = com.example.data.repository.getConfiguredFirestoreInstance(databaseId)
             val readsCol = db.collection("users").document(userId).collection("notification_reads")
 
             val pushReceiptId = "${AjkerSmoronHelper.RECEIPT_PREFIX_PUSH_SENT}${dateKey}__$reminderId"

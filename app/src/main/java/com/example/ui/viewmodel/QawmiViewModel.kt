@@ -370,10 +370,13 @@ class QawmiViewModel(
                         msg.readByUserIds.any { it.isNotBlank() && it != currentUserId }
                     )
                 val isServerConfirmedRemotely = msg.id in remoteIds && msg.localDeliveryState == "SENT"
+                val isActivelyInFlight = msg.id in inFlightMessageIds
                 val resolvedState = when {
-                    isDeliveredOrSeenRemotely || isServerConfirmedRemotely -> "SENT"
-                    localOverrideState == "SENDING" || localOverrideState == "FAILED" -> localOverrideState
-                    else -> msg.localDeliveryState
+                    isDeliveredOrSeenRemotely || isServerConfirmedRemotely || localOverrideState == "SENT" -> "SENT"
+                    localOverrideState == "FAILED" -> "FAILED"
+                    localOverrideState == "SENDING" || isActivelyInFlight -> "SENDING"
+                    msg.localDeliveryState == "PENDING_SYNC" -> "PENDING_SYNC"
+                    else -> msg.localDeliveryState.ifBlank { "SENT" }
                 }
                 if (locallyReadIds.contains(msg.id)) {
                     msg.copy(
@@ -537,12 +540,12 @@ class QawmiViewModel(
 
     private val acknowledgedDeliveredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val inFlightMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val recoveredPendingSyncIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val pendingOutgoingQueue = java.util.concurrent.ConcurrentHashMap<String, FailedMessageDraft>()
 
     init {
         setUserOnlineStatus(true)
         verifyAndSyncAdminIdentity()
-        sanitizeExistingFeedPostsIfNeeded()
         observeAndAcknowledgeDeliveredMessages()
     }
 
@@ -567,6 +570,20 @@ class QawmiViewModel(
                     if (_localOptimisticMessages.value.any { it.id in confirmedOwnIds }) {
                         _localOptimisticMessages.value = _localOptimisticMessages.value.filterNot { it.id in confirmedOwnIds }
                     }
+                }
+
+                // 1.5. Recover any orphaned local-cache messages (PENDING_SYNC from a prior session)
+                // by re-dispatching them once so they either commit on the server (✓) or transition to FAILED.
+                val orphanedPendingSync = list.filter { msg ->
+                    msg.id.isNotBlank() &&
+                        msg.senderId == currentUserId &&
+                        msg.localDeliveryState == "PENDING_SYNC" &&
+                        msg.id !in inFlightMessageIds &&
+                        msg.id !in recoveredPendingSyncIds
+                }
+                for (orphan in orphanedPendingSync) {
+                    recoveredPendingSyncIds.add(orphan.id)
+                    retryFailedMessage(orphan)
                 }
 
                 // 2. Acknowledge incoming unread 1-on-1 and Group messages so sender sees Delivered (✓✓) in real time
@@ -613,12 +630,6 @@ class QawmiViewModel(
                 groupMemberIds = draft.groupMemberIds,
                 existingMessageId = draft.messageId
             )
-        }
-    }
-
-    private fun sanitizeExistingFeedPostsIfNeeded() {
-        viewModelScope.launch {
-            repository.inspectAndSanitizeExistingFeedPosts()
         }
     }
 
@@ -1333,7 +1344,7 @@ class QawmiViewModel(
         viewModelScope.launch {
             _errorBanner.value = null
             try {
-                val backoffDelaysMs = longArrayOf(0L, 700L, 1_400L, 2_800L)
+                val backoffDelaysMs = longArrayOf(0L, 600L, 1_400L)
                 var lastFailure: Throwable? = null
                 var confirmedMessageId: String? = null
 
@@ -1352,7 +1363,7 @@ class QawmiViewModel(
                     }
 
                     val attemptResult = try {
-                        withTimeout(12_000L) {
+                        withTimeout(8_500L) {
                             repository.sendDirectMessage(
                                 senderName = senderName,
                                 receiverId = receiverId,
