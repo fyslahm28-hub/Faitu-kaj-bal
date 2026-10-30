@@ -797,7 +797,11 @@ service cloud.firestore {
       }
 
       allow get: if isSignedIn() && isValidId(messageId) && (resource == null || isMessageParticipant(existing()));
-      allow list: if isSignedIn() && isMessageParticipant(existing());
+      allow list: if isSignedIn() && (
+                    existing().senderId == request.auth.uid ||
+                    existing().receiverId == request.auth.uid ||
+                    request.auth.uid in existing().groupMemberIds
+                  );
 
       allow create: if isSignedIn() &&
                        isValidId(messageId) &&

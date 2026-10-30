@@ -141,17 +141,76 @@ suspend fun DocumentReference.getFastOrNull(timeoutMs: Long = 3_500L): DocumentS
 }
 
 /**
+ * Reads a [DocumentSnapshot] strictly from the local Firestore SQLite/memory cache (`Source.CACHE`)
+ * without ever making a blocking network round-trip. Returns `null` immediately if not cached.
+ */
+suspend fun DocumentReference.getFromCacheOnlyOrNull(timeoutMs: Long = 50L): DocumentSnapshot? {
+    return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+        runCatching { this@getFromCacheOnlyOrNull.get(Source.CACHE).await() }.getOrNull()
+    }?.takeIf { it.exists() }
+}
+
+/**
  * Fetches a [DocumentSnapshot] from local Firestore cache (`Source.CACHE`) first for zero-latency
  * checks, falling back to a bounded server fetch only if the document is not yet cached locally.
  */
 suspend fun DocumentReference.getCacheFirstOrNull(serverTimeoutMs: Long = 1_200L): DocumentSnapshot? {
-    val fromCache = kotlinx.coroutines.withTimeoutOrNull(400L) {
-        runCatching { this@getCacheFirstOrNull.get(Source.CACHE).await() }.getOrNull()
-    }
-    if (fromCache != null && fromCache.exists()) return fromCache
+    val fromCache = getFromCacheOnlyOrNull(60L)
+    if (fromCache != null) return fromCache
     return kotlinx.coroutines.withTimeoutOrNull(serverTimeoutMs) {
         runCatching { this@getCacheFirstOrNull.get().await() }.getOrNull()
     }
+}
+
+/**
+ * Determines whether a message write failure is a transient connectivity/server condition that
+ * should be automatically retried with exponential backoff (or kept in the local offline queue),
+ * versus a permanent validation/security/blocking error that should fail immediately.
+ */
+fun isRetryableFirestoreMessageError(throwable: Throwable?): Boolean {
+    if (throwable == null) return false
+    if (throwable is IllegalArgumentException) return false
+
+    var rootFirestoreEx: com.google.firebase.firestore.FirebaseFirestoreException? = null
+    var current: Throwable? = throwable
+    while (current != null) {
+        if (current is com.google.firebase.firestore.FirebaseFirestoreException) {
+            rootFirestoreEx = current
+            break
+        }
+        if (current is kotlinx.coroutines.TimeoutCancellationException) {
+            return true
+        }
+        current = current.cause
+    }
+
+    val codeName = runCatching { rootFirestoreEx?.code?.name }.getOrNull().orEmpty()
+    val msg = (rootFirestoreEx?.message ?: throwable.message).orEmpty()
+
+    if (codeName == "PERMISSION_DENIED" ||
+        codeName == "UNAUTHENTICATED" ||
+        codeName == "INVALID_ARGUMENT" ||
+        codeName == "NOT_FOUND" ||
+        codeName == "ALREADY_EXISTS" ||
+        msg.contains("PERMISSION_DENIED", ignoreCase = true) ||
+        msg.contains("Missing or insufficient permissions", ignoreCase = true) ||
+        msg.contains("UNAUTHENTICATED", ignoreCase = true) ||
+        msg.contains("INVALID_ARGUMENT", ignoreCase = true) ||
+        msg.contains("ব্লক", ignoreCase = true) ||
+        msg.contains("সীমাবদ্ধ", ignoreCase = true)
+    ) {
+        return false
+    }
+
+    return codeName == "UNAVAILABLE" ||
+        codeName == "DEADLINE_EXCEEDED" ||
+        codeName == "ABORTED" ||
+        codeName == "RESOURCE_EXHAUSTED" ||
+        msg.contains("UNAVAILABLE", ignoreCase = true) ||
+        msg.contains("DEADLINE_EXCEEDED", ignoreCase = true) ||
+        msg.contains("Unable to resolve host", ignoreCase = true) ||
+        msg.contains("সার্ভারের সাথে সংযোগ", ignoreCase = true) ||
+        msg.contains("নির্ধারিত সময়ের বেশি", ignoreCase = true)
 }
 
 /**
@@ -160,14 +219,14 @@ suspend fun DocumentReference.getCacheFirstOrNull(serverTimeoutMs: Long = 1_200L
  * - Immediately propagates any real server/security exception (`PERMISSION_DENIED`,
  *   `UNAUTHENTICATED`, `INVALID_ARGUMENT`, `UNAVAILABLE`, etc.).
  * - If the gRPC write stream takes longer than [timeoutMs] due to queued background mutations
- *   even though the internet connection is active and the message document is staged in
- *   Firestore's local cache without error, confirms local staging rather than throwing a false
- *   "network disconnected" error.
+ *   or temporary offline state while the message document is safely staged in Firestore's
+ *   local persistent cache without error, confirms local staging so native Firestore
+ *   synchronization and the ViewModel queue can complete delivery seamlessly.
  */
 @Suppress("UNCHECKED_CAST")
 suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmation(
     docRef: DocumentReference,
-    timeoutMs: Long = 8_000L
+    timeoutMs: Long = 3_500L
 ): T {
     return try {
         kotlinx.coroutines.withTimeout(timeoutMs) {
@@ -181,9 +240,7 @@ suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmati
         if (this@awaitMessageWriteConfirmation.isSuccessful) {
             return this@awaitMessageWriteConfirmation.result as T
         }
-        val stagedInCache = kotlinx.coroutines.withTimeoutOrNull(800L) {
-            runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
-        }
+        val stagedInCache = docRef.getFromCacheOnlyOrNull(80L)
         val postCheckException = this@awaitMessageWriteConfirmation.exception
         if (postCheckException != null) {
             throw postCheckException

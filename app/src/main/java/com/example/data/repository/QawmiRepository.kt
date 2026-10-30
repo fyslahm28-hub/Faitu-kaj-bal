@@ -26,7 +26,9 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.QuerySnapshot
+import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -1958,6 +1960,10 @@ class QawmiRepository(
                     if (key != null && value != null) key to value else null
                 }
                 ?.toMap() ?: obj.userReactions
+            val resolvedCreatedAt = runCatching {
+                getTimestamp("createdAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            }.getOrNull() ?: obj.createdAt ?: Timestamp.now()
+            val hasPending = runCatching { metadata.hasPendingWrites() }.getOrDefault(false)
             obj.copy(
                 id = id,
                 groupId = resolvedGroupId,
@@ -1974,8 +1980,11 @@ class QawmiRepository(
                 deletedForSender = resolvedDeletedForSender,
                 deletedForReceiver = resolvedDeletedForReceiver,
                 deletedForUserIds = resolvedDeletedForUsers,
-                isDeletedForEveryone = resolvedDeletedForEveryone
-            )
+                isDeletedForEveryone = resolvedDeletedForEveryone,
+                createdAt = resolvedCreatedAt
+            ).apply {
+                localDeliveryState = if (hasPending) "SENDING" else "SENT"
+            }
         } catch (_: Throwable) {
             null
         }
@@ -1985,7 +1994,7 @@ class QawmiRepository(
         val path = "messages"
         val sentFlow = db.collection(path)
             .whereEqualTo("senderId", userId)
-            .snapshots()
+            .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
                 snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
             }
@@ -1996,7 +2005,7 @@ class QawmiRepository(
 
         val receivedFlow = db.collection(path)
             .whereEqualTo("receiverId", userId)
-            .snapshots()
+            .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
                 snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
             }
@@ -2007,7 +2016,7 @@ class QawmiRepository(
 
         val groupMessagesFlow = db.collection(path)
             .whereArrayContains("groupMemberIds", userId)
-            .snapshots()
+            .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
                 snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
             }
@@ -2060,26 +2069,27 @@ class QawmiRepository(
             db.collection("messages").document()
         }
         return try {
-            // Idempotency check on retry: if this preallocated message ID was already saved by the sender,
-            // return success immediately without re-writing createdAt or duplicating work.
+            // Fast local cache idempotency check (0 network round-trips):
+            // If this preallocated message ID already exists in local cache and was confirmed by the server,
+            // return immediately. If it is already staged in the local write queue, wait for pending writes.
             if (preallocatedMessageId.isNotBlank()) {
-                val existingDoc = docRef.getCacheFirstOrNull(500L)
-                if (existingDoc != null && existingDoc.exists() && existingDoc.getString("senderId") == uid) {
-                    return Result.success(docRef.id)
+                val existingDoc = docRef.getFromCacheOnlyOrNull(40L)
+                if (existingDoc != null && existingDoc.getString("senderId") == uid) {
+                    if (!existingDoc.metadata.hasPendingWrites()) {
+                        return Result.success(docRef.id)
+                    } else {
+                        kotlinx.coroutines.withTimeoutOrNull(2_500L) {
+                            runCatching { db.waitForPendingWrites().await() }
+                        }
+                        return Result.success(docRef.id)
+                    }
                 }
             }
 
             if (!isGroupMessage) {
-                // Check block status between sender and receiver concurrently using cache-first reads
-                val (senderSnap, receiverSnap) = coroutineScope {
-                    val senderDeferred = async {
-                        runCatching { db.collection("users").document(uid).getCacheFirstOrNull(800L) }.getOrNull()
-                    }
-                    val receiverDeferred = async {
-                        runCatching { db.collection("users").document(receiverId).getCacheFirstOrNull(800L) }.getOrNull()
-                    }
-                    senderDeferred.await() to receiverDeferred.await()
-                }
+                // Zero-latency local cache block check (no pre-flight network calls before docRef.set).
+                // Server-side Firestore Security Rules also enforce !isBlockedBetween atomically.
+                val senderSnap = db.collection("users").document(uid).getFromCacheOnlyOrNull(40L)
                 val senderBlockedList = (senderSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -2089,6 +2099,7 @@ class QawmiRepository(
                     )
                 }
 
+                val receiverSnap = db.collection("users").document(receiverId).getFromCacheOnlyOrNull(40L)
                 val receiverBlockedList = (receiverSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -2099,10 +2110,14 @@ class QawmiRepository(
                 }
             }
 
-            val uploadedImages = ProfilePhotoHelper.uploadChatImagesToFirebaseStorage(
-                imageItems = imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE),
-                senderId = uid
-            )
+            val uploadedImages = if (imageUrls.isEmpty()) {
+                emptyList()
+            } else {
+                ProfilePhotoHelper.uploadChatImagesToFirebaseStorage(
+                    imageItems = imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE),
+                    senderId = uid
+                )
+            }
             // Keep body strictly as the user's actual text (empty string when sending images without caption)
             // so no artificial "📷 ১ টি ছবি প্রেরণ করা হয়েছে" or "ছবি মেসেজ পাঠানো হচ্ছে" text is injected.
             val resolvedBody = body.trim()
@@ -2135,7 +2150,7 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
-            docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 8_000L)
+            docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 3_500L)
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.
             // Bell icon notifications are strictly reserved for general notifications (NEW_CIRCULAR, APPLICATION, ANNOUNCEMENT, etc.).
@@ -2143,23 +2158,50 @@ class QawmiRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (!isGroupMessage) {
+                val msg = e.message.orEmpty()
+                if (msg.contains("PERMISSION_DENIED", ignoreCase = true) ||
+                    msg.contains("Missing or insufficient permissions", ignoreCase = true)
+                ) {
+                    val senderSnap = runCatching { db.collection("users").document(uid).getCacheFirstOrNull(1_000L) }.getOrNull()
+                    val senderBlocked = (senderSnap?.get("blockedUserIds") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+                    if (receiverId in senderBlocked) {
+                        return Result.failure(
+                            IllegalStateException("আপনি এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান বিরত (ব্লক) রেখেছেন। পুনরায় পয়গাম পাঠাতে আনব্লক করুন।")
+                        )
+                    }
+                    val receiverSnap = runCatching { db.collection("users").document(receiverId).getCacheFirstOrNull(1_000L) }.getOrNull()
+                    val receiverBlocked = (receiverSnap?.get("blockedUserIds") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+                    if (uid in receiverBlocked) {
+                        return Result.failure(
+                            IllegalStateException("এই কথোপকথনে পয়গাম প্রেরণ বর্তমানে প্রাপক কর্তৃক সীমাবদ্ধ রয়েছে।")
+                        )
+                    }
+                }
+            }
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
             Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
     /**
-     * Marks incoming unread messages as delivered (`DELIVERED:<uid>` in `readByUserIds` while keeping
-     * `isRead = false`) so the sender's real-time snapshot listener immediately transitions from
-     * Sent (`✓`) to Delivered (`✓✓`) when the recipient's device receives the message.
+     * Marks incoming unread messages (1-on-1 and Group) as delivered (`DELIVERED:<uid>` in `readByUserIds`
+     * while keeping `isRead = false`) so the sender's real-time snapshot listener immediately transitions
+     * from Sent (`✓`) to Delivered (`✓✓`) when the recipient's device receives the message.
      */
     suspend fun acknowledgeMessagesDelivered(messages: List<DirectMessage>): Result<Unit> {
         val uid = auth.currentUser?.uid?.takeIf { it.isNotBlank() } ?: return Result.success(Unit)
         val deliveredToken = "DELIVERED:$uid"
         val pendingDelivery = messages.filter { msg ->
+            val isGroupMsg = msg.groupId.isNotBlank() || msg.receiverId.startsWith("GROUP:", ignoreCase = true)
+            val isEligibleRecipient = if (isGroupMsg) {
+                uid in msg.groupMemberIds
+            } else {
+                msg.receiverId == uid
+            }
             msg.id.isNotBlank() &&
                 msg.senderId != uid &&
-                msg.receiverId == uid &&
+                isEligibleRecipient &&
                 !msg.isRead &&
                 !msg.readByUserIds.contains(uid) &&
                 !msg.readByUserIds.contains(deliveredToken) &&
@@ -2175,7 +2217,7 @@ class QawmiRepository(
                     mapOf("readByUserIds" to updatedReadBy)
                 )
             }
-            batch.commit().awaitWithTimeout(5_000L)
+            batch.commit().awaitWithTimeout(4_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2240,14 +2282,26 @@ class QawmiRepository(
             .forEach { unreadMap[it.id] = it.readByUserIds }
 
         return try {
-            // Only query Firestore directly if the in-memory messages list had no matching unread items
-            // (e.g., if called before messagesState emitted), avoiding redundant full-collection downloads.
-            if (unreadMap.isEmpty()) {
-                val receivedSnap = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
-                    db.collection("messages")
-                        .whereEqualTo("receiverId", uid)
-                        .get()
-                        .await()
+            // Only query Firestore if the caller passed an empty in-memory messages list (before messagesState emitted),
+            // checking local cache first to avoid unnecessary full-collection network reads.
+            if (unreadMap.isEmpty() && messages.isEmpty()) {
+                val cachedSnap = kotlinx.coroutines.withTimeoutOrNull(150L) {
+                    runCatching {
+                        db.collection("messages")
+                            .whereEqualTo("receiverId", uid)
+                            .get(Source.CACHE)
+                            .await()
+                    }.getOrNull()
+                }
+                val receivedSnap = if (cachedSnap != null && !cachedSnap.isEmpty) {
+                    cachedSnap
+                } else {
+                    kotlinx.coroutines.withTimeoutOrNull(2_500L) {
+                        db.collection("messages")
+                            .whereEqualTo("receiverId", uid)
+                            .get()
+                            .await()
+                    }
                 }
                 for (doc in receivedSnap?.documents.orEmpty()) {
                     val docSender = doc.getString("senderId").orEmpty()

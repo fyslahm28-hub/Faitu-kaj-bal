@@ -554,13 +554,43 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("Creator reactToMessage on group message failed: ${creatorReactRes.exceptionOrNull()}", creatorReactRes.isSuccess)
 
-        // 4. Member observes group message and reacts
+        // 4. Member observes group message, acknowledges delivery (✓✓), marks read (SEEN ✓✓), and reacts
         signInTestUser(memberEmail)
         val memberMsgs = withTimeout(5000L) {
             repo.observeUserMessages(memberUid).first { list -> list.any { it.id == groupMsgId } }
         }
         val msgForMember = memberMsgs.first { it.id == groupMsgId }
         assertEquals("DUA", msgForMember.userReactions[creatorUid])
+
+        val groupAckRes = withTimeout(5000L) {
+            repo.acknowledgeMessagesDelivered(memberMsgs)
+        }
+        assertTrue("Group acknowledgeMessagesDelivered failed: ${groupAckRes.exceptionOrNull()}", groupAckRes.isSuccess)
+
+        val memberMsgsAfterAck = withTimeout(5000L) {
+            repo.observeUserMessages(memberUid).first { list ->
+                list.any { it.id == groupMsgId && it.resolveDeliveryStatus() == MessageDeliveryStatus.DELIVERED }
+            }
+        }
+        assertEquals(
+            MessageDeliveryStatus.DELIVERED,
+            memberMsgsAfterAck.first { it.id == groupMsgId }.resolveDeliveryStatus()
+        )
+
+        val groupReadRes = withTimeout(5000L) {
+            repo.markConversationMessagesAsRead("GROUP:$groupId", memberMsgsAfterAck)
+        }
+        assertTrue("Group markConversationMessagesAsRead failed: ${groupReadRes.exceptionOrNull()}", groupReadRes.isSuccess)
+
+        val memberMsgsAfterRead = withTimeout(5000L) {
+            repo.observeUserMessages(memberUid).first { list ->
+                list.any { it.id == groupMsgId && it.resolveDeliveryStatus() == MessageDeliveryStatus.SEEN }
+            }
+        }
+        assertEquals(
+            MessageDeliveryStatus.SEEN,
+            memberMsgsAfterRead.first { it.id == groupMsgId }.resolveDeliveryStatus()
+        )
 
         val memberReactRes = withTimeout(5000L) {
             repo.reactToMessage(msgForMember, "MUHABBAT")

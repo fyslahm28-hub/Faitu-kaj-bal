@@ -17,11 +17,13 @@ import com.example.data.model.MadrasaProfile
 import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.data.repository.QawmiRepository
+import com.example.data.repository.isRetryableFirestoreMessageError
 import com.example.ui.util.AdminSecurityHelper
 import com.google.firebase.Timestamp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -367,8 +369,9 @@ class QawmiViewModel(
                     msg.isRead ||
                         msg.readByUserIds.any { it.isNotBlank() && it != currentUserId }
                     )
+                val isServerConfirmedRemotely = msg.id in remoteIds && msg.localDeliveryState == "SENT"
                 val resolvedState = when {
-                    isDeliveredOrSeenRemotely -> "SENT"
+                    isDeliveredOrSeenRemotely || isServerConfirmedRemotely -> "SENT"
                     localOverrideState == "SENDING" || localOverrideState == "FAILED" -> localOverrideState
                     else -> msg.localDeliveryState
                 }
@@ -532,7 +535,9 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    private val acknowledgedDeliveredIds = mutableSetOf<String>()
+    private val acknowledgedDeliveredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val inFlightMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val pendingOutgoingQueue = java.util.concurrent.ConcurrentHashMap<String, FailedMessageDraft>()
 
     init {
         setUserOnlineStatus(true)
@@ -547,11 +552,35 @@ class QawmiViewModel(
             val deliveredToken = "DELIVERED:$currentUserId"
             messagesState.collect { state ->
                 val list = (state as? UiState.Success)?.data ?: return@collect
+
+                // 1. Clean up local optimistic / pending queue entries that the server has now confirmed
+                val confirmedOwnIds = list.filter { msg ->
+                    msg.senderId == currentUserId && msg.localDeliveryState == "SENT"
+                }.map { it.id }.toSet()
+                if (confirmedOwnIds.isNotEmpty()) {
+                    confirmedOwnIds.forEach { confirmedId ->
+                        pendingOutgoingQueue.remove(confirmedId)
+                        if (_failedMessageDraft.value?.messageId == confirmedId) {
+                            _failedMessageDraft.value = null
+                        }
+                    }
+                    if (_localOptimisticMessages.value.any { it.id in confirmedOwnIds }) {
+                        _localOptimisticMessages.value = _localOptimisticMessages.value.filterNot { it.id in confirmedOwnIds }
+                    }
+                }
+
+                // 2. Acknowledge incoming unread 1-on-1 and Group messages so sender sees Delivered (✓✓) in real time
                 val unacknowledged = list.filter { msg ->
+                    val isGroupMsg = msg.groupId.isNotBlank() || msg.receiverId.startsWith("GROUP:", ignoreCase = true)
+                    val isEligibleRecipient = if (isGroupMsg) {
+                        currentUserId in msg.groupMemberIds
+                    } else {
+                        msg.receiverId == currentUserId
+                    }
                     msg.id.isNotBlank() &&
                         msg.id !in acknowledgedDeliveredIds &&
                         msg.senderId != currentUserId &&
-                        msg.receiverId == currentUserId &&
+                        isEligibleRecipient &&
                         !msg.isRead &&
                         !msg.readByUserIds.contains(currentUserId) &&
                         !msg.readByUserIds.contains(deliveredToken)
@@ -560,7 +589,30 @@ class QawmiViewModel(
                     unacknowledged.forEach { acknowledgedDeliveredIds.add(it.id) }
                     repository.acknowledgeMessagesDelivered(unacknowledged)
                 }
+
+                // 3. If connectivity resumed and there are offline-queued messages waiting, flush them automatically
+                flushPendingOutgoingQueueIfNeeded()
             }
+        }
+    }
+
+    private fun flushPendingOutgoingQueueIfNeeded() {
+        if (pendingOutgoingQueue.isEmpty()) return
+        val queuedDrafts = pendingOutgoingQueue.values
+            .filter { it.messageId.isNotBlank() && it.messageId !in inFlightMessageIds }
+            .sortedBy { it.timestampMs }
+        for (draft in queuedDrafts) {
+            sendMessage(
+                receiverId = draft.partnerId,
+                receiverName = draft.receiverName,
+                subject = draft.subject,
+                body = draft.body,
+                imageUrls = draft.imageUrls,
+                groupId = draft.groupId,
+                groupName = draft.groupName,
+                groupMemberIds = draft.groupMemberIds,
+                existingMessageId = draft.messageId
+            )
         }
     }
 
@@ -1221,11 +1273,20 @@ class QawmiViewModel(
             }
         }
 
-        // Preserve original timestamp when retrying a failed message so message order never jumps
+        // Prevent duplicate concurrent in-flight dispatches of the exact same messageId
+        if (!inFlightMessageIds.add(messageId)) {
+            onSent()
+            return
+        }
+
+        // Preserve original timestamp when retrying a message so conversation order never jumps
         val existingCreatedAt = _localOptimisticMessages.value
             .firstOrNull { it.id == messageId }
             ?.createdAt
             ?: Timestamp.now()
+
+        val resolvedSubject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }
+        val resolvedGroupName = groupName.ifBlank { receiverName }
 
         val optimisticMsg = DirectMessage(
             id = messageId,
@@ -1235,9 +1296,9 @@ class QawmiViewModel(
             receiverId = if (isGroupMsg) "GROUP:$resolvedGroupId" else receiverId,
             receiverName = receiverName,
             groupId = resolvedGroupId,
-            groupName = groupName.ifBlank { receiverName },
+            groupName = resolvedGroupName,
             groupMemberIds = if (isGroupMsg) (groupMemberIds + currentUserId).distinct() else emptyList(),
-            subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
+            subject = resolvedSubject,
             body = cleanBody,
             imageUrls = cappedImages,
             isRead = false,
@@ -1252,29 +1313,81 @@ class QawmiViewModel(
             listOf(optimisticMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
         ).distinctBy { it.id }
 
+        val queueDraft = FailedMessageDraft(
+            partnerId = receiverId,
+            body = cleanBody,
+            imageUrls = cappedImages,
+            messageId = messageId,
+            receiverName = receiverName,
+            subject = resolvedSubject,
+            groupId = resolvedGroupId,
+            groupName = resolvedGroupName,
+            groupMemberIds = groupMemberIds,
+            timestampMs = existingCreatedAt.toDate().time
+        )
+        pendingOutgoingQueue[messageId] = queueDraft
+
         // Clear composer draft immediately so the user can continue typing without UI freeze
         onSent()
 
         viewModelScope.launch {
             _errorBanner.value = null
             try {
-                val result = withTimeout(22_000L) {
-                    repository.sendDirectMessage(
-                        senderName = senderName,
-                        receiverId = receiverId,
-                        receiverName = receiverName,
-                        subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                        body = cleanBody,
-                        senderPhotoUrl = senderPhoto,
-                        imageUrls = cappedImages,
-                        groupId = resolvedGroupId,
-                        groupName = groupName.ifBlank { receiverName },
-                        groupMemberIds = groupMemberIds,
-                        preallocatedMessageId = messageId
-                    )
+                val backoffDelaysMs = longArrayOf(0L, 700L, 1_400L, 2_800L)
+                var lastFailure: Throwable? = null
+                var confirmedMessageId: String? = null
+
+                for (attemptIndex in backoffDelaysMs.indices) {
+                    val delayMs = backoffDelaysMs[attemptIndex]
+                    if (delayMs > 0L) {
+                        delay(delayMs)
+                        // Check if Firestore's native background sync already confirmed this message during backoff
+                        val alreadySynced = (messagesState.value as? UiState.Success)?.data?.any {
+                            it.id == messageId && it.localDeliveryState == "SENT"
+                        } == true
+                        if (alreadySynced) {
+                            confirmedMessageId = messageId
+                            break
+                        }
+                    }
+
+                    val attemptResult = try {
+                        withTimeout(12_000L) {
+                            repository.sendDirectMessage(
+                                senderName = senderName,
+                                receiverId = receiverId,
+                                receiverName = receiverName,
+                                subject = resolvedSubject,
+                                body = cleanBody,
+                                senderPhotoUrl = senderPhoto,
+                                imageUrls = cappedImages,
+                                groupId = resolvedGroupId,
+                                groupName = resolvedGroupName,
+                                groupMemberIds = groupMemberIds,
+                                preallocatedMessageId = messageId
+                            )
+                        }
+                    } catch (timeoutEx: TimeoutCancellationException) {
+                        Result.failure(timeoutEx)
+                    }
+
+                    if (attemptResult.isSuccess) {
+                        confirmedMessageId = attemptResult.getOrNull()?.ifBlank { messageId } ?: messageId
+                        break
+                    }
+
+                    val err = attemptResult.exceptionOrNull()
+                    lastFailure = err
+                    if (!isRetryableFirestoreMessageError(err)) {
+                        // Permanent failure (e.g., PERMISSION_DENIED, blocked user, validation error) — do not retry
+                        break
+                    }
                 }
-                result.onSuccess { confirmedId ->
-                    val finalId = confirmedId.ifBlank { messageId }
+
+                if (confirmedMessageId != null) {
+                    val finalId = confirmedMessageId.ifBlank { messageId }
+                    pendingOutgoingQueue.remove(messageId)
+                    pendingOutgoingQueue.remove(finalId)
                     if (_failedMessageDraft.value?.messageId == finalId || _failedMessageDraft.value?.partnerId == receiverId) {
                         _failedMessageDraft.value = null
                     }
@@ -1284,66 +1397,40 @@ class QawmiViewModel(
                     _localOptimisticMessages.value = (
                         listOf(sentMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId || it.id == finalId }
                     ).distinctBy { it.id }
-                }.onFailure { err ->
+                } else {
+                    val isRetryable = isRetryableFirestoreMessageError(lastFailure)
+                    if (!isRetryable) {
+                        pendingOutgoingQueue.remove(messageId)
+                    }
                     val failedMsg = optimisticMsg.copy().apply {
                         localDeliveryState = "FAILED"
                     }
                     _localOptimisticMessages.value = (
                         listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
                     ).distinctBy { it.id }
-                    _failedMessageDraft.value = FailedMessageDraft(
-                        partnerId = receiverId,
-                        body = cleanBody,
-                        imageUrls = cappedImages,
-                        messageId = messageId,
-                        receiverName = receiverName,
-                        subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                        groupId = resolvedGroupId,
-                        groupName = groupName.ifBlank { receiverName },
-                        groupMemberIds = groupMemberIds
-                    )
-                    _errorBanner.value = err.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
+                    _failedMessageDraft.value = queueDraft
+                    _errorBanner.value = if (lastFailure is TimeoutCancellationException) {
+                        "সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।"
+                    } else {
+                        lastFailure?.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
+                    }
                 }
-            } catch (e: TimeoutCancellationException) {
-                val failedMsg = optimisticMsg.copy().apply {
-                    localDeliveryState = "FAILED"
-                }
-                _localOptimisticMessages.value = (
-                    listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
-                ).distinctBy { it.id }
-                _failedMessageDraft.value = FailedMessageDraft(
-                    partnerId = receiverId,
-                    body = cleanBody,
-                    imageUrls = cappedImages,
-                    messageId = messageId,
-                    receiverName = receiverName,
-                    subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                    groupId = resolvedGroupId,
-                    groupName = groupName.ifBlank { receiverName },
-                    groupMemberIds = groupMemberIds
-                )
-                _errorBanner.value = "সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (!isRetryableFirestoreMessageError(e)) {
+                    pendingOutgoingQueue.remove(messageId)
+                }
                 val failedMsg = optimisticMsg.copy().apply {
                     localDeliveryState = "FAILED"
                 }
                 _localOptimisticMessages.value = (
                     listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
                 ).distinctBy { it.id }
-                _failedMessageDraft.value = FailedMessageDraft(
-                    partnerId = receiverId,
-                    body = cleanBody,
-                    imageUrls = cappedImages,
-                    messageId = messageId,
-                    receiverName = receiverName,
-                    subject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" },
-                    groupId = resolvedGroupId,
-                    groupName = groupName.ifBlank { receiverName },
-                    groupMemberIds = groupMemberIds
-                )
+                _failedMessageDraft.value = queueDraft
                 _errorBanner.value = e.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
+            } finally {
+                inFlightMessageIds.remove(messageId)
             }
         }
     }
@@ -1486,23 +1573,25 @@ class QawmiViewModel(
         val currentMessages = (messagesState.value as? UiState.Success)?.data ?: emptyList()
         val isGroupKey = otherUserId.startsWith("GROUP:", ignoreCase = true)
         val groupId = if (isGroupKey) otherUserId.substringAfter(":") else ""
-        val matchingUnreadIds = currentMessages
-            .filter { msg ->
-                msg.id.isNotBlank() && msg.isUnreadForUser(currentUserId) && (
-                    if (isGroupKey) {
-                        msg.groupId == groupId || msg.receiverId.equals("GROUP:$groupId", ignoreCase = true)
-                    } else {
-                        msg.groupId.isBlank() && msg.senderId == otherUserId && msg.receiverId == currentUserId
-                    }
-                )
-            }
-            .map { it.id }
-            .toSet()
+        val matchingUnreadMessages = currentMessages.filter { msg ->
+            msg.id.isNotBlank() && msg.isUnreadForUser(currentUserId) && (
+                if (isGroupKey) {
+                    msg.groupId == groupId || msg.receiverId.equals("GROUP:$groupId", ignoreCase = true)
+                } else {
+                    msg.groupId.isBlank() && msg.senderId == otherUserId && msg.receiverId == currentUserId
+                }
+            )
+        }
+        val matchingUnreadIds = matchingUnreadMessages.map { it.id }.toSet()
         if (matchingUnreadIds.isNotEmpty()) {
             _locallyReadMessageIds.value = _locallyReadMessageIds.value + matchingUnreadIds
-        }
-        viewModelScope.launch {
-            repository.markConversationMessagesAsRead(otherUserId, currentMessages)
+            viewModelScope.launch {
+                repository.markConversationMessagesAsRead(otherUserId, matchingUnreadMessages)
+            }
+        } else if (currentMessages.isEmpty()) {
+            viewModelScope.launch {
+                repository.markConversationMessagesAsRead(otherUserId, emptyList())
+            }
         }
     }
 
