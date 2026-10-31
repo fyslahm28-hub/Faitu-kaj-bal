@@ -1663,6 +1663,8 @@ class QawmiViewModel(
 
                 if (sendResult.isSuccess) {
                     val finalId = sendResult.getOrNull()?.ifBlank { messageId } ?: messageId
+                    inFlightMessageIds.remove(messageId)
+                    inFlightMessageIds.remove(finalId)
                     pendingOutgoingQueue.remove(messageId)
                     pendingOutgoingQueue.remove(finalId)
                     if (_failedMessageDraft.value?.messageId == finalId || _failedMessageDraft.value?.partnerId == receiverId) {
@@ -1676,6 +1678,7 @@ class QawmiViewModel(
                     ).distinctBy { it.id }
                 } else {
                     val lastFailure = sendResult.exceptionOrNull()
+                    inFlightMessageIds.remove(messageId)
                     pendingOutgoingQueue.remove(messageId)
                     val failedMsg = optimisticMsg.copy().apply {
                         localDeliveryState = "FAILED"
@@ -1693,6 +1696,7 @@ class QawmiViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                inFlightMessageIds.remove(messageId)
                 pendingOutgoingQueue.remove(messageId)
                 val failedMsg = optimisticMsg.copy().apply {
                     localDeliveryState = "FAILED"

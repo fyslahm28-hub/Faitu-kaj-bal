@@ -426,6 +426,7 @@ fun AppNavigation(
         )
 
         LaunchedEffect(openNotificationsInitially, currentUserId) {
+            QawmiNotificationHelper.syncFcmTopicSubscriptions(context, currentUserId)
             if (openNotificationsInitially) {
                 qawmiViewModel.navigateTo(MainDestination.NOTIFICATIONS)
             }

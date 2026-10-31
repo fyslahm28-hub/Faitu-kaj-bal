@@ -512,6 +512,116 @@ object QawmiNotificationHelper {
         }
     }
 
+    /**
+     * Subscribes the device to the user's personal FCM topic (`user_<uid>`) and the community
+     * topic (`all_users`) so Firebase Cloud Messaging delivers push notifications even when the app is closed.
+     */
+    fun syncFcmTopicSubscriptions(context: Context, userId: String) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return
+        ensureChannelCreated(context)
+        val sanitizedTopicUid = cleanUid.replace(Regex("[^a-zA-Z0-9-_.~%]"), "_")
+        runCatching {
+            val fcm = com.google.firebase.messaging.FirebaseMessaging.getInstance()
+            fcm.isAutoInitEnabled = true
+            fcm.subscribeToTopic("user_$sanitizedTopicUid")
+            fcm.subscribeToTopic("all_users")
+        }
+    }
+
+    /**
+     * Handles an incoming Firebase Cloud Messaging (FCM) data/notification payload when the app
+     * is in the background or closed, displaying a high-priority system notification on the
+     * Paygam message channel with a deep-link back into the conversation.
+     */
+    fun handleIncomingFcmPushMessage(
+        context: Context,
+        data: Map<String, String>,
+        notificationTitle: String? = null,
+        notificationBody: String? = null,
+        currentUserId: String = ""
+    ): Boolean {
+        ensureChannelCreated(context)
+        if (!hasNotificationPermission(context)) return false
+
+        val resolvedCurrentUid = currentUserId.ifBlank {
+            runCatching { com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid.orEmpty() }.getOrDefault("")
+        }
+        val senderId = data["senderId"]?.trim().orEmpty()
+        if (resolvedCurrentUid.isNotBlank() && senderId.isNotBlank() && senderId == resolvedCurrentUid) {
+            return false
+        }
+
+        val receiverId = data["receiverId"]?.trim().orEmpty()
+        val groupId = data["groupId"]?.trim().orEmpty()
+        val isGroup = groupId.isNotBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
+        if (resolvedCurrentUid.isNotBlank() && !isGroup && receiverId.isNotBlank() && receiverId != resolvedCurrentUid) {
+            return false
+        }
+
+        val senderName = data["senderName"]?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: notificationTitle?.trim()?.takeIf { it.isNotBlank() }
+            ?: "সম্মানিত দ্বীনি ভাই"
+        val groupName = data["groupName"]?.trim().orEmpty()
+        val messageBody = data["body"]?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: data["message"]?.trim()?.takeIf { it.isNotBlank() }
+            ?: notificationBody?.trim()?.takeIf { it.isNotBlank() }
+            ?: "নতুন পয়গাম এসেছে"
+        val messageId = data["messageId"]?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: data["id"]?.trim()?.takeIf { it.isNotBlank() }
+            ?: "fcm_${System.currentTimeMillis()}"
+
+        val conversationKey = when {
+            isGroup -> {
+                val resolvedGid = if (groupId.isNotBlank()) groupId else receiverId.substringAfter(":")
+                "GROUP:$resolvedGid"
+            }
+            senderId.isNotBlank() -> senderId
+            else -> "fcm_sender_${abs(senderName.hashCode())}"
+        }
+
+        // Deduplicate against already delivered message IDs for this user
+        if (resolvedCurrentUid.isNotBlank()) {
+            val prefs = context.getSharedPreferences("$MSG_PREFS_PREFIX$resolvedCurrentUid", Context.MODE_PRIVATE)
+            val deliveredSet = prefs.getStringSet("delivered_msg_ids", emptySet())?.toMutableSet() ?: mutableSetOf()
+            if (deliveredSet.contains(messageId)) {
+                return false
+            }
+            deliveredSet.add(messageId)
+            val activeNotifiedConvKeys = prefs.getStringSet("active_conv_keys", emptySet())?.toMutableSet() ?: mutableSetOf()
+            activeNotifiedConvKeys.add(conversationKey)
+            prefs.edit()
+                .putStringSet("delivered_msg_ids", deliveredSet)
+                .putStringSet("active_conv_keys", activeNotifiedConvKeys)
+                .apply()
+        }
+
+        val incomingDirectMessage = DirectMessage(
+            id = messageId,
+            senderId = senderId.ifBlank { conversationKey },
+            senderName = senderName,
+            receiverId = receiverId.ifBlank { resolvedCurrentUid },
+            receiverName = data["receiverName"]?.trim().orEmpty(),
+            subject = data["subject"]?.trim().orEmpty(),
+            body = messageBody,
+            groupId = groupId,
+            groupName = groupName,
+            isRead = false,
+            createdAt = com.google.firebase.Timestamp.now()
+        )
+
+        showConversationMessageNotification(
+            context = context,
+            conversationKey = conversationKey,
+            unreadMessages = listOf(incomingDirectMessage),
+            chatGroups = emptyList()
+        )
+        return true
+    }
+
     private fun toBanglaDigits(number: Int): String {
         val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
         return number.toString().map { ch ->

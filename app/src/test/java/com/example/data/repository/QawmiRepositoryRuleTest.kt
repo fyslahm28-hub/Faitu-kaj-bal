@@ -1081,7 +1081,188 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertEquals("মাওলানা তানভীর আহমদ", publishedAppOnFeed.authorName)
         assertTrue(publishedAppOnFeed.isVerifiedMadrasa)
     }
+
+    @Test
+    fun twoUserLiveMessaging_deliveryAndReadStatus_andAppRestartPersistence_verifiedEndToEnd() = runBlocking {
+        // 1. Setup Two Separate Accounts & Devices (Device 1: User A, Device 2: User B)
+        val userAEmail = "device1_user_${UUID.randomUUID()}@test.com"
+        val userBEmail = "device2_user_${UUID.randomUUID()}@test.com"
+
+        val userBUid = signInTestUser(userBEmail)
+        val repoDevice2 = QawmiRepository(firestore, auth)
+        withTimeout(5_000L) {
+            repoDevice2.saveUserProfile(
+                com.example.data.model.UserProfile(
+                    id = userBUid,
+                    userId = userBUid,
+                    fullName = "মুফতি ফয়সাল মাহমুদ",
+                    accountType = "muhtamim",
+                    district = "ঢাকা",
+                    madrasaName = "জামিয়া ইসলামিয়া ঢাকা",
+                    designation = "মুহতামিম",
+                    qualification = "দাওরায়ে হাদিস ও ইফতা",
+                    contactInfo = "01711223344",
+                    photoUrl = "preset:mosque_gold"
+                )
+            ).getOrThrow()
+        }
+
+        val userAUid = signInTestUser(userAEmail)
+        val repoDevice1 = QawmiRepository(firestore, auth)
+        withTimeout(5_000L) {
+            repoDevice1.saveUserProfile(
+                com.example.data.model.UserProfile(
+                    id = userAUid,
+                    userId = userAUid,
+                    fullName = "মাওলানা আব্দুল্লাহ আল মামুন",
+                    accountType = "khadim",
+                    district = "সিলেট",
+                    designation = "মুহাদ্দিস",
+                    qualification = "দাওরায়ে হাদিস",
+                    contactInfo = "01811223344",
+                    photoUrl = "preset:scholar_emerald"
+                )
+            ).getOrThrow()
+        }
+
+        // 2. Device 1 (User A) sends a message with an image and text to Device 2 (User B)
+        val sampleImage = "data:image/jpeg;base64," + "C".repeat(45_000)
+        val msg1Res = withTimeout(5_000L) {
+            repoDevice1.sendDirectMessage(
+                senderName = "মাওলানা আব্দুল্লাহ আল মামুন",
+                receiverId = userBUid,
+                receiverName = "মুফতি ফয়সাল মাহমুদ",
+                subject = "মুহাদ্দিস খেদমত প্রসঙ্গে",
+                body = "আসসালামু আলাইকুম মুহতারাম, আপনার মাদরাসার বিজ্ঞপ্তির আলোকে যোগাযোগ করছি।",
+                senderPhotoUrl = "preset:scholar_emerald",
+                imageUrls = listOf(sampleImage)
+            )
+        }
+        assertTrue("Device 1 sendDirectMessage should succeed: ${msg1Res.exceptionOrNull()}", msg1Res.isSuccess)
+        val msg1Id = msg1Res.getOrThrow()
+
+        // Verify initial status on Device 1 is SENT (single tick ✓) before Device 2 receives it
+        val initialMsgsOnDevice1 = withTimeout(5_000L) {
+            repoDevice1.observeUserMessages(userAUid).first { list -> list.any { it.id == msg1Id } }
+        }
+        val sentMsgOnDevice1 = initialMsgsOnDevice1.first { it.id == msg1Id }
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.SENT,
+            sentMsgOnDevice1.resolveDeliveryStatus()
+        )
+
+        // 3. Switch to Device 2 (User B): observes the exact same conversation and acknowledges Delivery (DELIVERED:<userBUid>)
+        signInTestUser(userBEmail)
+        val msgsOnDevice2 = withTimeout(5_000L) {
+            repoDevice2.observeUserMessages(userBUid).first { list -> list.any { it.id == msg1Id } }
+        }
+        val receivedMsgOnDevice2 = msgsOnDevice2.first { it.id == msg1Id }
+        assertEquals("আসসালামু আলাইকুম মুহতারাম, আপনার মাদরাসার বিজ্ঞপ্তির আলোকে যোগাযোগ করছি।", receivedMsgOnDevice2.body)
+        assertEquals(userAUid, receivedMsgOnDevice2.senderId)
+        assertEquals(userBUid, receivedMsgOnDevice2.receiverId)
+        assertEquals(1, receivedMsgOnDevice2.imageUrls.size)
+
+        // Device 2 acknowledges message delivery (simulating background/inbox arrival before opening chat)
+        withTimeout(5_000L) {
+            repoDevice2.acknowledgeMessagesDelivered(listOf(receivedMsgOnDevice2))
+        }
+
+        // Verify Device 1 now sees status = DELIVERED (double tick ✓✓)
+        signInTestUser(userAEmail)
+        val deliveredMsgsOnDevice1 = withTimeout(5_000L) {
+            repoDevice1.observeUserMessages(userAUid).first { list ->
+                val m = list.firstOrNull { it.id == msg1Id }
+                m != null && m.readByUserIds.contains("DELIVERED:$userBUid")
+            }
+        }
+        val deliveredMsg = deliveredMsgsOnDevice1.first { it.id == msg1Id }
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.DELIVERED,
+            deliveredMsg.resolveDeliveryStatus()
+        )
+
+        // 4. Device 2 (User B) opens the conversation -> marks conversation read -> replies to Device 1 (User A)
+        signInTestUser(userBEmail)
+        val markReadRes = withTimeout(5_000L) {
+            repoDevice2.markConversationMessagesAsRead(userAUid, listOf(deliveredMsg))
+        }
+        assertTrue("markConversationMessagesAsRead should succeed: ${markReadRes.exceptionOrNull()}", markReadRes.isSuccess)
+
+        val msg2Res = withTimeout(5_000L) {
+            repoDevice2.sendDirectMessage(
+                senderName = "মুফতি ফয়সাল মাহমুদ",
+                receiverId = userAUid,
+                receiverName = "মাওলানা আব্দুল্লাহ আল মামুন",
+                subject = "মুহাদ্দিস খেদমত প্রসঙ্গে",
+                body = "ওয়া আলাইকুমুস সালাম। আগামীকাল বাদ জোহর মাদরাসায় তাশরীফ আনুন।",
+                senderPhotoUrl = "preset:mosque_gold"
+            )
+        }
+        assertTrue("Device 2 reply sendDirectMessage should succeed: ${msg2Res.exceptionOrNull()}", msg2Res.isSuccess)
+        val msg2Id = msg2Res.getOrThrow()
+
+        // 5. Switch to Device 1 (User A): verify msg1 is now SEEN (colored ✓✓) and msg2 is in the same conversation!
+        signInTestUser(userAEmail)
+        val bothMsgsOnDevice1 = withTimeout(5_000L) {
+            repoDevice1.observeUserMessages(userAUid).first { list ->
+                val m1 = list.firstOrNull { it.id == msg1Id }
+                val m2 = list.firstOrNull { it.id == msg2Id }
+                m1 != null && m1.isRead && m2 != null
+            }
+        }
+        val seenMsg1OnDevice1 = bothMsgsOnDevice1.first { it.id == msg1Id }
+        val replyMsg2OnDevice1 = bothMsgsOnDevice1.first { it.id == msg2Id }
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.SEEN,
+            seenMsg1OnDevice1.resolveDeliveryStatus()
+        )
+        assertEquals(userBUid, seenMsg1OnDevice1.resolvedConversationKey(userAUid))
+        assertEquals(userBUid, replyMsg2OnDevice1.resolvedConversationKey(userAUid))
+
+        // Verify both Device 1 and Device 2 see the exact same 2-message conversation
+        signInTestUser(userBEmail)
+        val bothMsgsOnDevice2 = withTimeout(5_000L) {
+            repoDevice2.observeUserMessages(userBUid).first { list ->
+                list.any { it.id == msg1Id } && list.any { it.id == msg2Id }
+            }
+        }
+        val convIdsDevice1 = bothMsgsOnDevice1.filter { it.id == msg1Id || it.id == msg2Id }.map { it.id }.toSet()
+        val convIdsDevice2 = bothMsgsOnDevice2.filter { it.id == msg1Id || it.id == msg2Id }.map { it.id }.toSet()
+        assertEquals("Both devices must see the exact same conversation messages", convIdsDevice1, convIdsDevice2)
+
+        // 6. Simulate Full App Restart: create a brand-new QawmiRepository instance after re-authentication
+        // and verify Profiles, Messages, Delivery/Read status, and Conversations remain 100% intact in Firebase!
+        auth.signOut()
+        val restartedUidA = signInTestUser(userAEmail)
+        assertEquals(userAUid, restartedUidA)
+        val freshRepoAfterRestart = QawmiRepository(firestore, auth)
+
+        val persistedProfileA = withTimeout(5_000L) {
+            freshRepoAfterRestart.observeUserProfile(userAUid).first { it != null }
+        }
+        assertEquals("মাওলানা আব্দুল্লাহ আল মামুন", persistedProfileA?.fullName)
+
+        val persistedProfileB = withTimeout(5_000L) {
+            freshRepoAfterRestart.observeUserProfile(userBUid).first { it != null }
+        }
+        assertEquals("মুফতি ফয়সাল মাহমুদ", persistedProfileB?.fullName)
+
+        val persistedMessagesAfterRestart = withTimeout(5_000L) {
+            freshRepoAfterRestart.observeUserMessages(userAUid).first { list ->
+                list.any { it.id == msg1Id } && list.any { it.id == msg2Id }
+            }
+        }
+        val restartedMsg1 = persistedMessagesAfterRestart.first { it.id == msg1Id }
+        val restartedMsg2 = persistedMessagesAfterRestart.first { it.id == msg2Id }
+        assertTrue("msg1 read status must survive app restart", restartedMsg1.isRead)
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.SEEN,
+            restartedMsg1.resolveDeliveryStatus()
+        )
+        assertEquals("ওয়া আলাইকুমুস সালাম। আগামীকাল বাদ জোহর মাদরাসায় তাশরীফ আনুন।", restartedMsg2.body)
+    }
 }
+
 
 
 

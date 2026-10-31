@@ -2982,5 +2982,92 @@ class ExampleRobolectricTest {
         assertEquals("uid_maulana_habib_786" to "মাওলানা হাবিবুর রহমান", inspectedUserPair)
         composeTestRule.onNodeWithTag("public_user_profile_dialog").assertIsDisplayed()
     }
+
+    @Test
+    fun fcmBackgroundMessageNotification_andDeliveryReadStatusTransitions_workWhenAppClosedAndOpen() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        org.robolectric.Shadows.shadowOf(context as android.app.Application)
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+
+        // 1. Verify FCM background push handler posts a high-priority system notification when app is closed
+        val fcmPayload = mapOf(
+            "messageId" to "fcm_msg_9001",
+            "senderId" to "user_foysal_2",
+            "senderName" to "Md Foysal",
+            "receiverId" to "user_me_1",
+            "receiverName" to "মাওলানা আব্দুল্লাহ",
+            "subject" to "খেদমত সংক্রান্ত যোগাযোগ",
+            "body" to "আসসালামু আলাইকুম, আপনার আবেদনটি গৃহীত হয়েছে।"
+        )
+        val notified = com.example.ui.util.QawmiNotificationHelper.handleIncomingFcmPushMessage(
+            context = context,
+            data = fcmPayload,
+            currentUserId = "user_me_1"
+        )
+        assertTrue("FCM background push message must trigger system notification when app is closed", notified)
+
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNotificationManager = org.robolectric.Shadows.shadowOf(notificationManager)
+        assertTrue(
+            "System notification tray must contain the newly arrived FCM message notification",
+            shadowNotificationManager.allNotifications.isNotEmpty()
+        )
+
+        // Duplicate FCM push for the same messageId must be deduplicated
+        val duplicateNotified = com.example.ui.util.QawmiNotificationHelper.handleIncomingFcmPushMessage(
+            context = context,
+            data = fcmPayload,
+            currentUserId = "user_me_1"
+        )
+        org.junit.Assert.assertFalse("Duplicate FCM messageId must not re-trigger notification", duplicateNotified)
+
+        // 2. Verify Delivery (✓✓) and Read/Seen (colored ✓✓) status rendering in MessagesScreen
+        var msgRead by androidx.compose.runtime.mutableStateOf(false)
+        var msgReadByList by androidx.compose.runtime.mutableStateOf(listOf("user_me_1", "DELIVERED:user_foysal_2"))
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(840.dp)) {
+                    val liveMessage = DirectMessage(
+                        id = "msg_live_status_1",
+                        senderId = "user_me_1",
+                        senderName = "মাওলানা আব্দুল্লাহ",
+                        receiverId = "user_foysal_2",
+                        receiverName = "Md Foysal",
+                        subject = "খেদমত প্রসঙ্গে",
+                        body = "জাযাকাল্লাহু খাইরান",
+                        isRead = msgRead,
+                        readByUserIds = msgReadByList,
+                        createdAt = Timestamp.now()
+                    ).apply {
+                        localDeliveryState = "SENT"
+                    }
+                    MessagesScreen(
+                        messagesState = UiState.Success(listOf(liveMessage)),
+                        currentUserId = "user_me_1",
+                        targetUser = "user_foysal_2" to "Md Foysal",
+                        userGroups = emptyList(),
+                        isSubmitting = false,
+                        onSendMessage = { _, _, _, _ -> },
+                        onSelectRecipient = { _, _ -> },
+                        onClearRecipient = {},
+                        onMarkRead = {},
+                        onMarkConversationRead = {}
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        // When DELIVERED:user_foysal_2 is present, status badge is DELIVERED (✓✓)
+        composeTestRule.onNodeWithTag("message_status_delivered_msg_live_status_1", useUnmergedTree = true).assertExists()
+
+        // When recipient opens the chat and marks read, status badge transitions live to SEEN (colored ✓✓)
+        msgRead = true
+        msgReadByList = listOf("user_me_1", "DELIVERED:user_foysal_2", "user_foysal_2")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("message_status_seen_msg_live_status_1", useUnmergedTree = true).assertExists()
+    }
 }
+
 
