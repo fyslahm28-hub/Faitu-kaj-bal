@@ -2609,6 +2609,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(qualifiers = "w420dp-h1600dp")
     fun `FeedScreen updates likes comments and shares live online and publishes application without delay`() {
         var postsList by mutableStateOf(
             listOf(
@@ -2635,7 +2636,7 @@ class ExampleRobolectricTest {
 
         composeTestRule.setContent {
             MyApplicationTheme {
-                Box(modifier = Modifier.width(420.dp).height(1100.dp)) {
+                Box(modifier = Modifier.width(420.dp).height(1550.dp)) {
                     com.example.ui.screens.FeedScreen(
                         feedPostsState = UiState.Success(postsList),
                         bookmarksState = UiState.Success(emptyList()),
@@ -2728,26 +2729,26 @@ class ExampleRobolectricTest {
         }
 
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithText("মুহাদ্দিস ও ফিকহ বিভাগে খেদমতপ্রার্থী").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("feed_post_card_app_post_live_1").assertIsDisplayed()
 
         // 1. Click Like button on post -> reaction count and label update live immediately
-        composeTestRule.onNodeWithTag("post_like_button_app_post_live_1").performClick()
+        composeTestRule.onNodeWithTag("post_react_btn_app_post_live_1").performClick()
         composeTestRule.waitForIdle()
-        assertEquals("LIKE", postsList.first { it.id == "app_post_live_1" }.userReactions["user_me"])
+        assertEquals("SAMMATI", postsList.first { it.id == "app_post_live_1" }.userReactions["user_me"])
 
         // 2. Click Comment button -> comment input opens -> type & submit comment -> appears live immediately
-        composeTestRule.onNodeWithTag("post_comment_button_app_post_live_1").performClick()
+        composeTestRule.onNodeWithTag("post_comment_btn_app_post_live_1").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("post_comment_input_app_post_live_1").performTextInput("মাশাআল্লাহ, অত্যন্ত সুন্দর আবেদন।")
-        composeTestRule.onNodeWithTag("post_comment_send_app_post_live_1").performClick()
+        composeTestRule.onNodeWithTag("comment_input_app_post_live_1").performTextInput("মাশাআল্লাহ, অত্যন্ত সুন্দর আবেদন।")
+        composeTestRule.onNodeWithTag("send_comment_btn_app_post_live_1").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("মাশাআল্লাহ, অত্যন্ত সুন্দর আবেদন।").assertIsDisplayed()
         assertEquals(1, postsList.first { it.id == "app_post_live_1" }.commentCount)
 
         // 3. Click Share button -> share dialog opens -> share in app -> new shared post appears at top of feed and shareCount increments
-        composeTestRule.onNodeWithTag("post_share_button_app_post_live_1").performClick()
+        composeTestRule.onNodeWithTag("post_share_btn_app_post_live_1").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("share_in_app_confirm_button").performClick()
+        composeTestRule.onNodeWithTag("confirm_share_in_app_btn").performClick()
         composeTestRule.waitForIdle()
         assertEquals(1, postsList.first { it.id == "app_post_live_1" }.shareCount)
         assertTrue(postsList.any { it.id == "shared_post_1" })

@@ -1702,6 +1702,9 @@ fun FacebookStyleIslamicPostCard(
                             .weight(1f)
                             .clip(RoundedCornerShape(10.dp))
                             .clickable {
+                                if (myReactionCode.isBlank() && !showReactionPicker) {
+                                    onReactToPost("SAMMATI")
+                                }
                                 showReactionPicker = !showReactionPicker
                             }
                             .testTag("post_react_btn_${post.id}"),

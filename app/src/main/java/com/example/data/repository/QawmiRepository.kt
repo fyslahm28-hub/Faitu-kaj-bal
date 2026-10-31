@@ -1013,15 +1013,15 @@ class QawmiRepository(
             // 5. Write the lightweight /feed_posts/{postId} document FIRST so it goes live online immediately
             // without waiting behind large attachment documents in the gRPC write stream.
             docRef.set(payload).awaitMessageWriteConfirmation(
-                docRef = docRef,
-                serverAckWaitMs = 4_500L
+                docRef,
+                4_500L
             )
 
             // 6. Write any offloaded attachment documents after the main post is queued/acknowledged
             for ((attachRef, attachPayload) in deferredAttachmentWrites) {
                 attachRef.set(attachPayload).awaitMessageWriteConfirmation(
-                    docRef = attachRef,
-                    serverAckWaitMs = 4_500L
+                    attachRef,
+                    4_500L
                 )
             }
 
@@ -1488,8 +1488,8 @@ class QawmiRepository(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             commentRef.set(payload).awaitMessageWriteConfirmation(
-                docRef = commentRef,
-                serverAckWaitMs = 4_000L
+                commentRef,
+                4_000L
             )
 
             kotlinx.coroutines.withTimeoutOrNull(1_500L) {
@@ -2020,8 +2020,8 @@ class QawmiRepository(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             docRef.set(payload).awaitMessageWriteConfirmation(
-                docRef = docRef,
-                serverAckWaitMs = 4_500L
+                docRef,
+                4_500L
             )
 
             // Deliver real-time notification to the Madrasa / circular author and Telegram Admin log concurrently with a fast timeout

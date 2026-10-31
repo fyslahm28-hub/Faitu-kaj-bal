@@ -132,6 +132,8 @@ service cloud.firestore {
     }
 
     function isValidFeedPost(data) {
+      let commentCount = data.get('commentCount', 0);
+      let shareCount = data.get('shareCount', 0);
       return data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
              (data.get('authorPhotoUrl', '') is string && data.get('authorPhotoUrl', '').size() <= 250000) &&
@@ -156,8 +158,8 @@ service cloud.firestore {
              (data.get('attachmentDocId', '') is string && data.get('attachmentDocId', '').size() <= 128) &&
              (data.get('userReactions', {}) is map && data.get('userReactions', {}).size() <= 500) &&
              (data.get('userReactionNames', {}) is map && data.get('userReactionNames', {}).size() <= 500) &&
-             (data.get('commentCount', 0) is int && data.get('commentCount', 0) >= 0 && data.get('commentCount', 0) <= 100000) &&
-             (data.get('shareCount', 0) is int && data.get('shareCount', 0) >= 0 && data.get('shareCount', 0) <= 100000) &&
+             (commentCount is int && commentCount >= 0 && commentCount <= 100000) &&
+             (shareCount is int && shareCount >= 0 && shareCount <= 100000) &&
              (data.get('sharedPostId', '') is string && data.get('sharedPostId', '').size() <= 128) &&
              (data.get('sharedAuthorId', '') is string && data.get('sharedAuthorId', '').size() <= 128) &&
              (data.get('sharedAuthorName', '') is string && data.get('sharedAuthorName', '').size() <= 200) &&
@@ -550,15 +552,15 @@ service cloud.firestore {
                        (incoming().get('isBoosted', false) == false || isAdmin()) &&
                        isValidFeedPost(incoming());
 
-      function isValidFeedPostEngagementUpdate(inc, ext) {
-        let diffKeys = inc.diff(ext).affectedKeys();
-        return diffKeys.hasOnly([
-                 'userReactions', 'userReactionNames', 'commentCount', 'shareCount', 'updatedAt'
-               ]) &&
-               (inc.get('userReactions', {}) is map && inc.get('userReactions', {}).size() <= 500) &&
-               (inc.get('userReactionNames', {}) is map && inc.get('userReactionNames', {}).size() <= 500) &&
-               (inc.get('commentCount', 0) is int && inc.get('commentCount', 0) >= 0 && inc.get('commentCount', 0) <= 100000) &&
-               (inc.get('shareCount', 0) is int && inc.get('shareCount', 0) >= 0 && inc.get('shareCount', 0) <= 100000) &&
+      function isValidFeedPostEngagementUpdate(inc) {
+        let userReactions = inc.get('userReactions', {});
+        let userReactionNames = inc.get('userReactionNames', {});
+        let commentCount = inc.get('commentCount', 0);
+        let shareCount = inc.get('shareCount', 0);
+        return (userReactions is map && userReactions.size() <= 500) &&
+               (userReactionNames is map && userReactionNames.size() <= 500) &&
+               (commentCount is int && commentCount >= 0 && commentCount <= 100000) &&
+               (shareCount is int && shareCount >= 0 && shareCount <= 100000) &&
                isValidTimestamp(inc.updatedAt);
       }
 
@@ -575,6 +577,15 @@ service cloud.firestore {
         return inc.get('authorId', '') == ext.get('authorId', '') &&
                inc.get('postType', '') == ext.get('postType', '') &&
                inc.get('createdAt', request.time) == ext.get('createdAt', request.time) && (
+                 (statusUnchanged &&
+                  diffKeys.hasOnly([
+                    'userReactions', 'userReactionNames', 'commentCount', 'shareCount', 'updatedAt'
+                  ]) &&
+                  (!('userReactions' in diffKeys) ||
+                   incReactions.diff(extReactions).affectedKeys().hasOnly([request.auth.uid])) &&
+                  (!('userReactionNames' in diffKeys) ||
+                   incReactionNames.diff(extReactionNames).affectedKeys().hasOnly([request.auth.uid])) &&
+                  isValidFeedPostEngagementUpdate(inc)) ||
                  (request.auth.uid == ext.get('authorId', '') &&
                   statusUnchanged &&
                   diffKeys.hasOnly([
@@ -584,26 +595,19 @@ service cloud.firestore {
                     'contactNumber', 'khedmotCategories', 'customCategory',
                     'imageUrls', 'mediaTypes', 'mediaMetadata', 'attachmentDocId',
                     'isEdited', 'visibility', 'updatedAt'
-                  ])) ||
-                 (statusUnchanged &&
-                  diffKeys.hasOnly([
-                    'userReactions', 'userReactionNames', 'commentCount', 'shareCount', 'updatedAt'
                   ]) &&
-                  (!('userReactions' in diffKeys) ||
-                   incReactions.diff(extReactions).affectedKeys().hasOnly([request.auth.uid])) &&
-                  (!('userReactionNames' in diffKeys) ||
-                   incReactionNames.diff(extReactionNames).affectedKeys().hasOnly([request.auth.uid]))) ||
+                  isValidFeedPost(inc)) ||
                  (isAdmin() &&
                   diffKeys.hasOnly([
                     'approvalStatus', 'isVerifiedMadrasa', 'isBoosted', 'visibility', 'updatedAt'
-                  ]))
+                  ]) &&
+                  isValidFeedPost(inc))
                );
       }
 
       allow update: if isSignedIn() &&
                        isValidId(postId) &&
-                       canUpdateFeedPost(incoming(), existing()) &&
-                       (isValidFeedPost(incoming()) || isValidFeedPostEngagementUpdate(incoming(), existing()));
+                       canUpdateFeedPost(incoming(), existing());
 
       allow delete: if isSignedIn() && isValidId(postId) && (existing().authorId == request.auth.uid || isAdmin());
     }
