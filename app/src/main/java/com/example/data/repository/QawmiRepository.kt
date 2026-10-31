@@ -840,8 +840,10 @@ class QawmiRepository(
             snapshot.documents
                 .mapNotNull { it.toFeedPostOrNull() }
                 .filter { post ->
-                    post.visibility.isBlank() ||
-                        post.visibility.equals("PUBLIC", ignoreCase = true) ||
+                    val notRejected = !post.approvalStatus.equals("REJECTED", ignoreCase = true)
+                    val isPublic = post.visibility.isBlank() ||
+                        post.visibility.equals("PUBLIC", ignoreCase = true)
+                    (notRejected && isPublic) ||
                         (currentUid.isNotBlank() && post.authorId == currentUid)
                 }
                 .distinctBy { it.id }
@@ -1051,15 +1053,42 @@ class QawmiRepository(
             // without waiting behind large attachment documents in the gRPC write stream.
             docRef.set(payload).awaitMessageWriteConfirmation(
                 docRef,
-                4_500L
+                12_000L
             )
 
             // 6. Write any offloaded attachment documents after the main post is queued/acknowledged
             for ((attachRef, attachPayload) in deferredAttachmentWrites) {
                 attachRef.set(attachPayload).awaitMessageWriteConfirmation(
                     attachRef,
-                    4_500L
+                    12_000L
                 )
+            }
+
+            // 6b. If this post is a SEEKER_APPLICATION, also register it in /khedmot_submissions
+            // so Admin Panel and authorized users can track, approve, and manage it from Firebase.
+            if (postType == "SEEKER_APPLICATION") {
+                runCatching {
+                    val submissionRef = db.collection("khedmot_submissions").document("app_${docRef.id}")
+                    val submissionPayload = mapOf(
+                        "postId" to docRef.id,
+                        "postTitle" to title.trim().ifBlank { "দ্বীনি খেদমত আবেদন" }.take(250),
+                        "postDesignation" to resolvedDesignation.take(200),
+                        "applicantId" to uid,
+                        "applicantName" to authorName.trim().ifBlank { title.trim() }.take(200),
+                        "applicantQualification" to resolvedQualification.take(250),
+                        "applicantExperience" to salaryOrExperience.trim().ifBlank { "আলোচনা সাপেক্ষ" }.take(250),
+                        "applicantPhone" to contactNumber.trim().ifBlank { "প্রোফাইলে উল্লেখিত" }.take(100),
+                        "coverNote" to trimmedDesc.ifBlank { "খেদমতের জন্য সরাসরি প্রকাশিত আবেদন।" }.take(3500),
+                        "recipientId" to madrasaId.trim().ifBlank { uid }.take(128),
+                        "status" to "PENDING",
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    submissionRef.set(submissionPayload).awaitMessageWriteConfirmation(
+                        submissionRef,
+                        8_000L
+                    )
+                }
             }
 
             // 7. Deliver community notification and Telegram Admin log with fast bounded timeout
@@ -1764,9 +1793,10 @@ class QawmiRepository(
                 mapOf(
                     "isVerifiedMadrasa" to isVerified,
                     "approvalStatus" to approvalStatus,
+                    "visibility" to if (approvalStatus.equals("REJECTED", ignoreCase = true)) "ARCHIVED" else "PUBLIC",
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitMessageWriteConfirmation(docRef, 4_000L)
+            ).awaitMessageWriteConfirmation(docRef, 12_000L)
 
             kotlinx.coroutines.withTimeoutOrNull(1_500L) {
                 coroutineScope {
@@ -1819,7 +1849,7 @@ class QawmiRepository(
                     "isBoosted" to isBoosted,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitMessageWriteConfirmation(docRef, 4_000L)
+            ).awaitMessageWriteConfirmation(docRef, 12_000L)
 
             kotlinx.coroutines.withTimeoutOrNull(1_500L) {
                 coroutineScope {
@@ -2096,7 +2126,7 @@ class QawmiRepository(
             )
             docRef.set(payload).awaitMessageWriteConfirmation(
                 docRef,
-                4_500L
+                12_000L
             )
 
             // Deliver real-time notification to the Madrasa / circular author and Telegram Admin log concurrently with a fast timeout
@@ -2142,7 +2172,8 @@ class QawmiRepository(
     suspend fun updateSubmissionStatus(
         submission: KhedmotSubmission,
         newStatus: String,
-        actorName: String
+        actorName: String,
+        publishToFeedOnAccept: Boolean = false
     ): Result<Unit> {
         val uid = requireUserId()
         val docRef = db.collection("khedmot_submissions").document(submission.id)
@@ -2152,12 +2183,22 @@ class QawmiRepository(
                     "status" to newStatus,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitMessageWriteConfirmation(docRef, 4_000L)
+            ).awaitMessageWriteConfirmation(docRef, 12_000L)
+
+            if (publishToFeedOnAccept && newStatus == "ACCEPTED") {
+                runCatching {
+                    publishApprovedSubmissionToFeed(submission, uid)
+                }
+            } else if (publishToFeedOnAccept && newStatus == "REJECTED") {
+                runCatching {
+                    unpublishRejectedSubmissionFromFeed(submission)
+                }
+            }
 
             if (submission.applicantId.isNotBlank() && submission.applicantId != uid) {
                 val statusBangla = when (newStatus) {
                     "SHORTLISTED" -> "প্রাথমিক তালিকায় নির্বাচিত (মুযাকারার জন্য)"
-                    "ACCEPTED" -> "কবুল / চূড়ান্তভাবে নির্বাচিত"
+                    "ACCEPTED" -> "কবুল / চূড়ান্তভাবে নির্বাচিত ও ফিডে প্রকাশিত"
                     "REJECTED" -> "অপেক্ষমাণ / এবারের জন্য নির্বাচিত হননি"
                     else -> "হালনাগাদ"
                 }
@@ -2180,6 +2221,136 @@ class QawmiRepository(
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
             Result.failure(translateFirestoreExceptionToBangla(e))
+        }
+    }
+
+    private suspend fun publishApprovedSubmissionToFeed(
+        submission: KhedmotSubmission,
+        fallbackAuthorUid: String
+    ) {
+        if (submission.id.startsWith("app_") && submission.postId.isNotBlank()) {
+            val existingPostRef = db.collection("feed_posts").document(submission.postId)
+            existingPostRef.update(
+                mapOf(
+                    "isVerifiedMadrasa" to true,
+                    "approvalStatus" to "APPROVED",
+                    "visibility" to "PUBLIC",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).awaitMessageWriteConfirmation(existingPostRef, 10_000L)
+            return
+        }
+
+        val effectiveAuthorId = submission.applicantId.ifBlank { fallbackAuthorUid }
+        val applicantProfileSnap = if (effectiveAuthorId.isNotBlank()) {
+            runCatching {
+                db.collection("users").document(effectiveAuthorId).get().awaitWithTimeout(4_000L)
+            }.getOrNull()
+        } else null
+        val applicantProfile = applicantProfileSnap?.safeToObject(UserProfile::class.java)
+        val rawPhotoUrl = applicantProfile?.photoUrl.orEmpty()
+        val safeAuthorPhotoUrl = ProfilePhotoHelper.uploadOrCompactAuthorPhotoForFeedPost(
+            authorPhotoUrl = rawPhotoUrl,
+            authorId = effectiveAuthorId
+        )
+        val resolvedDistrict = applicantProfile?.district?.takeIf { it.isNotBlank() } ?: "সকল জেলা"
+        val resolvedAuthorName = submission.applicantName
+            .ifBlank { applicantProfile?.fullName.orEmpty() }
+            .ifBlank { "সম্মানিত খেদমতপ্রার্থী" }
+            .take(200)
+        val resolvedDesignation = submission.postDesignation
+            .ifBlank { applicantProfile?.designation.orEmpty() }
+            .ifBlank { "দ্বীনি খেদমত" }
+            .take(150)
+        val resolvedTitle = "${resolvedAuthorName} — ${resolvedDesignation}".take(200)
+        val resolvedQualification = submission.applicantQualification
+            .ifBlank { applicantProfile?.qualification.orEmpty() }
+            .ifBlank { "আলোচনা সাপেক্ষ" }
+            .take(200)
+        val resolvedExperience = submission.applicantExperience
+            .ifBlank { applicantProfile?.experience.orEmpty() }
+            .ifBlank { "আলোচনা সাপেক্ষ" }
+            .take(150)
+        val resolvedDescription = submission.coverNote
+            .ifBlank { "${submission.postTitle.ifBlank { "দ্বীনি প্রতিষ্ঠান" }}-এ '${resolvedDesignation}' খেদমতের জন্য অ্যাডমিন কর্তৃক অনুমোদিত আবেদন।" }
+            .take(2000)
+        val resolvedContact = submission.applicantPhone
+            .ifBlank { applicantProfile?.contactInfo.orEmpty() }
+            .ifBlank { "প্রোফাইলে উল্লেখিত" }
+            .take(100)
+
+        val feedPostId = "sub_post_${submission.id}".take(128)
+        val postRef = db.collection("feed_posts").document(feedPostId)
+        val existingSnap = runCatching { postRef.get().awaitWithTimeout(4_000L) }.getOrNull()
+        if (existingSnap != null && existingSnap.exists()) {
+            postRef.update(
+                mapOf(
+                    "isVerifiedMadrasa" to true,
+                    "approvalStatus" to "APPROVED",
+                    "visibility" to "PUBLIC",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).awaitMessageWriteConfirmation(postRef, 10_000L)
+        } else {
+            val payload = mapOf(
+                "authorId" to effectiveAuthorId,
+                "authorName" to resolvedAuthorName,
+                "authorPhotoUrl" to safeAuthorPhotoUrl,
+                "postType" to "SEEKER_APPLICATION",
+                "title" to resolvedTitle,
+                "district" to resolvedDistrict.take(100),
+                "upazilaOrLocation" to resolvedDistrict.take(200),
+                "designation" to resolvedDesignation,
+                "qualification" to resolvedQualification,
+                "salaryOrExperience" to resolvedExperience,
+                "deadlineOrPreferredDistricts" to submission.postTitle.ifBlank { "সকল জেলা" }.take(250),
+                "description" to resolvedDescription,
+                "contactNumber" to resolvedContact,
+                "madrasaId" to submission.postId.take(128),
+                "isVerifiedMadrasa" to true,
+                "isBoosted" to false,
+                "khedmotCategories" to emptyList<String>(),
+                "customCategory" to "",
+                "imageUrls" to emptyList<String>(),
+                "mediaTypes" to emptyList<String>(),
+                "mediaMetadata" to emptyList<Map<String, String>>(),
+                "attachmentDocId" to "",
+                "userReactions" to emptyMap<String, String>(),
+                "userReactionNames" to emptyMap<String, String>(),
+                "commentCount" to 0,
+                "shareCount" to 0,
+                "sharedPostId" to "",
+                "sharedAuthorId" to "",
+                "sharedAuthorName" to "",
+                "sharedTitle" to "",
+                "sharedDescription" to "",
+                "sharedPostType" to "",
+                "isEdited" to false,
+                "visibility" to "PUBLIC",
+                "approvalStatus" to "APPROVED",
+                "createdAt" to (submission.createdAt ?: FieldValue.serverTimestamp()),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            postRef.set(payload).awaitMessageWriteConfirmation(postRef, 10_000L)
+        }
+    }
+
+    private suspend fun unpublishRejectedSubmissionFromFeed(submission: KhedmotSubmission) {
+        val targetPostId = if (submission.id.startsWith("app_") && submission.postId.isNotBlank()) {
+            submission.postId
+        } else {
+            "sub_post_${submission.id}".take(128)
+        }
+        val postRef = db.collection("feed_posts").document(targetPostId)
+        val snap = runCatching { postRef.get().awaitWithTimeout(4_000L) }.getOrNull()
+        if (snap != null && snap.exists()) {
+            postRef.update(
+                mapOf(
+                    "approvalStatus" to "REJECTED",
+                    "visibility" to "ARCHIVED",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).awaitMessageWriteConfirmation(postRef, 8_000L)
         }
     }
 
@@ -3489,7 +3660,7 @@ class QawmiRepository(
                     "isVerified" to verified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitMessageWriteConfirmation(docRef, 4_000L)
+            ).awaitMessageWriteConfirmation(docRef, 12_000L)
 
             val resolvedAdmin = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" }
             val eventType = if (verified) "ADMIN_VERIFICATION" else "CONTENT_MODERATION"
@@ -3529,7 +3700,12 @@ class QawmiRepository(
         adminName: String
     ): Result<Unit> {
         val resolvedAdmin = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" }
-        val res = updateSubmissionStatus(submission, newStatus, resolvedAdmin)
+        val res = updateSubmissionStatus(
+            submission = submission,
+            newStatus = newStatus,
+            actorName = resolvedAdmin,
+            publishToFeedOnAccept = true
+        )
         res.onSuccess {
             val statusBangla = when (newStatus) {
                 "ACCEPTED" -> "নির্বাচিত (অনুমোদিত)"

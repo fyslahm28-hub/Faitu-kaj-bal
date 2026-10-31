@@ -2858,13 +2858,129 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         assertTrue(usersList.first { it.id == "u_admin_test_1" }.isVerified)
 
-        // Switch to Applications tab and approve submission via status menu ("নতুন" -> "নির্বাচিত (অনুমোদন)")
+        // Switch to Applications tab and approve submission via status menu ("নতুন" -> "নির্বাচিত (অনুমোদন ও প্রকাশ)")
         composeTestRule.onNodeWithTag("admin_tab_applications").performClick()
         composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("ID: u_admin_test_1").assertIsDisplayed()
         composeTestRule.onNodeWithText("সহকারী শিক্ষক").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithText("নির্বাচিত (অনুমোদন)").performClick()
+        composeTestRule.onNodeWithText("নির্বাচিত (অনুমোদন ও প্রকাশ)").performClick()
         composeTestRule.waitForIdle()
         assertEquals("ACCEPTED", submissionsList.first { it.id == "sub_admin_test_1" }.status)
     }
+
+    @Test
+    fun feedPostShowsAuthorNamePhotoAndUniqueId_andTappingNameOrIdOpensProfile() {
+        val samplePost = com.example.data.model.FeedPost(
+            id = "post_uid_test_101",
+            authorId = "uid_maulana_habib_786",
+            authorName = "মাওলানা হাবিবুর রহমান",
+            authorPhotoUrl = "preset:scholar_emerald",
+            postType = "SEEKER_APPLICATION",
+            title = "মাওলানা হাবিবুর রহমান — মুহাদ্দিস",
+            district = "ঢাকা",
+            upazilaOrLocation = "মিরপুর",
+            designation = "মুহাদ্দিস",
+            qualification = "দাওরায়ে হাদিস ও ইফতা",
+            salaryOrExperience = "৬ বছর",
+            deadlineOrPreferredDistricts = "ঢাকা, গাজীপুর",
+            description = "বুখারী ও তিরমিযী শরীফ পাঠদানে অভিজ্ঞ।",
+            contactNumber = "01711223344",
+            isVerifiedMadrasa = true,
+            commentCount = 1,
+            createdAt = Timestamp.now()
+        )
+        val sampleComment = com.example.data.model.FeedComment(
+            id = "c_uid_test_202",
+            postId = "post_uid_test_101",
+            authorId = "uid_mufti_saeed_999",
+            authorName = "মুফতি সাঈদ আহমদ",
+            authorPhotoUrl = "preset:mosque_gold",
+            text = "মাশাআল্লাহ, আপনার প্রোফাইল দেখে যোগাযোগ করছি।",
+            createdAt = Timestamp.now()
+        )
+
+        var inspectedUserPair by androidx.compose.runtime.mutableStateOf<Pair<String, String>?>(null)
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box {
+                    com.example.ui.screens.FeedScreen(
+                        feedPostsState = UiState.Success(listOf(samplePost)),
+                        postCommentsState = UiState.Success(listOf(sampleComment)),
+                        bookmarksState = UiState.Success(emptyList()),
+                        selectedFilter = com.example.ui.viewmodel.FeedFilterTab.ALL,
+                        selectedKhedmotCategory = "সকল বিভাগ",
+                        selectedDistrict = "সকল জেলা",
+                        searchQuery = "",
+                        currentUserId = "viewer_user_1",
+                        isAdmin = false,
+                        onSelectFilter = {},
+                        onSelectKhedmotCategory = {},
+                        onSelectDistrict = {},
+                        onSearchQueryChange = {},
+                        onApplyClick = {},
+                        onViewProfileOrDetailClick = {},
+                        onInspectAuthorProfile = { uid: String, name: String ->
+                            inspectedUserPair = uid to name
+                        },
+                        onToggleBookmark = { _, _ -> },
+                        onToggleBoostPost = { _, _ -> },
+                        onDeletePost = {},
+                        onNavigate = {}
+                    )
+
+                    if (inspectedUserPair != null) {
+                        PublicUserProfileDialog(
+                            targetUserId = inspectedUserPair!!.first,
+                            fallbackName = inspectedUserPair!!.second,
+                            currentUserId = "viewer_user_1",
+                            inspectedProfileState = UiState.Success(
+                                UserProfile(
+                                    id = inspectedUserPair!!.first,
+                                    userId = inspectedUserPair!!.first,
+                                    fullName = inspectedUserPair!!.second,
+                                    accountType = "khadim",
+                                    district = "ঢাকা",
+                                    designation = "মুহাদ্দিস",
+                                    qualification = "দাওরায়ে হাদিস"
+                                )
+                            ),
+                            userPublishedPosts = listOf(samplePost),
+                            onDismiss = { inspectedUserPair = null },
+                            onSendMessageClick = { _, _ -> },
+                            onPostClick = {}
+                        )
+                    }
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+
+        // 1. Verify post author Name, Avatar, and Unique ID are displayed
+        composeTestRule.onNodeWithTag("post_author_avatar_post_uid_test_101", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("post_author_name_post_uid_test_101", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("post_author_uid_post_uid_test_101", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithText("ID: uid_maulana_habib_786", useUnmergedTree = true).assertExists()
+
+        // 2. Tap on the Unique ID -> opens PublicUserProfileDialog showing the author's Profile & Unique ID
+        composeTestRule.onNodeWithTag("post_author_uid_post_uid_test_101", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("uid_maulana_habib_786" to "মাওলানা হাবিবুর রহমান", inspectedUserPair)
+        composeTestRule.onNodeWithTag("public_user_profile_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("public_profile_uid_text").assertIsDisplayed()
+        composeTestRule.onNodeWithText("ইউনিক ID: uid_maulana_habib_786").assertIsDisplayed()
+
+        // Dismiss profile dialog and tap on Author Name -> also opens Profile directly
+        composeTestRule.onNode(androidx.compose.ui.test.hasContentDescription("বন্ধ করুন")).performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(null, inspectedUserPair)
+
+        composeTestRule.onNodeWithTag("post_author_name_post_uid_test_101", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("uid_maulana_habib_786" to "মাওলানা হাবিবুর রহমান", inspectedUserPair)
+        composeTestRule.onNodeWithTag("public_user_profile_dialog").assertIsDisplayed()
+    }
 }
+

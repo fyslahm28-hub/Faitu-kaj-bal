@@ -190,6 +190,7 @@ fun ModernAdminPanelRoot(
         releaseStatus: String
     ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onSaveAdminMember: (memberId: String, name: String, role: String, isActive: Boolean) -> Unit = { _, _, _, _ -> },
+    onInspectUserProfile: (String, String) -> Unit = { _, _ -> },
     onRetryServerLoad: () -> Unit = {},
     onDeletePost: (String) -> Unit
 ) {
@@ -407,8 +408,12 @@ fun ModernAdminPanelRoot(
                 AdminSubScreen.APPLICATIONS -> {
                     AdminApplicationsManagementView(
                         submissions = realSubmissions,
+                        posts = realPosts,
+                        users = realUsers,
                         onBack = { handleBack() },
                         onUpdateSubmissionStatus = onUpdateSubmissionStatus,
+                        onVerifyPost = onVerifyPost,
+                        onInspectUserProfile = onInspectUserProfile,
                         onRecordLiveAdminAction = onRecordLiveAdminAction
                     )
                 }
@@ -2037,23 +2042,36 @@ private data class DisplayApplicationItem(
     val dateText: String,
     val statusCode: String, // PENDING (নতুন), SHORTLISTED (পর্যালোচনাধীন), ACCEPTED (নির্বাচিত), REJECTED (বাতিল)
     val photoUrl: String,
-    val backingSubmission: KhedmotSubmission? = null
+    val applicantId: String = "",
+    val backingSubmission: KhedmotSubmission? = null,
+    val backingPost: FeedPost? = null
 )
 
 @Composable
 private fun AdminApplicationsManagementView(
     submissions: List<KhedmotSubmission>,
+    posts: List<FeedPost> = emptyList(),
+    users: List<UserProfile> = emptyList(),
     onBack: () -> Unit,
     onUpdateSubmissionStatus: (KhedmotSubmission, String) -> Unit,
+    onVerifyPost: (FeedPost, Boolean, String) -> Unit = { _, _, _ -> },
+    onInspectUserProfile: (String, String) -> Unit = { _, _ -> },
     onRecordLiveAdminAction: (eventType: String, title: String, message: String, referenceId: String) -> Unit
 ) {
     var selectedFilter by rememberSaveable { mutableStateOf("সব") }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     val localStatusMap = remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
-    val combinedApplications = remember(submissions, localStatusMap.value) {
-        submissions.map { sub ->
+    val userPhotosById = remember(users) {
+        users.associate { u ->
+            (u.id.ifBlank { u.userId }) to u.photoUrl
+        }
+    }
+
+    val combinedApplications = remember(submissions, posts, userPhotosById, localStatusMap.value) {
+        val submissionItems = submissions.map { sub ->
             val currentStatus = localStatusMap.value[sub.id] ?: sub.status
+            val resolvedPhoto = userPhotosById[sub.applicantId].orEmpty()
             DisplayApplicationItem(
                 id = sub.id,
                 applicantName = sub.applicantName.ifBlank { "সম্মানিত আবেদনকারী" },
@@ -2061,10 +2079,36 @@ private fun AdminApplicationsManagementView(
                 madrasaName = sub.postTitle.ifBlank { "কওমি মাদরাসা" },
                 dateText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(sub.createdAt),
                 statusCode = currentStatus,
-                photoUrl = ProfilePhotoHelper.PRESET_SCHOLAR_EMERALD,
+                photoUrl = resolvedPhoto,
+                applicantId = sub.applicantId,
                 backingSubmission = sub
             )
         }
+        val representedPostIds = submissions.mapNotNull { it.postId.takeIf { pid -> pid.isNotBlank() } }.toSet()
+        val standaloneApplicationPosts = posts
+            .filter { it.postType == "SEEKER_APPLICATION" && it.id !in representedPostIds }
+            .map { post ->
+                val defaultStatus = when {
+                    post.approvalStatus.equals("REJECTED", ignoreCase = true) -> "REJECTED"
+                    post.isVerifiedMadrasa -> "ACCEPTED"
+                    else -> "PENDING"
+                }
+                val itemKey = "post_app_${post.id}"
+                val currentStatus = localStatusMap.value[itemKey] ?: defaultStatus
+                val resolvedPhoto = post.authorPhotoUrl.ifBlank { userPhotosById[post.authorId].orEmpty() }
+                DisplayApplicationItem(
+                    id = itemKey,
+                    applicantName = post.authorName.ifBlank { post.title },
+                    designation = post.designation.ifBlank { post.qualification },
+                    madrasaName = post.district.ifBlank { "সকল জেলা" },
+                    dateText = IslamicDateAndPrayerHelper.formatRelativeTimeBangla(post.createdAt),
+                    statusCode = currentStatus,
+                    photoUrl = resolvedPhoto,
+                    applicantId = post.authorId,
+                    backingPost = post
+                )
+            }
+        submissionItems + standaloneApplicationPosts
     }
 
     val filteredApplications = remember(combinedApplications, selectedFilter, searchQuery) {
@@ -2077,6 +2121,7 @@ private fun AdminApplicationsManagementView(
             val q = searchQuery.trim()
             val matchesSearch = q.isEmpty() ||
                 item.applicantName.contains(q, ignoreCase = true) ||
+                item.applicantId.contains(q, ignoreCase = true) ||
                 item.designation.contains(q, ignoreCase = true) ||
                 item.madrasaName.contains(q, ignoreCase = true)
             matchesFilter && matchesSearch
@@ -2219,7 +2264,10 @@ private fun AdminApplicationsManagementView(
                                     displayName = appItem.applicantName,
                                     size = 50.dp,
                                     borderColor = AdminHeaderDarkGreen,
-                                    borderWidth = 1.5.dp
+                                    borderWidth = 1.5.dp,
+                                    modifier = Modifier.clickable(enabled = appItem.applicantId.isNotBlank()) {
+                                        onInspectUserProfile(appItem.applicantId, appItem.applicantName)
+                                    }
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
@@ -2227,8 +2275,26 @@ private fun AdminApplicationsManagementView(
                                         text = appItem.applicantName,
                                         style = MaterialTheme.typography.titleSmall,
                                         color = QawmiTextDark,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clickable(enabled = appItem.applicantId.isNotBlank()) {
+                                                onInspectUserProfile(appItem.applicantId, appItem.applicantName)
+                                            }
+                                            .testTag("admin_app_applicant_name_${appItem.id}")
                                     )
+                                    if (appItem.applicantId.isNotBlank()) {
+                                        Text(
+                                            text = "ID: ${appItem.applicantId}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = AdminHeaderDarkGreen,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    onInspectUserProfile(appItem.applicantId, appItem.applicantName)
+                                                }
+                                                .testTag("admin_app_applicant_uid_${appItem.id}")
+                                        )
+                                    }
                                     Text(
                                         text = appItem.designation,
                                         style = MaterialTheme.typography.bodySmall,
@@ -2255,6 +2321,7 @@ private fun AdminApplicationsManagementView(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(8.dp))
                                         .clickable { statusMenuExpanded = true }
+                                        .testTag("admin_app_status_badge_${appItem.id}")
                                 ) {
                                     Text(
                                         text = statusLabel,
@@ -2272,7 +2339,7 @@ private fun AdminApplicationsManagementView(
                                     val statusOptions = listOf(
                                         "PENDING" to "নতুন",
                                         "SHORTLISTED" to "পর্যালোচনাধীন",
-                                        "ACCEPTED" to "নির্বাচিত (অনুমোদন)",
+                                        "ACCEPTED" to "নির্বাচিত (অনুমোদন ও প্রকাশ)",
                                         "REJECTED" to "বাতিল"
                                     )
                                     statusOptions.forEach { (code, label) ->
@@ -2282,15 +2349,30 @@ private fun AdminApplicationsManagementView(
                                                 statusMenuExpanded = false
                                                 localStatusMap.value =
                                                     localStatusMap.value + (appItem.id to code)
-                                                if (appItem.backingSubmission != null) {
-                                                    onUpdateSubmissionStatus(appItem.backingSubmission, code)
-                                                } else {
-                                                    onRecordLiveAdminAction(
-                                                        "KHEDMOT_SUBMISSION",
-                                                        if (code == "ACCEPTED") "আবেদন অনুমোদন করা হয়েছে" else "আবেদনের অবস্থা পরিবর্তন: $label",
-                                                        "প্রার্থী: ${appItem.applicantName} (${appItem.designation}) - ${appItem.madrasaName}",
-                                                        appItem.id
-                                                    )
+                                                when {
+                                                    appItem.backingSubmission != null -> {
+                                                        onUpdateSubmissionStatus(appItem.backingSubmission, code)
+                                                    }
+                                                    appItem.backingPost != null -> {
+                                                        val approvedStatus = when (code) {
+                                                            "ACCEPTED" -> "APPROVED"
+                                                            "REJECTED" -> "REJECTED"
+                                                            else -> "PENDING"
+                                                        }
+                                                        onVerifyPost(
+                                                            appItem.backingPost,
+                                                            code == "ACCEPTED",
+                                                            approvedStatus
+                                                        )
+                                                    }
+                                                    else -> {
+                                                        onRecordLiveAdminAction(
+                                                            "KHEDMOT_SUBMISSION",
+                                                            if (code == "ACCEPTED") "আবেদন অনুমোদন করা হয়েছে" else "আবেদনের অবস্থা পরিবর্তন: $label",
+                                                            "প্রার্থী: ${appItem.applicantName} (${appItem.designation}) - ${appItem.madrasaName}",
+                                                            appItem.id
+                                                        )
+                                                    }
                                                 }
                                             }
                                         )

@@ -533,7 +533,7 @@ service cloud.firestore {
 
       allow create: if isSignedIn() &&
                        isValidId(postId) &&
-                       incoming().authorId == request.auth.uid &&
+                       (incoming().authorId == request.auth.uid || isAdmin()) &&
                        incoming().keys().hasAll([
                          'authorId', 'authorName', 'postType', 'title', 'district',
                          'upazilaOrLocation', 'designation', 'qualification',

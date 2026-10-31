@@ -447,9 +447,21 @@ class QawmiViewModel(
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val receivedSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
-        _adminDataRefreshToken.flatMapLatest {
-            repository.observeReceivedSubmissions(currentUserId)
-        },
+        combine(isAdminState, _adminDataRefreshToken) { isAdmin, token -> isAdmin to token }
+            .flatMapLatest { (isAdmin, _) ->
+                if (isAdmin) {
+                    combine(
+                        repository.observeReceivedSubmissions(currentUserId),
+                        repository.observeAllSubmissionsForAdmin()
+                    ) { ownReceived, allSubs ->
+                        (ownReceived + allSubs)
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    }
+                } else {
+                    repository.observeReceivedSubmissions(currentUserId)
+                }
+            },
         _localAdminSubmissionStatusOverrides
     ) { remoteList, statusOverrides ->
         val merged = remoteList.map { sub ->
@@ -538,25 +550,38 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
-    // Real-time profiles of all conversation partners in the inbox (for Online/Offline, Last Seen & Avatar)
+    // Real-time profiles of all conversation partners, feed post authors, comment authors & applicants
     val chatPartnerProfilesState: StateFlow<Map<String, UserProfile>> = combine(
-        messagesState,
-        userGroupsState,
-        _messageTargetUser
-    ) { msgState, groupsState, targetUser ->
-        val messages = (msgState as? UiState.Success)?.data ?: emptyList()
-        val groups = (groupsState as? UiState.Success)?.data ?: emptyList()
-        val partnerIds = messages.flatMap { msg ->
-            listOf(msg.senderId, msg.receiverId)
-        }.toMutableSet()
-        groups.forEach { group ->
-            partnerIds.addAll(group.memberIds)
+        combine(messagesState, userGroupsState, _messageTargetUser) { msgState, groupsState, targetUser ->
+            val messages = (msgState as? UiState.Success)?.data ?: emptyList()
+            val groups = (groupsState as? UiState.Success)?.data ?: emptyList()
+            val ids = messages.flatMap { msg -> listOf(msg.senderId, msg.receiverId) }.toMutableSet()
+            groups.forEach { group -> ids.addAll(group.memberIds) }
+            targetUser?.first?.takeIf { it.isNotBlank() && !it.startsWith("GROUP:") }?.let { ids.add(it) }
+            ids
+        },
+        feedPostsState,
+        postCommentsState,
+        receivedSubmissionsState
+    ) { chatIds, postsState, commentsState, receivedSubsState ->
+        val partnerIds = chatIds.toMutableSet()
+        val posts = (postsState as? UiState.Success)?.data ?: emptyList()
+        posts.take(40).forEach { post ->
+            if (post.authorId.isNotBlank()) partnerIds.add(post.authorId)
+            if (post.sharedAuthorId.isNotBlank()) partnerIds.add(post.sharedAuthorId)
         }
-        targetUser?.first?.takeIf { it.isNotBlank() && !it.startsWith("GROUP:") }?.let { partnerIds.add(it) }
+        val comments = (commentsState as? UiState.Success)?.data ?: emptyList()
+        comments.take(50).forEach { comment ->
+            if (comment.authorId.isNotBlank()) partnerIds.add(comment.authorId)
+        }
+        val subs = (receivedSubsState as? UiState.Success)?.data ?: emptyList()
+        subs.take(30).forEach { sub ->
+            if (sub.applicantId.isNotBlank()) partnerIds.add(sub.applicantId)
+        }
         partnerIds
             .filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
             .sorted()
-            .take(30)
+            .take(50)
     }
         .distinctUntilChanged()
         .flatMapLatest { validIds ->
@@ -1492,12 +1517,25 @@ class QawmiViewModel(
     }
 
     fun updateReceivedSubmissionStatus(submission: KhedmotSubmission, newStatus: String) {
+        if (isAdminUser) {
+            adminUpdateSubmissionStatus(submission, newStatus)
+            return
+        }
         viewModelScope.launch {
             clearBanners()
             val actorName = resolveActorDisplayName("মাদরাসা কর্তৃপক্ষ")
-            val result = repository.updateSubmissionStatus(submission, newStatus, actorName)
+            val result = repository.updateSubmissionStatus(
+                submission = submission,
+                newStatus = newStatus,
+                actorName = actorName,
+                publishToFeedOnAccept = newStatus == "ACCEPTED"
+            )
             result.onSuccess {
-                _feedbackBanner.value = "আবেদনের অবস্থা হালনাগাদ করা হয়েছে এবং প্রার্থীকে নোটিফিকেশন পাঠানো হয়েছে।"
+                _feedbackBanner.value = if (newStatus == "ACCEPTED") {
+                    "আলহামদুলিল্লাহ, আবেদনটি কবুল ও ফিডে প্রকাশ করা হয়েছে এবং প্রার্থীকে নোটিফিকেশন পাঠানো হয়েছে।"
+                } else {
+                    "আবেদনের অবস্থা হালনাগাদ করা হয়েছে এবং প্রার্থীকে নোটিফিকেশন পাঠানো হয়েছে।"
+                }
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "অবস্থা পরিবর্তনে ত্রুটি হয়েছে।"
             }

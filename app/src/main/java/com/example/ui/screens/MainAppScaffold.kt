@@ -1206,6 +1206,9 @@ fun MainAppScaffold(
                                 onSaveAdminMember = { memberId, name, role, isActive ->
                                     viewModel.adminSaveAdminMember(memberId, name, role, isActive)
                                 },
+                                onInspectUserProfile = { uid, name ->
+                                    viewModel.openUserProfileInspection(uid, name)
+                                },
                                 onDeletePost = { id -> viewModel.deletePost(id) }
                             )
                         }

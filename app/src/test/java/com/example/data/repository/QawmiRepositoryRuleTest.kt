@@ -1045,6 +1045,41 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             repoB.observeReceivedSubmissions(userBUid).first { list -> list.any { it.id == submissionId } }
         }
         assertEquals("মাওলানা তানভীর আহমদ", receivedByB.first { it.id == submissionId }.applicantName)
+
+        // 7. Sign in as verified Admin (foysalahamad102@gmail.com), verify Admin sees all applications from Firebase,
+        // and when Admin approves & publishes the application ("ACCEPTED"), it appears live on everyone's Feed!
+        val adminEmail = "foysalahamad102@gmail.com"
+        signInTestUser(adminEmail)
+        val adminRepo = QawmiRepository(auth = auth, db = firestore)
+        val allAdminSubs = withTimeout(5_000L) {
+            adminRepo.observeAllSubmissionsForAdmin().first { list ->
+                list.any { it.id == submissionId } && list.any { it.id == "app_$applicationPostId" }
+            }
+        }
+        val targetSubmission = allAdminSubs.first { it.id == submissionId }
+        assertEquals(userAUid, targetSubmission.applicantId)
+
+        val approveRes = withTimeout(8_000L) {
+            adminRepo.adminUpdateSubmissionStatus(
+                submission = targetSubmission,
+                newStatus = "ACCEPTED",
+                adminName = "নাজিমে আলা (অ্যাডমিন)"
+            )
+        }
+        assertTrue("Admin approval and feed publishing should succeed: ${approveRes.exceptionOrNull()}", approveRes.isSuccess)
+
+        // Switch to User B (another user) and verify the Admin-approved application is now visible live on everyone's Feed!
+        signInTestUser(userBEmail)
+        val publishedSubPostId = "sub_post_$submissionId"
+        val feedAfterAdminPublish = withTimeout(5_000L) {
+            repoB.observePublicFeedPosts().first { list ->
+                list.any { it.id == publishedSubPostId && it.approvalStatus == "APPROVED" && it.isVerifiedMadrasa }
+            }
+        }
+        val publishedAppOnFeed = feedAfterAdminPublish.first { it.id == publishedSubPostId }
+        assertEquals(userAUid, publishedAppOnFeed.authorId)
+        assertEquals("মাওলানা তানভীর আহমদ", publishedAppOnFeed.authorName)
+        assertTrue(publishedAppOnFeed.isVerifiedMadrasa)
     }
 }
 

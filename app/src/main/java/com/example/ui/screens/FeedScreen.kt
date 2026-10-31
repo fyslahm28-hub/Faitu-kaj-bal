@@ -443,7 +443,18 @@ fun FeedScreen(
                                 authorName = liveAuthor?.fullName?.takeIf { it.isNotBlank() } ?: post.authorName,
                                 authorPhotoUrl = liveAuthor?.photoUrl?.takeIf { it.isNotBlank() } ?: post.authorPhotoUrl
                             )
-                            val postComments = commentsByPostId[post.id] ?: emptyList()
+                            val rawPostComments = commentsByPostId[post.id] ?: emptyList()
+                            val postComments = rawPostComments.map { c ->
+                                val liveCommentAuthor = if (c.authorId == currentUserId) {
+                                    currentUserProfile
+                                } else {
+                                    authorProfiles[c.authorId]
+                                }
+                                c.copy(
+                                    authorName = liveCommentAuthor?.fullName?.takeIf { it.isNotBlank() } ?: c.authorName,
+                                    authorPhotoUrl = liveCommentAuthor?.photoUrl?.takeIf { it.isNotBlank() } ?: c.authorPhotoUrl
+                                )
+                            }
                             val isCommentsOpen = expandedCommentsPostIds.contains(post.id)
 
                             FacebookStyleIslamicPostCard(
@@ -473,6 +484,11 @@ fun FeedScreen(
                                         resolvedPost.authorId,
                                         resolvedPost.authorName.ifBlank { resolvedPost.title }
                                     )
+                                },
+                                onInspectUser = { targetUid, targetName ->
+                                    if (targetUid.isNotBlank()) {
+                                        onInspectAuthorProfile(targetUid, targetName)
+                                    }
                                 },
                                 onToggleBookmark = {
                                     onToggleBookmark(resolvedPost, bookmarkedPostIds.contains(post.id))
@@ -1004,6 +1020,7 @@ fun FacebookStyleIslamicPostCard(
     onToggleCommentsExpanded: () -> Unit = {},
     onPrimaryActionClick: () -> Unit,
     onInspectAuthorClick: () -> Unit = {},
+    onInspectUser: (String, String) -> Unit = { _, _ -> },
     onToggleBookmark: () -> Unit,
     onToggleBoost: () -> Unit = {},
     onEditOwnPostClick: () -> Unit = {},
@@ -1105,7 +1122,10 @@ fun FacebookStyleIslamicPostCard(
                             displayName = post.authorName.ifBlank { post.title },
                             size = 44.dp,
                             borderColor = if (isCircular) QawmiGold else QawmiSeekerBlue.copy(alpha = 0.6f),
-                            borderWidth = 1.5.dp
+                            borderWidth = 1.5.dp,
+                            modifier = Modifier
+                                .clickable(onClick = onInspectAuthorClick)
+                                .testTag("post_author_avatar_${post.id}")
                         )
 
                         Spacer(modifier = Modifier.width(10.dp))
@@ -1118,7 +1138,10 @@ fun FacebookStyleIslamicPostCard(
                                     color = QawmiTextDark,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .clickable(onClick = onInspectAuthorClick)
+                                        .testTag("post_author_name_${post.id}")
                                 )
                                 // Verified badge ONLY if explicitly verified by admin
                                 if (post.isVerifiedMadrasa) {
@@ -1132,6 +1155,22 @@ fun FacebookStyleIslamicPostCard(
                                             .testTag("verified_badge_${post.id}")
                                     )
                                 }
+                            }
+
+                            if (post.authorId.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(1.dp))
+                                Text(
+                                    text = "ID: ${post.authorId}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = QawmiSeekerBlue,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .clickable(onClick = onInspectAuthorClick)
+                                        .testTag("post_author_uid_${post.id}")
+                                )
                             }
 
                             Spacer(modifier = Modifier.height(2.dp))
@@ -1481,7 +1520,17 @@ fun FacebookStyleIslamicPostCard(
                             modifier = Modifier.padding(10.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clickable(enabled = post.sharedAuthorId.isNotBlank()) {
+                                        onInspectUser(
+                                            post.sharedAuthorId,
+                                            post.sharedAuthorName.ifBlank { post.sharedTitle }
+                                        )
+                                    }
+                                    .testTag("shared_post_author_row_${post.id}")
+                            ) {
                                 Icon(
                                     imageVector = Icons.Default.Share,
                                     contentDescription = null,
@@ -1490,7 +1539,12 @@ fun FacebookStyleIslamicPostCard(
                                 )
                                 Spacer(modifier = Modifier.width(5.dp))
                                 Text(
-                                    text = "মূল প্রকাশক: ${post.sharedAuthorName.ifBlank { post.sharedTitle }}",
+                                    text = buildString {
+                                        append("মূল প্রকাশক: ${post.sharedAuthorName.ifBlank { post.sharedTitle }}")
+                                        if (post.sharedAuthorId.isNotBlank()) {
+                                            append(" • ID: ${post.sharedAuthorId}")
+                                        }
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = QawmiDeepGreen,
                                     fontWeight = FontWeight.Bold
@@ -1812,7 +1866,8 @@ fun FacebookStyleIslamicPostCard(
                         comments = postComments,
                         onAddComment = onAddComment,
                         onEditComment = onEditComment,
-                        onDeleteComment = onDeleteComment
+                        onDeleteComment = onDeleteComment,
+                        onInspectUser = onInspectUser
                     )
                 }
             }
@@ -1828,7 +1883,8 @@ private fun PostCommentsSection(
     comments: List<FeedComment>,
     onAddComment: (text: String, parentCommentId: String, replyToAuthorName: String) -> Unit,
     onEditComment: (commentId: String, newText: String) -> Unit,
-    onDeleteComment: (commentId: String) -> Unit
+    onDeleteComment: (commentId: String) -> Unit,
+    onInspectUser: (String, String) -> Unit = { _, _ -> }
 ) {
     var commentInput by remember { mutableStateOf("") }
     var replyingToComment by remember { mutableStateOf<FeedComment?>(null) }
@@ -1864,6 +1920,9 @@ private fun PostCommentsSection(
                     currentUserId = currentUserId,
                     isAdmin = isAdmin,
                     isReply = false,
+                    onInspectAuthorClick = {
+                        onInspectUser(comment.authorId, comment.authorName)
+                    },
                     onReplyClick = { replyingToComment = comment },
                     onEditClick = {
                         editingComment = comment
@@ -1880,6 +1939,9 @@ private fun PostCommentsSection(
                             currentUserId = currentUserId,
                             isAdmin = isAdmin,
                             isReply = true,
+                            onInspectAuthorClick = {
+                                onInspectUser(reply.authorId, reply.authorName)
+                            },
                             onReplyClick = { replyingToComment = comment },
                             onEditClick = {
                                 editingComment = reply
@@ -2021,6 +2083,7 @@ private fun CommentItemRow(
     currentUserId: String,
     isAdmin: Boolean,
     isReply: Boolean,
+    onInspectAuthorClick: () -> Unit = {},
     onReplyClick: () -> Unit,
     onEditClick: () -> Unit,
     onDeleteClick: () -> Unit
@@ -2040,7 +2103,13 @@ private fun CommentItemRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onInspectAuthorClick)
+                        .testTag("comment_author_header_${comment.id}")
+                ) {
                     UserAvatarImage(
                         photoUrl = comment.authorPhotoUrl,
                         displayName = comment.authorName,
@@ -2052,8 +2121,23 @@ private fun CommentItemRow(
                             text = comment.authorName,
                             style = MaterialTheme.typography.labelMedium,
                             color = QawmiTextDark,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clickable(onClick = onInspectAuthorClick)
+                                .testTag("comment_author_name_${comment.id}")
                         )
+                        if (comment.authorId.isNotBlank()) {
+                            Text(
+                                text = "ID: ${comment.authorId}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiSeekerBlue,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 9.5.sp,
+                                modifier = Modifier
+                                    .clickable(onClick = onInspectAuthorClick)
+                                    .testTag("comment_author_uid_${comment.id}")
+                            )
+                        }
                         Text(
                             text = buildString {
                                 append(formatRelativeBanglaTime(comment.createdAt))

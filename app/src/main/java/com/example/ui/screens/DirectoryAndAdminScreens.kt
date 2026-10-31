@@ -629,7 +629,30 @@ fun SubmissionsManagementScreen(
                                         }
                                     }
                                     Text("খেদমতের পদ: ${sub.postDesignation}", style = MaterialTheme.typography.bodySmall)
-                                    Text("প্রার্থীর নাম: ${sub.applicantName}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = "প্রার্থীর নাম: ${sub.applicantName}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = QawmiDeepGreen,
+                                        modifier = Modifier
+                                            .clickable(enabled = sub.applicantId.isNotBlank()) {
+                                                onInspectUserProfile(sub.applicantId, sub.applicantName)
+                                            }
+                                            .testTag("submission_applicant_name_${sub.id}")
+                                    )
+                                    if (sub.applicantId.isNotBlank()) {
+                                        Text(
+                                            text = "ইউনিক ID: ${sub.applicantId}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = QawmiSeekerBlue,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    onInspectUserProfile(sub.applicantId, sub.applicantName)
+                                                }
+                                                .testTag("submission_applicant_uid_${sub.id}")
+                                        )
+                                    }
                                     Text("যোগ্যতা: ${sub.applicantQualification} | অভিজ্ঞতা: ${sub.applicantExperience}", style = MaterialTheme.typography.bodySmall)
                                     Text("যোগাযোগ: ${sub.applicantPhone}", style = MaterialTheme.typography.bodySmall)
                                     if (sub.coverNote.isNotBlank()) {
@@ -4164,6 +4187,7 @@ fun AdminPanelScreen(
         releaseStatus: String
     ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onSaveAdminMember: (memberId: String, name: String, role: String, isActive: Boolean) -> Unit = { _, _, _, _ -> },
+    onInspectUserProfile: (String, String) -> Unit = { _, _ -> },
     onDeletePost: (String) -> Unit
 ) {
     ModernAdminPanelRoot(
@@ -4190,6 +4214,7 @@ fun AdminPanelScreen(
         onSendTestTelegramAlert = onSendTestTelegramAlert,
         onPublishAppRelease = onPublishAppRelease,
         onSaveAdminMember = onSaveAdminMember,
+        onInspectUserProfile = onInspectUserProfile,
         onDeletePost = onDeletePost
     )
 }

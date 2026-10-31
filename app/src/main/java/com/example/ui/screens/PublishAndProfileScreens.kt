@@ -1336,6 +1336,18 @@ fun ProfileScreen(
                             }
                         }
 
+                        if (currentUserId.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "ইউনিক ID: $currentUserId",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiGoldLight,
+                                fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.testTag("own_profile_uid_text")
+                            )
+                        }
+
                         if (designation.isNotBlank() || madrasaName.isNotBlank()) {
                             Spacer(modifier = Modifier.height(3.dp))
                             Text(
@@ -2258,6 +2270,17 @@ fun PublicUserProfileDialog(
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
+                        }
+                        if (targetUserId.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "ইউনিক ID: $targetUserId",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QawmiGoldLight,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.testTag("public_profile_uid_text")
+                            )
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
