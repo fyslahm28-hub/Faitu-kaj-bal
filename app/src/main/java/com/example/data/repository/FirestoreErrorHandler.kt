@@ -5,15 +5,183 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.MemoryCacheSettings
 import com.google.firebase.firestore.Source
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.tasks.await
 import org.json.JSONArray
 import org.json.JSONObject
 
 private val configuredFirestoreDatabases = ConcurrentHashMap<String, Boolean>()
+
+/**
+ * Tracks real-time Firebase Firestore connection health, distinguishes real Server Data
+ * (`!snapshot.metadata.isFromCache`) from Local Cached Data (`snapshot.metadata.isFromCache`),
+ * monitors active listener registrations to prevent duplicate listener storms, and maintains
+ * an honest diagnostic log of connection/permission/query errors.
+ */
+object FirestoreConnectionMonitor {
+    private const val MAX_ERROR_LOG_ENTRIES = 50
+
+    private val _isNetworkAvailable = MutableStateFlow(true)
+    val isNetworkAvailable: StateFlow<Boolean> = _isNetworkAvailable.asStateFlow()
+
+    private val _isServerConnected = MutableStateFlow(true)
+    val isServerConnected: StateFlow<Boolean> = _isServerConnected.asStateFlow()
+
+    private val _isServingFromCache = MutableStateFlow(false)
+    val isServingFromCache: StateFlow<Boolean> = _isServingFromCache.asStateFlow()
+
+    private val _activeListenerCount = MutableStateFlow(0)
+    val activeListenerCount: StateFlow<Int> = _activeListenerCount.asStateFlow()
+
+    private val _listenerReattachCount = MutableStateFlow(0)
+    val listenerReattachCount: StateFlow<Int> = _listenerReattachCount.asStateFlow()
+
+    private val _lastConnectionError = MutableStateFlow<String?>(null)
+    val lastConnectionError: StateFlow<String?> = _lastConnectionError.asStateFlow()
+
+    private val _connectionErrorLogs = MutableStateFlow<List<String>>(emptyList())
+    val connectionErrorLogs: StateFlow<List<String>> = _connectionErrorLogs.asStateFlow()
+
+    private val _recoveryGeneration = MutableStateFlow(0L)
+    val recoveryGeneration: StateFlow<Long> = _recoveryGeneration.asStateFlow()
+
+    private val listenerCountsByPath = ConcurrentHashMap<String, AtomicInteger>()
+    private val lastServerConfirmedEpochMs = AtomicLong(0L)
+
+    fun onListenerAttached(path: String) {
+        val cleanPath = path.ifBlank { "unknown" }
+        listenerCountsByPath.computeIfAbsent(cleanPath) { AtomicInteger(0) }.incrementAndGet()
+        recomputeTotalActiveListeners()
+    }
+
+    fun onListenerDetached(path: String) {
+        val cleanPath = path.ifBlank { "unknown" }
+        val counter = listenerCountsByPath[cleanPath]
+        if (counter != null) {
+            val next = counter.decrementAndGet()
+            if (next <= 0) {
+                counter.set(0)
+            }
+        }
+        recomputeTotalActiveListeners()
+    }
+
+    fun getActiveListenersForPath(path: String): Int {
+        return listenerCountsByPath[path.ifBlank { "unknown" }]?.get()?.coerceAtLeast(0) ?: 0
+    }
+
+    private fun recomputeTotalActiveListeners() {
+        val total = listenerCountsByPath.values.sumOf { it.get().coerceAtLeast(0) }
+        _activeListenerCount.value = total
+    }
+
+    fun onSnapshotReceived(
+        path: String,
+        isFromCache: Boolean,
+        hasPendingWrites: Boolean
+    ) {
+        if (!isFromCache) {
+            lastServerConfirmedEpochMs.set(System.currentTimeMillis())
+            _isServerConnected.value = _isNetworkAvailable.value
+            _isServingFromCache.value = false
+        } else {
+            // Snapshot came from local cache: never masquerade local cache as live server data when disconnected
+            if (!_isNetworkAvailable.value || !_isServerConnected.value) {
+                _isServingFromCache.value = true
+            }
+        }
+    }
+
+    fun onConnectionError(
+        path: String,
+        operationType: OperationType,
+        error: Throwable,
+        formattedJson: String
+    ) {
+        val fsEx = findFirestoreException(error)
+        val codeName = fsEx?.code?.name ?: error::class.java.simpleName
+        val summary = "[${System.currentTimeMillis()}] op=${operationType.value} path=$path code=$codeName msg=${error.message ?: error.toString()}"
+        _lastConnectionError.value = formattedJson.ifBlank { summary }
+        synchronized(this) {
+            val updated = (listOf(summary) + _connectionErrorLogs.value).take(MAX_ERROR_LOG_ENTRIES)
+            _connectionErrorLogs.value = updated
+        }
+        if (fsEx != null) {
+            when (fsEx.code) {
+                FirebaseFirestoreException.Code.UNAVAILABLE,
+                FirebaseFirestoreException.Code.DEADLINE_EXCEEDED,
+                FirebaseFirestoreException.Code.ABORTED,
+                FirebaseFirestoreException.Code.INTERNAL,
+                FirebaseFirestoreException.Code.UNAUTHENTICATED -> {
+                    _isServerConnected.value = false
+                    _isServingFromCache.value = true
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    fun onListenerReattached(path: String, attempt: Int, reason: String) {
+        _listenerReattachCount.value = _listenerReattachCount.value + 1
+        val logEntry = "[${System.currentTimeMillis()}] REATTACH path=$path attempt=$attempt reason=$reason"
+        synchronized(this) {
+            val updated = (listOf(logEntry) + _connectionErrorLogs.value).take(MAX_ERROR_LOG_ENTRIES)
+            _connectionErrorLogs.value = updated
+        }
+        Log.i("FirestoreMonitor", logEntry)
+    }
+
+    fun onNetworkAvailabilityChanged(available: Boolean) {
+        val changed = _isNetworkAvailable.value != available
+        _isNetworkAvailable.value = available
+        if (!available) {
+            _isServerConnected.value = false
+            _isServingFromCache.value = true
+        } else if (changed) {
+            triggerGlobalReconnect("NETWORK_AVAILABLE")
+        }
+    }
+
+    fun triggerGlobalReconnect(reason: String = "MANUAL_OR_NETWORK_RESTORE") {
+        _recoveryGeneration.value = _recoveryGeneration.value + 1L
+        val logEntry = "[${System.currentTimeMillis()}] GLOBAL_RECONNECT reason=$reason gen=${_recoveryGeneration.value}"
+        synchronized(this) {
+            val updated = (listOf(logEntry) + _connectionErrorLogs.value).take(MAX_ERROR_LOG_ENTRIES)
+            _connectionErrorLogs.value = updated
+        }
+    }
+
+    fun resetForTesting() {
+        listenerCountsByPath.clear()
+        _activeListenerCount.value = 0
+        _listenerReattachCount.value = 0
+        _isNetworkAvailable.value = true
+        _isServerConnected.value = true
+        _isServingFromCache.value = false
+        _lastConnectionError.value = null
+        _connectionErrorLogs.value = emptyList()
+        _recoveryGeneration.value = 0L
+        lastServerConfirmedEpochMs.set(0L)
+    }
+
+    private fun findFirestoreException(error: Throwable?): FirebaseFirestoreException? {
+        var cur = error
+        while (cur != null) {
+            if (cur is FirebaseFirestoreException) return cur
+            cur = cur.cause
+        }
+        return null
+    }
+}
 
 /**
  * Returns a [FirebaseFirestore] instance configured with [MemoryCacheSettings] before its first
@@ -84,6 +252,12 @@ fun handleFirestoreError(exception: Exception, operationType: OperationType, pat
 
     val jsonString = errorInfoJson.toString()
     Log.e("FirestoreError", "Firestore Error: $jsonString")
+    FirestoreConnectionMonitor.onConnectionError(
+        path = path ?: "unknown",
+        operationType = operationType,
+        error = exception,
+        formattedJson = jsonString
+    )
     return jsonString
 }
 

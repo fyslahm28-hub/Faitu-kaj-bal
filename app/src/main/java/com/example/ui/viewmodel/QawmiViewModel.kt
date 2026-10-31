@@ -201,6 +201,25 @@ class QawmiViewModel(
         _dismissedUpdateVersionCode.value = null
     }
 
+    // Live Firebase Connection & Data Source (Server vs Cache) state
+    val isServerConnected: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isServerConnected
+    val isServingFromCache: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isServingFromCache
+    val lastConnectionError: StateFlow<String?> = com.example.data.repository.FirestoreConnectionMonitor.lastConnectionError
+    val connectionErrorLogs: StateFlow<List<String>> = com.example.data.repository.FirestoreConnectionMonitor.connectionErrorLogs
+
+    // Deduplicated per-user profile StateFlow cache so each partnerUid attaches at most ONE Firestore listener
+    // for the lifetime of the ViewModel and never tears down/recreates 50 listeners when feed/chat updates arrive.
+    private val partnerProfileFlows = java.util.concurrent.ConcurrentHashMap<String, StateFlow<UserProfile?>>()
+
+    private fun getOrCreatePartnerProfileFlow(partnerUid: String): StateFlow<UserProfile?> {
+        val cleanUid = partnerUid.trim()
+        return partnerProfileFlows.computeIfAbsent(cleanUid) { uid ->
+            repository.observeUserProfile(uid)
+                .catch { emit(null) }
+                .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+        }
+    }
+
     // Server-side Admin Registry & Token Claim state
     private val _serverTokenVerifiedAdmin = MutableStateFlow(
         AdminSecurityHelper.isAuthorizedAdminIdentity(currentUserEmail, currentUserPhone) ||
@@ -208,7 +227,7 @@ class QawmiViewModel(
     )
 
     val adminRegistryEntryState: StateFlow<AdminRegistryEntry?> = repository.observeAdminRegistryEntry(currentUserId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val isAdminState: StateFlow<Boolean> = combine(
         _serverTokenVerifiedAdmin,
@@ -247,15 +266,11 @@ class QawmiViewModel(
             if (target == null || target.first.isBlank()) {
                 flowOf(UiState.Success(null))
             } else {
-                repository.observeUserProfile(target.first)
+                getOrCreatePartnerProfileFlow(target.first)
                     .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
-                    .catch { e ->
-                        Log.w(TAG, "Error observing inspected user profile", e)
-                        emit(UiState.Error(formatFirestoreErrorBangla(e, "ব্যবহারকারীর প্রোফাইল লোড করা যায়নি")))
-                    }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     private data class PostEngagementOverride(
         val userReactions: Map<String, String>? = null,
@@ -589,9 +604,8 @@ class QawmiViewModel(
                 flowOf(emptyMap())
             } else {
                 val flows = validIds.map { partnerUid ->
-                    repository.observeUserProfile(partnerUid)
+                    getOrCreatePartnerProfileFlow(partnerUid)
                         .map { profile -> partnerUid to profile }
-                        .catch { emit(partnerUid to null) }
                 }
                 combine(flows) { pairs ->
                     pairs.mapNotNull { (uid, profile) ->
@@ -609,8 +623,7 @@ class QawmiViewModel(
             if (uid.isBlank() || uid == currentUserId || uid.startsWith("GROUP:")) {
                 flowOf(null)
             } else {
-                repository.observeUserProfile(uid)
-                    .catch { emit(null) }
+                getOrCreatePartnerProfileFlow(uid)
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -643,7 +656,7 @@ class QawmiViewModel(
                     }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val adminUsersState: StateFlow<UiState<List<UserProfile>>> = combine(
         isAdminState,
@@ -669,7 +682,7 @@ class QawmiViewModel(
                 }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val adminSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
         isAdminState,
@@ -700,7 +713,7 @@ class QawmiViewModel(
                 }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val adminRegistryListState: StateFlow<UiState<List<AdminRegistryEntry>>> = combine(
         isAdminState,
@@ -718,7 +731,7 @@ class QawmiViewModel(
                     }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     private val acknowledgedDeliveredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val inFlightMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -868,9 +881,30 @@ class QawmiViewModel(
         navigateTo(MainDestination.FEED)
     }
 
+    /**
+     * Synchronizes all live Firestore modules when network connectivity returns or when the app
+     * resumes to foreground, without tearing down or duplicating already-healthy listeners.
+     */
+    fun onNetworkRestored() {
+        viewModelScope.launch {
+            repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "NETWORK_RESTORED")
+            setUserOnlineStatus(true)
+        }
+    }
+
+    /**
+     * Refreshes live connection state when the Firebase Auth ID token is refreshed.
+     */
+    fun onAuthSessionRefreshed() {
+        viewModelScope.launch {
+            repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "AUTH_TOKEN_REFRESHED")
+            verifyAndSyncAdminIdentity()
+        }
+    }
+
     fun retryFeedStreams() {
         clearBanners()
-        _adminDataRefreshToken.value += 1
+        onNetworkRestored()
     }
 
     fun openApplyDialog(post: FeedPost?) {
@@ -2368,7 +2402,7 @@ class QawmiViewModel(
 
     fun retryAdminServerStreams() {
         clearBanners()
-        _adminDataRefreshToken.value += 1
+        onNetworkRestored()
         verifyAndSyncAdminIdentity()
     }
 

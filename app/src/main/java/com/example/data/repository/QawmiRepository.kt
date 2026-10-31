@@ -23,22 +23,31 @@ import com.example.ui.util.ProfilePhotoHelper
 import com.example.ui.util.TelegramNotificationHelper
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.QuerySnapshot
 import com.google.firebase.firestore.Source
-import com.google.firebase.firestore.snapshots
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
@@ -75,13 +84,44 @@ class QawmiRepository(
         return runCatching { auth.currentUser?.uid?.trim().orEmpty() }.getOrDefault("")
     }
 
+    private val listenerExecutor = java.util.concurrent.Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "qawmi-firestore-listener").apply { isDaemon = true }
+    }
+
     /**
-     * Observes a Firestore [com.google.firebase.firestore.Query] with:
-     * 1. Fast local cache seed (`Source.CACHE`) when cached documents exist.
-     * 2. Bounded server `.get()` fallback (`initialServerTimeoutMs`) so UI screens never hang
-     *    indefinitely in `UiState.Loading` (`"...লোড হচ্ছে..."`) if the gRPC watch stream is slow.
-     * 3. Continuous real-time `addSnapshotListener` updates with automatic recovery on listener
-     *    errors so screens never crash with raw `"Error getting Query snapshot"`.
+     * Ensures the Firebase Firestore network connection and Auth token are active and triggers
+     * immediate re-subscription for any listener that had previously encountered an error,
+     * without tearing down or duplicating already-healthy listeners.
+     */
+    suspend fun ensureLiveConnectionActive(forceTokenRefresh: Boolean = false, reason: String = "ENSURE_LIVE") {
+        runCatching {
+            val currentUser = auth.currentUser
+            if (currentUser != null) {
+                withTimeoutOrNull(4_000L) {
+                    currentUser.getIdToken(forceTokenRefresh).await()
+                }
+            }
+        }
+        runCatching {
+            withTimeoutOrNull(3_000L) {
+                db.enableNetwork().await()
+            }
+        }
+        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+        FirestoreConnectionMonitor.triggerGlobalReconnect(reason)
+    }
+
+    /**
+     * Self-healing Firestore [com.google.firebase.firestore.Query] observer:
+     * 1. Attaches a single authoritative `addSnapshotListener` per flow (strictly deduplicated via
+     *    `activeRegistration`) so duplicate listeners are never created for the same flow.
+     * 2. Tracks whether each snapshot came from the real Firebase server (`!snapshot.metadata.isFromCache`)
+     *    or from local cache (`snapshot.metadata.isFromCache`) via [FirestoreConnectionMonitor].
+     * 3. Automatically re-subscribes `addSnapshotListener` with bounded exponential backoff whenever
+     *    a transient gRPC idle reset, network drop, or token refresh causes `error != null` (since
+     *    Firestore SDK permanently removes a listener once it delivers an error).
+     * 4. Avoids launching redundant parallel server `.get()` calls on startup unless the live stream
+     *    has not emitted within `initialServerTimeoutMs`.
      */
     private fun <T> observeQueryWithFastInitialAndFallback(
         query: com.google.firebase.firestore.Query,
@@ -90,57 +130,175 @@ class QawmiRepository(
         initialServerTimeoutMs: Long = 3_500L,
         mapper: (QuerySnapshot) -> List<T>
     ): Flow<List<T>> = channelFlow {
-        var hasEmittedAny = false
-        var listenerHasEmitted = false
-        val emitLock = Any()
+        val hasEmittedAny = AtomicBoolean(false)
+        val listenerHasEmitted = AtomicBoolean(false)
+        val activeRegistration = AtomicReference<ListenerRegistration?>(null)
+        val isCountedAttached = AtomicBoolean(false)
+        val retryAttempt = AtomicInteger(0)
+        var recoveryJob: Job? = null
 
         fun tryEmitSafe(items: List<T>, fromListener: Boolean = false) {
-            synchronized(emitLock) {
-                hasEmittedAny = true
-                if (fromListener) {
-                    listenerHasEmitted = true
-                }
+            hasEmittedAny.set(true)
+            if (fromListener) {
+                listenerHasEmitted.set(true)
             }
             trySend(items)
         }
 
-        launch {
-            if (runCatching { auth.currentUser }.getOrNull() == null) return@launch
-            val cachedSnap = withTimeoutOrNull(200L) {
-                runCatching { query.get(Source.CACHE).await() }.getOrNull()
+        fun detachCurrentRegistration() {
+            val old = activeRegistration.getAndSet(null)
+            if (old != null) {
+                runCatching { old.remove() }
             }
-            if (cachedSnap != null && !cachedSnap.isEmpty) {
-                val mapped = runCatching { mapper(cachedSnap) }.getOrNull()
-                if (mapped != null) {
-                    synchronized(emitLock) {
-                        if (!hasEmittedAny && !listenerHasEmitted) {
-                            hasEmittedAny = true
-                            trySend(mapped)
+            if (isCountedAttached.compareAndSet(true, false)) {
+                FirestoreConnectionMonitor.onListenerDetached(path)
+            }
+        }
+
+        val metadataChoice = if (includeMetadataChanges) MetadataChanges.INCLUDE else MetadataChanges.EXCLUDE
+
+        fun attachSnapshotListener() {
+            if (!isActive) return
+            // Guarantee at most 1 registration for this flow at any point in time
+            detachCurrentRegistration()
+            try {
+                val reg = query.addSnapshotListener(listenerExecutor, metadataChoice) { snapshot, error ->
+                    if (error != null) {
+                        handleFirestoreError(error, OperationType.LIST, path)
+                        detachCurrentRegistration()
+                        val currentUser = runCatching { auth.currentUser }.getOrNull()
+                        if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED && currentUser == null) {
+                            close(error)
+                            return@addSnapshotListener
                         }
+
+                        recoveryJob?.cancel()
+                        recoveryJob = launch {
+                            val attempt = retryAttempt.incrementAndGet()
+                            // Serve local cache fallback if nothing emitted yet, explicitly marked as cache
+                            if (!hasEmittedAny.get() && runCatching { auth.currentUser }.getOrNull() != null) {
+                                val cachedFallback = withTimeoutOrNull(300L) {
+                                    runCatching { query.get(Source.CACHE).await() }.getOrNull()
+                                }
+                                if (cachedFallback != null) {
+                                    FirestoreConnectionMonitor.onSnapshotReceived(
+                                        path = path,
+                                        isFromCache = true,
+                                        hasPendingWrites = cachedFallback.metadata.hasPendingWrites()
+                                    )
+                                    val mapped = runCatching { mapper(cachedFallback) }.getOrDefault(emptyList())
+                                    if (!hasEmittedAny.get()) {
+                                        tryEmitSafe(mapped, fromListener = false)
+                                    }
+                                } else if (!hasEmittedAny.get()) {
+                                    tryEmitSafe(emptyList(), fromListener = false)
+                                }
+                            }
+
+                            val backoffMs = minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(3)), 8_000L)
+                            delay(backoffMs)
+                            if (!isActive) return@launch
+
+                            if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
+                            ) {
+                                runCatching {
+                                    withTimeoutOrNull(4_000L) {
+                                        auth.currentUser?.getIdToken(true)?.await()
+                                    }
+                                }
+                            }
+                            runCatching { db.enableNetwork() }
+                            FirestoreConnectionMonitor.onListenerReattached(path, attempt, error.code.name)
+                            attachSnapshotListener()
+                        }
+                        return@addSnapshotListener
                     }
+
+                    if (snapshot != null) {
+                        retryAttempt.set(0)
+                        FirestoreConnectionMonitor.onSnapshotReceived(
+                            path = path,
+                            isFromCache = snapshot.metadata.isFromCache,
+                            hasPendingWrites = snapshot.metadata.hasPendingWrites()
+                        )
+                        val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
+                        tryEmitSafe(mapped, fromListener = true)
+                    }
+                }
+                activeRegistration.set(reg)
+                if (isCountedAttached.compareAndSet(false, true)) {
+                    FirestoreConnectionMonitor.onListenerAttached(path)
+                }
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.LIST, path)
+                if (!hasEmittedAny.get()) {
+                    tryEmitSafe(emptyList(), fromListener = false)
                 }
             }
         }
 
+        // 1. Attach real-time snapshot listener immediately
+        attachSnapshotListener()
+
+        // 2. Re-attach immediately if a global network/auth reconnect signal arrives while detached
         launch {
+            FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
+                if (isActive && activeRegistration.get() == null) {
+                    recoveryJob?.cancel()
+                    retryAttempt.set(0)
+                    runCatching { db.enableNetwork() }
+                    FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
+                    attachSnapshotListener()
+                }
+            }
+        }
+
+        // 3. Fast local cache seed if the snapshot listener hasn't emitted within 120ms
+        launch {
+            delay(120L)
+            if (listenerHasEmitted.get() || hasEmittedAny.get()) return@launch
+            if (runCatching { auth.currentUser }.getOrNull() == null) return@launch
+            val cachedSnap = withTimeoutOrNull(200L) {
+                runCatching { query.get(Source.CACHE).await() }.getOrNull()
+            }
+            if (cachedSnap != null && !cachedSnap.isEmpty && !listenerHasEmitted.get()) {
+                FirestoreConnectionMonitor.onSnapshotReceived(
+                    path = path,
+                    isFromCache = true,
+                    hasPendingWrites = cachedSnap.metadata.hasPendingWrites()
+                )
+                val mapped = runCatching { mapper(cachedSnap) }.getOrNull()
+                if (mapped != null && !listenerHasEmitted.get() && !hasEmittedAny.get()) {
+                    tryEmitSafe(mapped, fromListener = false)
+                }
+            }
+        }
+
+        // 4. Only run a one-shot fallback if the live listener still hasn't emitted after initialServerTimeoutMs
+        launch {
+            delay(initialServerTimeoutMs)
+            if (listenerHasEmitted.get()) return@launch
             var serverErr: Throwable? = null
-            val serverSnap = withTimeoutOrNull(initialServerTimeoutMs) {
+            val serverSnap = withTimeoutOrNull(2_500L) {
                 runCatching { query.get().await() }
                     .onFailure { serverErr = it }
                     .getOrNull()
             }
-            if (serverSnap != null) {
+            if (serverSnap != null && !listenerHasEmitted.get()) {
+                FirestoreConnectionMonitor.onSnapshotReceived(
+                    path = path,
+                    isFromCache = serverSnap.metadata.isFromCache,
+                    hasPendingWrites = serverSnap.metadata.hasPendingWrites()
+                )
                 val mapped = runCatching { mapper(serverSnap) }.getOrDefault(emptyList())
-                synchronized(emitLock) {
-                    if (!listenerHasEmitted) {
-                        hasEmittedAny = true
-                        trySend(mapped)
-                    }
+                if (!listenerHasEmitted.get()) {
+                    tryEmitSafe(mapped, fromListener = false)
                 }
-            } else {
-                val fsErr = serverErr as? com.google.firebase.firestore.FirebaseFirestoreException
+            } else if (!hasEmittedAny.get() && !listenerHasEmitted.get()) {
+                val fsErr = serverErr as? FirebaseFirestoreException
                 if (fsErr != null &&
-                    fsErr.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED &&
+                    fsErr.code == FirebaseFirestoreException.Code.PERMISSION_DENIED &&
                     runCatching { auth.currentUser }.getOrNull() == null
                 ) {
                     handleFirestoreError(fsErr, OperationType.LIST, path)
@@ -148,73 +306,159 @@ class QawmiRepository(
                     return@launch
                 }
                 val fallbackCache = if (runCatching { auth.currentUser }.getOrNull() != null) {
-                    withTimeoutOrNull(300L) {
+                    withTimeoutOrNull(250L) {
                         runCatching { query.get(Source.CACHE).await() }.getOrNull()
                     }
                 } else null
                 val fallbackList = if (fallbackCache != null) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = path,
+                        isFromCache = true,
+                        hasPendingWrites = fallbackCache.metadata.hasPendingWrites()
+                    )
                     runCatching { mapper(fallbackCache) }.getOrDefault(emptyList())
                 } else {
                     emptyList()
                 }
-                synchronized(emitLock) {
-                    if (!hasEmittedAny && !listenerHasEmitted) {
-                        hasEmittedAny = true
-                        trySend(fallbackList)
-                    }
+                if (!hasEmittedAny.get() && !listenerHasEmitted.get()) {
+                    tryEmitSafe(fallbackList, fromListener = false)
                 }
+            }
+        }
+
+        awaitClose {
+            recoveryJob?.cancel()
+            detachCurrentRegistration()
+        }
+    }
+
+    /**
+     * Self-healing single-document observer (`addSnapshotListener` with automatic re-subscription
+     * on stream/token errors and accurate Server vs Cache tracking).
+     */
+    private fun <T> observeDocumentWithAutoRecovery(
+        docRef: DocumentReference,
+        path: String,
+        includeMetadataChanges: Boolean = false,
+        defaultValueOnError: T?,
+        mapper: (DocumentSnapshot) -> T?
+    ): Flow<T?> = channelFlow {
+        val hasEmittedAny = AtomicBoolean(false)
+        val activeRegistration = AtomicReference<ListenerRegistration?>(null)
+        val isCountedAttached = AtomicBoolean(false)
+        val retryAttempt = AtomicInteger(0)
+        var recoveryJob: Job? = null
+
+        fun detachCurrentRegistration() {
+            val old = activeRegistration.getAndSet(null)
+            if (old != null) {
+                runCatching { old.remove() }
+            }
+            if (isCountedAttached.compareAndSet(true, false)) {
+                FirestoreConnectionMonitor.onListenerDetached(path)
             }
         }
 
         val metadataChoice = if (includeMetadataChanges) MetadataChanges.INCLUDE else MetadataChanges.EXCLUDE
-        val registration = try {
-            query.addSnapshotListener(metadataChoice) { snapshot, error ->
-                if (error != null) {
-                    handleFirestoreError(error, OperationType.LIST, path)
-                    if (error.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED &&
-                        runCatching { auth.currentUser }.getOrNull() == null
-                    ) {
-                        close(error)
-                        return@addSnapshotListener
-                    }
-                    launch {
-                        val recoveredSnap = withTimeoutOrNull(2_500L) {
-                            runCatching { query.get().await() }.getOrNull()
-                        } ?: withTimeoutOrNull(300L) {
-                            runCatching { query.get(Source.CACHE).await() }.getOrNull()
+
+        fun attachDocListener() {
+            if (!isActive) return
+            detachCurrentRegistration()
+            try {
+                val reg = docRef.addSnapshotListener(listenerExecutor, metadataChoice) { snapshot, error ->
+                    if (error != null) {
+                        handleFirestoreError(error, OperationType.GET, path)
+                        detachCurrentRegistration()
+                        val currentUser = runCatching { auth.currentUser }.getOrNull()
+                        if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED && currentUser == null) {
+                            close(error)
+                            return@addSnapshotListener
                         }
-                        if (recoveredSnap != null) {
-                            val mapped = runCatching { mapper(recoveredSnap) }.getOrDefault(emptyList())
-                            tryEmitSafe(mapped, fromListener = false)
-                        } else {
-                            synchronized(emitLock) {
-                                if (!hasEmittedAny) {
-                                    hasEmittedAny = true
-                                    trySend(emptyList())
+                        recoveryJob?.cancel()
+                        recoveryJob = launch {
+                            val attempt = retryAttempt.incrementAndGet()
+                            if (!hasEmittedAny.get()) {
+                                val cachedDoc = withTimeoutOrNull(250L) {
+                                    runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
+                                }
+                                if (cachedDoc != null && cachedDoc.exists()) {
+                                    FirestoreConnectionMonitor.onSnapshotReceived(
+                                        path = path,
+                                        isFromCache = true,
+                                        hasPendingWrites = cachedDoc.metadata.hasPendingWrites()
+                                    )
+                                    hasEmittedAny.set(true)
+                                    trySend(runCatching { mapper(cachedDoc) }.getOrDefault(defaultValueOnError))
+                                } else {
+                                    hasEmittedAny.set(true)
+                                    trySend(defaultValueOnError)
                                 }
                             }
+                            val backoffMs = minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(3)), 8_000L)
+                            delay(backoffMs)
+                            if (!isActive) return@launch
+                            if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
+                            ) {
+                                runCatching {
+                                    withTimeoutOrNull(4_000L) {
+                                        auth.currentUser?.getIdToken(true)?.await()
+                                    }
+                                }
+                            }
+                            runCatching { db.enableNetwork() }
+                            FirestoreConnectionMonitor.onListenerReattached(path, attempt, error.code.name)
+                            attachDocListener()
                         }
+                        return@addSnapshotListener
                     }
-                    return@addSnapshotListener
+
+                    if (snapshot != null) {
+                        retryAttempt.set(0)
+                        FirestoreConnectionMonitor.onSnapshotReceived(
+                            path = path,
+                            isFromCache = snapshot.metadata.isFromCache,
+                            hasPendingWrites = snapshot.metadata.hasPendingWrites()
+                        )
+                        hasEmittedAny.set(true)
+                        val mapped = if (snapshot.exists()) {
+                            runCatching { mapper(snapshot) }.getOrDefault(defaultValueOnError)
+                        } else {
+                            null
+                        }
+                        trySend(mapped)
+                    }
                 }
-                if (snapshot != null) {
-                    val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
-                    tryEmitSafe(mapped, fromListener = true)
+                activeRegistration.set(reg)
+                if (isCountedAttached.compareAndSet(false, true)) {
+                    FirestoreConnectionMonitor.onListenerAttached(path)
+                }
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.GET, path)
+                if (!hasEmittedAny.get()) {
+                    hasEmittedAny.set(true)
+                    trySend(defaultValueOnError)
                 }
             }
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.LIST, path)
-            synchronized(emitLock) {
-                if (!hasEmittedAny) {
-                    hasEmittedAny = true
-                    trySend(emptyList())
+        }
+
+        attachDocListener()
+
+        launch {
+            FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
+                if (isActive && activeRegistration.get() == null) {
+                    recoveryJob?.cancel()
+                    retryAttempt.set(0)
+                    runCatching { db.enableNetwork() }
+                    FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
+                    attachDocListener()
                 }
             }
-            null
         }
 
         awaitClose {
-            runCatching { registration?.remove() }
+            recoveryJob?.cancel()
+            detachCurrentRegistration()
         }
     }
 
@@ -234,14 +478,15 @@ class QawmiRepository(
 
     fun observeAdminRegistryEntry(userId: String): Flow<AdminRegistryEntry?> {
         if (userId.isBlank()) return kotlinx.coroutines.flow.flowOf(null)
-        return db.collection("admins").document(userId)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObject(AdminRegistryEntry::class.java)
-            }
-            .catch {
-                emit(null)
-            }
+        val path = "admins/$userId"
+        return observeDocumentWithAutoRecovery(
+            docRef = db.collection("admins").document(userId),
+            path = path,
+            includeMetadataChanges = false,
+            defaultValueOnError = null
+        ) { snapshot ->
+            snapshot.safeToObject(AdminRegistryEntry::class.java)
+        }
     }
 
     /**
@@ -390,10 +635,13 @@ class QawmiRepository(
                 blockedUserIds = rawBlocked,
                 chatThemes = rawThemes
             )
-            val effectiveOnline = if (metadata.hasPendingWrites()) {
-                candidate.isOnline
-            } else {
-                candidate.isEffectivelyOnline()
+            val isFromCache = runCatching { metadata.isFromCache }.getOrDefault(false)
+            val hasPending = runCatching { metadata.hasPendingWrites() }.getOrDefault(false)
+            val effectiveOnline = when {
+                !FirestoreConnectionMonitor.isNetworkAvailable.value -> false
+                isFromCache && !FirestoreConnectionMonitor.isServerConnected.value -> false
+                hasPending && !isFromCache -> candidate.isOnline
+                else -> candidate.isEffectivelyOnline()
             }
             candidate.copy(isOnline = effectiveOnline)
         } catch (_: Throwable) {
@@ -402,20 +650,16 @@ class QawmiRepository(
     }
 
     fun observeUserProfile(userId: String): Flow<UserProfile?> {
+        if (userId.isBlank()) return kotlinx.coroutines.flow.flowOf(null)
         val path = "users/$userId"
-        return db.collection("users").document(userId)
-            .snapshots()
-            .map { snapshot ->
-                if (snapshot.exists()) {
-                    snapshot.toUserProfileOrNull()
-                } else {
-                    null
-                }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.GET, path)
-                throw error
-            }
+        return observeDocumentWithAutoRecovery(
+            docRef = db.collection("users").document(userId),
+            path = path,
+            includeMetadataChanges = true,
+            defaultValueOnError = null
+        ) { snapshot ->
+            snapshot.toUserProfileOrNull()
+        }
     }
 
     suspend fun getUserProfile(userId: String): UserProfile? {
@@ -833,7 +1077,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
@@ -1508,7 +1752,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
@@ -2071,7 +2315,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path).whereEqualTo("applicantId", effectiveUid),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             snapshot.documents
@@ -2088,7 +2332,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path).whereEqualTo("recipientId", effectiveUid),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             snapshot.documents
@@ -2385,7 +2629,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path).whereArrayContains("memberIds", effectiveUid),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toChatGroupOrNull() }
@@ -3394,7 +3638,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             snapshot.safeToObjects(TelegramNotificationLog::class.java)
@@ -3620,7 +3864,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toKhedmotSubmissionOrNull() }
@@ -3634,7 +3878,7 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
             path = path,
-            includeMetadataChanges = true,
+            includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             snapshot.safeToObjects(AdminRegistryEntry::class.java)
@@ -3799,26 +4043,26 @@ class QawmiRepository(
     fun observeSmoronServerReceipts(userId: String): Flow<Map<String, Long>> {
         if (userId.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyMap())
         val readsPath = "users/$userId/notification_reads"
-        return db.collection("users")
-            .document(userId)
-            .collection("notification_reads")
-            .whereEqualTo("userId", userId)
-            .snapshots()
-            .map { snapshot ->
-                val result = mutableMapOf<String, Long>()
-                snapshot.safeToObjects(NotificationReadReceipt::class.java).forEach { receipt ->
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection("users")
+                .document(userId)
+                .collection("notification_reads")
+                .whereEqualTo("userId", userId),
+            path = readsPath,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(NotificationReadReceipt::class.java)
+                .mapNotNull { receipt ->
                     val key = receipt.notificationId.ifBlank { receipt.id }
                     if (key.startsWith("smoron_")) {
                         val tsMillis = receipt.readAt?.toDate()?.time ?: System.currentTimeMillis()
-                        result[key] = tsMillis
+                        key to tsMillis
+                    } else {
+                        null
                     }
                 }
-                result.toMap()
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, readsPath)
-                emit(emptyMap())
-            }
+        }.map { pairs -> pairs.toMap() }
     }
 
     suspend fun recordSmoronAssignmentInServer(
@@ -3916,16 +4160,14 @@ class QawmiRepository(
 
     fun observeLatestAppRelease(): Flow<AppReleaseInfo?> {
         val path = "app_releases/latest"
-        return db.collection("app_releases")
-            .document("latest")
-            .snapshots()
-            .map { snapshot ->
-                snapshot.toAppReleaseInfoOrNull()
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.GET, path)
-                emit(null)
-            }
+        return observeDocumentWithAutoRecovery(
+            docRef = db.collection("app_releases").document("latest"),
+            path = path,
+            includeMetadataChanges = false,
+            defaultValueOnError = null
+        ) { snapshot ->
+            snapshot.toAppReleaseInfoOrNull()
+        }
     }
 
     suspend fun publishAppReleaseInfo(

@@ -425,6 +425,41 @@ fun AppNavigation(
             }
         )
 
+        DisposableEffect(context, resolvedAuth, currentUserId) {
+            val connectivityManager = runCatching {
+                context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            }.getOrNull()
+
+            val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+                    qawmiViewModel.onNetworkRestored()
+                }
+
+                override fun onLost(network: android.net.Network) {
+                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkAvailabilityChanged(false)
+                }
+            }
+
+            runCatching {
+                connectivityManager?.registerDefaultNetworkCallback(networkCallback)
+            }
+
+            val idTokenListener = FirebaseAuth.IdTokenListener { authInstance ->
+                if (authInstance.currentUser?.uid == currentUserId) {
+                    qawmiViewModel.onAuthSessionRefreshed()
+                }
+            }
+            runCatching {
+                resolvedAuth.addIdTokenListener(idTokenListener)
+            }
+
+            onDispose {
+                runCatching { connectivityManager?.unregisterNetworkCallback(networkCallback) }
+                runCatching { resolvedAuth.removeIdTokenListener(idTokenListener) }
+            }
+        }
+
         LaunchedEffect(openNotificationsInitially, currentUserId) {
             QawmiNotificationHelper.syncFcmTopicSubscriptions(context, currentUserId)
             if (openNotificationsInitially) {

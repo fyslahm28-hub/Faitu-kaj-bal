@@ -1261,6 +1261,208 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         )
         assertEquals("ওয়া আলাইকুমুস সালাম। আগামীকাল বাদ জোহর মাদরাসায় তাশরীফ আনুন।", restartedMsg2.body)
     }
+
+    @Test
+    fun liveConnectionStability_screenSwitching_backgroundForeground_offlineOnlineRecovery_andZeroDuplicateListeners() = runBlocking {
+        FirestoreConnectionMonitor.resetForTesting()
+
+        val userAEmail = "stability_a_${UUID.randomUUID()}@test.com"
+        val userBEmail = "stability_b_${UUID.randomUUID()}@test.com"
+
+        // 1. Setup User B profile
+        val userBUid = signInTestUser(userBEmail)
+        val repoB = QawmiRepository(firestore, auth)
+        withTimeout(5_000L) {
+            repoB.saveUserProfile(
+                UserProfile(
+                    id = userBUid,
+                    userId = userBUid,
+                    fullName = "মাওলানা আবু বকর সিদ্দিক",
+                    accountType = "madrasa",
+                    district = "ঢাকা",
+                    designation = "মুহতামিম",
+                    photoUrl = "preset:madrasa_dome"
+                )
+            )
+        }
+
+        // 2. Setup User A with full QawmiViewModel to verify live listeners across screen switches & lifecycle
+        val userAUid = signInTestUser(userAEmail)
+        val repoA = QawmiRepository(firestore, auth)
+        withTimeout(5_000L) {
+            repoA.saveUserProfile(
+                UserProfile(
+                    id = userAUid,
+                    userId = userAUid,
+                    fullName = "হাফেজ মাওলানা ওমর ফারুক",
+                    accountType = "khadim",
+                    district = "সিলেট",
+                    designation = "মুহাদ্দিস",
+                    photoUrl = "preset:mosque_emerald"
+                )
+            )
+        }
+
+        val viewModelA = com.example.ui.viewmodel.QawmiViewModel(
+            repository = repoA,
+            currentUserId = userAUid,
+            currentUserEmail = userAEmail,
+            currentUserDisplayName = "হাফেজ মাওলানা ওমর ফারুক"
+        )
+
+        // Wait for initial server-backed feed & profile streams to connect
+        awaitMainLooperCondition(5_000L, { "userProfileState -> ${viewModelA.userProfileState.value}" }) {
+            viewModelA.userProfileState.value is com.example.ui.viewmodel.UiState.Success
+        }
+        assertTrue("Initial connection should be marked server-connected", FirestoreConnectionMonitor.isServerConnected.value)
+        assertFalse("Initial connection should not be marked cache-only", FirestoreConnectionMonitor.isServingFromCache.value)
+
+        // 3. Switch screens repeatedly (HOME -> FEED -> ABEDON -> MESSAGES -> PROFILE -> HOME)
+        // and verify essential listeners remain active and never duplicate
+        val destinations = listOf(
+            com.example.ui.viewmodel.MainDestination.FEED,
+            com.example.ui.viewmodel.MainDestination.ABEDON,
+            com.example.ui.viewmodel.MainDestination.MESSAGES,
+            com.example.ui.viewmodel.MainDestination.PROFILE,
+            com.example.ui.viewmodel.MainDestination.HOME
+        )
+        for (dest in destinations) {
+            viewModelA.navigateTo(dest)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        }
+        assertEquals(
+            "Exactly 1 feed_posts listener should be attached across screen switches",
+            1,
+            FirestoreConnectionMonitor.getActiveListenersForPath("feed_posts")
+        )
+
+        // 4. User B publishes a circular post, User A applies, and User B sends a message;
+        // verify chatPartnerProfilesState does NOT create duplicate listeners for User B
+        signInTestUser(userBEmail)
+        val postRes = withTimeout(5_000L) {
+            repoB.createFeedPost(
+                authorName = "মাওলানা আবু বকর সিদ্দিক",
+                postType = "JOB_CIRCULAR",
+                title = "জরুরি মুহাদ্দিস নিয়োগ বিজ্ঞপ্তি",
+                district = "ঢাকা",
+                upazilaOrLocation = "মোহাম্মদপুর",
+                designation = "মুহাদ্দিস",
+                qualification = "দাওরায়ে হাদীস",
+                salaryOrExperience = "১৮,০০০ টাকা",
+                deadlineOrPreferredDistricts = "৩০ শে শাওয়াল",
+                description = "মাদরাসায় একজন অভিজ্ঞ মুহাদ্দিস আবশ্যক।",
+                contactNumber = "01711001122"
+            )
+        }
+        assertTrue(postRes.isSuccess)
+        val postId = postRes.getOrThrow()
+
+        // Switch back to User A and verify live feed receives the post while on HOME/FEED
+        signInTestUser(userAUidEmail(userAEmail))
+        awaitMainLooperCondition(5_000L, { "feedPostsState -> ${viewModelA.feedPostsState.value}" }) {
+            (viewModelA.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data?.any { it.id == postId } == true
+        }
+        val circularOnA = (viewModelA.feedPostsState.value as com.example.ui.viewmodel.UiState.Success).data.first { it.id == postId }
+
+        // Inspect User B's profile AND open direct message target to User B; verify at most 1 listener on users/{userBUid}
+        viewModelA.openUserProfileInspection(userBUid, "মাওলানা আবু বকর সিদ্দিক")
+        viewModelA.openDirectMessageTo(userBUid, "মাওলানা আবু বকর সিদ্দিক")
+        awaitMainLooperCondition(
+            5_000L,
+            { "partnerProfiles=${viewModelA.chatPartnerProfilesState.value.keys}, activePartner=${viewModelA.activeChatPartnerProfileState.value?.id}, msgs=${viewModelA.messagesState.value}, groups=${viewModelA.userGroupsState.value}, comments=${viewModelA.postCommentsState.value}, subs=${viewModelA.receivedSubmissionsState.value}" }
+        ) {
+            viewModelA.chatPartnerProfilesState.value.containsKey(userBUid) &&
+                viewModelA.activeChatPartnerProfileState.value?.id == userBUid
+        }
+        assertEquals(
+            "Must never create duplicate listeners for the same partner user profile",
+            1,
+            FirestoreConnectionMonitor.getActiveListenersForPath("users/$userBUid")
+        )
+
+        // 5. Simulate App Background -> Foreground transition
+        viewModelA.setUserOnlineStatus(false)
+        viewModelA.onNetworkRestored()
+        assertEquals(
+            "Feed listener must remain active without duplication after background/foreground transition",
+            1,
+            FirestoreConnectionMonitor.getActiveListenersForPath("feed_posts")
+        )
+
+        // 6. Simulate Internet Disconnect (Offline mode) and verify Server vs Cache distinction + No Fake Online status
+        firestore.disableNetwork().awaitWithTimeout(5_000L)
+        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(false)
+        assertFalse("isServerConnected must be false when network is lost", FirestoreConnectionMonitor.isServerConnected.value)
+        assertTrue("isServingFromCache must be true when network is lost", FirestoreConnectionMonitor.isServingFromCache.value)
+
+        // Verify cached profile read while offline does NOT report a fake online status
+        val cachedUserBSnap = firestore.collection("users").document(userBUid).get(com.google.firebase.firestore.Source.CACHE).awaitWithTimeout(5_000L)
+        assertTrue(cachedUserBSnap.metadata.isFromCache)
+
+        // 7. Restore Internet Connection (Online mode) and verify automatic synchronization of new posts, applications, and messages
+        firestore.enableNetwork().awaitWithTimeout(5_000L)
+        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+        viewModelA.onNetworkRestored()
+
+        // User A submits an application to User B's circular and sends a message after network recovery
+        val applyRes = withTimeout(5_000L) {
+            repoA.submitApplicationToCircular(
+                post = circularOnA,
+                applicantName = "হাফেজ মাওলানা ওমর ফারুক",
+                applicantQualification = "দাওরায়ে হাদীস",
+                applicantExperience = "৫ বছর",
+                applicantPhone = "01811223344",
+                coverNote = "নেটওয়ার্ক পুনরায় চালুর পর খেদমতে আবেদন।"
+            )
+        }
+        assertTrue("Application after network restore should succeed: ${applyRes.exceptionOrNull()}", applyRes.isSuccess)
+        val subId = applyRes.getOrThrow()
+
+        val msgAfterReconnectRes = withTimeout(5_000L) {
+            repoA.sendDirectMessage(
+                senderName = "হাফেজ মাওলানা ওমর ফারুক",
+                receiverName = "মাওলানা আবু বকর সিদ্দিক",
+                receiverId = userBUid,
+                subject = "আবেদন প্রসঙ্গে",
+                body = "আসসালামু আলাইকুম, আমি আবেদন করেছি।"
+            )
+        }
+        assertTrue("Message after network restore should succeed: ${msgAfterReconnectRes.exceptionOrNull()}", msgAfterReconnectRes.isSuccess)
+        val msgAfterReconnectId = msgAfterReconnectRes.getOrThrow()
+
+        // Switch to User B and verify both the application and message arrived live after network recovery
+        signInTestUser(userBEmail)
+        val receivedSubsOnB = withTimeout(5_000L) {
+            repoB.observeReceivedSubmissions(userBUid).first { list -> list.any { it.id == subId } }
+        }
+        assertTrue(receivedSubsOnB.any { it.id == subId })
+
+        val receivedMsgsOnB = withTimeout(5_000L) {
+            repoB.observeUserMessages(userBUid).first { list -> list.any { it.id == msgAfterReconnectId } }
+        }
+        assertTrue(receivedMsgsOnB.any { it.id == msgAfterReconnectId })
+
+        // Verify real server snapshot restored isServerConnected = true and isServingFromCache = false
+        assertTrue("isServerConnected must be true after receiving live server snapshot", FirestoreConnectionMonitor.isServerConnected.value)
+        assertFalse("isServingFromCache must be false after receiving live server snapshot", FirestoreConnectionMonitor.isServingFromCache.value)
+    }
+
+    private fun userAUidEmail(email: String): String = email
+
+    private suspend fun awaitMainLooperCondition(timeoutMs: Long, debugInfo: () -> String = { "" }, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (condition()) return
+            kotlinx.coroutines.delay(25L)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertTrue("Condition was not satisfied within ${timeoutMs}ms: ${debugInfo()}", condition())
+    }
+
+    private suspend fun awaitMainLooperCondition(timeoutMs: Long, label: String, condition: () -> Boolean) {
+        awaitMainLooperCondition(timeoutMs, { label }, condition)
+    }
 }
 
 

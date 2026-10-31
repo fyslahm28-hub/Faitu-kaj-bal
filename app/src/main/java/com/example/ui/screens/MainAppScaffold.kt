@@ -151,7 +151,7 @@ fun MainAppScaffold(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> {
-                    viewModel.setUserOnlineStatus(true)
+                    viewModel.onNetworkRestored()
                 }
                 Lifecycle.Event.ON_STOP -> {
                     viewModel.setUserOnlineStatus(false)
@@ -192,6 +192,7 @@ fun MainAppScaffold(
         }
     }
 
+    val isServerConnected by viewModel.isServerConnected.collectAsStateWithLifecycle()
     val userProfileState by viewModel.userProfileState.collectAsStateWithLifecycle()
     val feedPostsState by viewModel.feedPostsState.collectAsStateWithLifecycle()
     val postCommentsState by viewModel.postCommentsState.collectAsStateWithLifecycle()
@@ -363,7 +364,7 @@ fun MainAppScaffold(
                             borderColor = QawmiGold,
                             borderWidth = 2.dp,
                             showOnlineIndicator = true,
-                            isOnline = currentProfile?.isOnline ?: true
+                            isOnline = (currentProfile?.isOnline == true) && isServerConnected
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Column {
