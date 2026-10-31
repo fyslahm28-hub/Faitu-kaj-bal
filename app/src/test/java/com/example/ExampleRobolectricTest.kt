@@ -468,6 +468,7 @@ class ExampleRobolectricTest {
 
         // Current user types a message -> broadcasts typing = true, then sends -> broadcasts typing = false
         composeTestRule.onNodeWithTag("message_body_input").performTextInput("আসসালামু আলাইকুম")
+        composeTestRule.mainClock.advanceTimeBy(400L)
         composeTestRule.waitForIdle()
         assertTrue(typingEvents.contains("partner_1" to true))
 
