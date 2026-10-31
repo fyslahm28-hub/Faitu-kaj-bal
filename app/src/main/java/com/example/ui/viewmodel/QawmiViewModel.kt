@@ -24,6 +24,7 @@ import com.example.ui.util.ProfilePhotoHelper
 import com.google.firebase.Timestamp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -139,8 +140,36 @@ class QawmiViewModel(
         _isSubmitting.value = false
     }
 
+    private var bannerAutoDismissJob: Job? = null
+
+    private fun postErrorBanner(msg: String?) {
+        bannerAutoDismissJob?.cancel()
+        _errorBanner.value = msg
+        if (!msg.isNullOrBlank()) {
+            bannerAutoDismissJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(7_000L)
+                if (_errorBanner.value == msg) {
+                    _errorBanner.value = null
+                }
+            }
+        }
+    }
+
+    private fun postFeedbackBanner(msg: String?) {
+        bannerAutoDismissJob?.cancel()
+        _feedbackBanner.value = msg
+        if (!msg.isNullOrBlank()) {
+            bannerAutoDismissJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(5_000L)
+                if (_feedbackBanner.value == msg) {
+                    _feedbackBanner.value = null
+                }
+            }
+        }
+    }
+
     private fun runSubmittingAction(
-        timeoutMs: Long = 30_000L,
+        timeoutMs: Long = 45_000L,
         onTimeoutOrError: ((Throwable) -> Unit)? = null,
         block: suspend () -> Unit
     ) {
@@ -153,13 +182,13 @@ class QawmiViewModel(
                 }
             } catch (e: TimeoutCancellationException) {
                 Log.w(TAG, "Submitting action timed out after ${timeoutMs}ms", e)
-                _errorBanner.value = "অনুরোধটি সম্পন্ন হতে অতিরিক্ত সময় নিচ্ছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।"
+                postErrorBanner("অনুরোধটি সম্পন্ন হতে অতিরিক্ত সময় নিচ্ছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।")
                 onTimeoutOrError?.invoke(e)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 Log.e(TAG, "Unexpected error in submitting action", e)
-                _errorBanner.value = formatFirestoreErrorBangla(e, "কার্যক্রমটি সম্পন্ন করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।")
+                postErrorBanner(formatFirestoreErrorBangla(e, "কার্যক্রমটি সম্পন্ন করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"))
                 onTimeoutOrError?.invoke(e)
             } finally {
                 _isSubmitting.value = false
@@ -969,6 +998,7 @@ class QawmiViewModel(
     }
 
     fun clearBanners() {
+        bannerAutoDismissJob?.cancel()
         _feedbackBanner.value = null
         _errorBanner.value = null
     }
