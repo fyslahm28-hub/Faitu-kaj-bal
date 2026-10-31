@@ -6,6 +6,7 @@ import com.example.data.model.AdminRegistryEntry
 import com.example.data.model.AppNotification
 import com.example.data.model.AppReleaseInfo
 import com.example.data.model.BookmarkItem
+import kotlinx.coroutines.Dispatchers
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
 import com.example.data.model.FeedComment
@@ -84,10 +85,6 @@ class QawmiRepository(
         return runCatching { auth.currentUser?.uid?.trim().orEmpty() }.getOrDefault("")
     }
 
-    private val listenerExecutor = java.util.concurrent.Executors.newCachedThreadPool { runnable ->
-        Thread(runnable, "qawmi-firestore-listener").apply { isDaemon = true }
-    }
-
     /**
      * Ensures the Firebase Firestore network connection and Auth token are active and triggers
      * immediate re-subscription for any listener that had previously encountered an error,
@@ -162,7 +159,7 @@ class QawmiRepository(
             // Guarantee at most 1 registration for this flow at any point in time
             detachCurrentRegistration()
             try {
-                val reg = query.addSnapshotListener(listenerExecutor, metadataChoice) { snapshot, error ->
+                val reg = query.addSnapshotListener(metadataChoice) { snapshot, error ->
                     if (error != null) {
                         handleFirestoreError(error, OperationType.LIST, path)
                         detachCurrentRegistration()
@@ -255,7 +252,7 @@ class QawmiRepository(
         }
 
         // 3. Fast local cache seed if the snapshot listener hasn't emitted within 120ms
-        launch {
+        launch(Dispatchers.IO) {
             delay(120L)
             if (listenerHasEmitted.get() || hasEmittedAny.get()) return@launch
             if (runCatching { auth.currentUser }.getOrNull() == null) return@launch
@@ -276,7 +273,7 @@ class QawmiRepository(
         }
 
         // 4. Only run a one-shot fallback if the live listener still hasn't emitted after initialServerTimeoutMs
-        launch {
+        launch(Dispatchers.IO) {
             delay(initialServerTimeoutMs)
             if (listenerHasEmitted.get()) return@launch
             var serverErr: Throwable? = null
@@ -365,7 +362,7 @@ class QawmiRepository(
             if (!isActive) return
             detachCurrentRegistration()
             try {
-                val reg = docRef.addSnapshotListener(listenerExecutor, metadataChoice) { snapshot, error ->
+                val reg = docRef.addSnapshotListener(metadataChoice) { snapshot, error ->
                     if (error != null) {
                         handleFirestoreError(error, OperationType.GET, path)
                         detachCurrentRegistration()
@@ -375,7 +372,7 @@ class QawmiRepository(
                             return@addSnapshotListener
                         }
                         recoveryJob?.cancel()
-                        recoveryJob = launch {
+                        recoveryJob = launch(Dispatchers.IO) {
                             val attempt = retryAttempt.incrementAndGet()
                             if (!hasEmittedAny.get()) {
                                 val cachedDoc = withTimeoutOrNull(250L) {
@@ -442,7 +439,56 @@ class QawmiRepository(
             }
         }
 
+        // Re-attach immediately if a global network/auth reconnect signal arrives while detached
+        launch {
+            FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
+                if (isActive && activeRegistration.get() == null) {
+                    recoveryJob?.cancel()
+                    retryAttempt.set(0)
+                    runCatching { db.enableNetwork() }
+                    FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
+                    attachDocListener()
+                }
+            }
+        }
+
         attachDocListener()
+
+        // Fast initial document fetch on Dispatchers.IO if listener hasn't emitted yet
+        launch(Dispatchers.IO) {
+            if (hasEmittedAny.get()) return@launch
+            val cached = withTimeoutOrNull(250L) {
+                runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
+            }
+            if (cached != null && cached.exists() && !hasEmittedAny.get()) {
+                FirestoreConnectionMonitor.onSnapshotReceived(
+                    path = path,
+                    isFromCache = true,
+                    hasPendingWrites = cached.metadata.hasPendingWrites()
+                )
+                val mapped = runCatching { mapper(cached) }.getOrDefault(defaultValueOnError)
+                if (!hasEmittedAny.get()) {
+                    hasEmittedAny.set(true)
+                    trySend(mapped)
+                }
+            } else if (!hasEmittedAny.get()) {
+                val serverSnap = withTimeoutOrNull(2_500L) {
+                    runCatching { docRef.get().await() }.getOrNull()
+                }
+                if (serverSnap != null && serverSnap.exists() && !hasEmittedAny.get()) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = path,
+                        isFromCache = serverSnap.metadata.isFromCache,
+                        hasPendingWrites = serverSnap.metadata.hasPendingWrites()
+                    )
+                    val mapped = runCatching { mapper(serverSnap) }.getOrDefault(defaultValueOnError)
+                    if (!hasEmittedAny.get()) {
+                        hasEmittedAny.set(true)
+                        trySend(mapped)
+                    }
+                }
+            }
+        }
 
         launch {
             FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
@@ -4041,13 +4087,17 @@ class QawmiRepository(
     // --- 10. AJKER SMORON (আজকের স্মরণ — সার্ভার-ভিত্তিক ইতিহাস, বরাদ্দ ও নোটিফিকেশন সিঙ্ক) ---
 
     fun observeSmoronServerReceipts(userId: String): Flow<Map<String, Long>> {
-        if (userId.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyMap())
-        val readsPath = "users/$userId/notification_reads"
+        val trimmed = userId.trim()
+        val currentUid = auth.currentUser?.uid.orEmpty()
+        if (trimmed.isBlank() || (currentUid.isNotBlank() && trimmed != currentUid)) {
+            return kotlinx.coroutines.flow.flowOf(emptyMap())
+        }
+        val readsPath = "users/$trimmed/notification_reads"
         return observeQueryWithFastInitialAndFallback(
             query = db.collection("users")
-                .document(userId)
+                .document(trimmed)
                 .collection("notification_reads")
-                .whereEqualTo("userId", userId),
+                .whereEqualTo("userId", trimmed),
             path = readsPath,
             includeMetadataChanges = false,
             initialServerTimeoutMs = 3_500L

@@ -1359,6 +1359,7 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
 
         // Switch back to User A and verify live feed receives the post while on HOME/FEED
         signInTestUser(userAUidEmail(userAEmail))
+        viewModelA.onAuthSessionRefreshed()
         awaitMainLooperCondition(5_000L, { "feedPostsState -> ${viewModelA.feedPostsState.value}" }) {
             (viewModelA.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data?.any { it.id == postId } == true
         }
@@ -1369,7 +1370,7 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         viewModelA.openDirectMessageTo(userBUid, "মাওলানা আবু বকর সিদ্দিক")
         awaitMainLooperCondition(
             5_000L,
-            { "partnerProfiles=${viewModelA.chatPartnerProfilesState.value.keys}, activePartner=${viewModelA.activeChatPartnerProfileState.value?.id}, msgs=${viewModelA.messagesState.value}, groups=${viewModelA.userGroupsState.value}, comments=${viewModelA.postCommentsState.value}, subs=${viewModelA.receivedSubmissionsState.value}" }
+            { "partnerProfiles=${viewModelA.chatPartnerProfilesState.value.keys}, activePartner=${viewModelA.activeChatPartnerProfileState.value?.id}, target=${viewModelA.messageTargetUser.value}, activeUsersBListeners=${FirestoreConnectionMonitor.getActiveListenersForPath("users/$userBUid")}, lastErr=${FirestoreConnectionMonitor.lastConnectionError.value}, msgs=${viewModelA.messagesState.value}" }
         ) {
             viewModelA.chatPartnerProfilesState.value.containsKey(userBUid) &&
                 viewModelA.activeChatPartnerProfileState.value?.id == userBUid

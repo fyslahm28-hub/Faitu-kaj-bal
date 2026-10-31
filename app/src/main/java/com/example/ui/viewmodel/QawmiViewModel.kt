@@ -26,6 +26,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -184,10 +186,12 @@ class QawmiViewModel(
     val focusedSmoronId: StateFlow<String?> = _focusedSmoronId.asStateFlow()
 
     val smoronServerReceiptsState: StateFlow<Map<String, Long>> = repository.observeSmoronServerReceipts(currentUserId)
+        .catch { emit(emptyMap()) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     // Auto-Update System State (সর্বশেষ ভার্সন ও ডাউনলোড লিংক পরিচালনা)
     val latestAppReleaseState: StateFlow<AppReleaseInfo?> = repository.observeLatestAppRelease()
+        .catch { emit(null) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _dismissedUpdateVersionCode = MutableStateFlow<Int?>(null)
@@ -207,18 +211,6 @@ class QawmiViewModel(
     val lastConnectionError: StateFlow<String?> = com.example.data.repository.FirestoreConnectionMonitor.lastConnectionError
     val connectionErrorLogs: StateFlow<List<String>> = com.example.data.repository.FirestoreConnectionMonitor.connectionErrorLogs
 
-    // Deduplicated per-user profile StateFlow cache so each partnerUid attaches at most ONE Firestore listener
-    // for the lifetime of the ViewModel and never tears down/recreates 50 listeners when feed/chat updates arrive.
-    private val partnerProfileFlows = java.util.concurrent.ConcurrentHashMap<String, StateFlow<UserProfile?>>()
-
-    private fun getOrCreatePartnerProfileFlow(partnerUid: String): StateFlow<UserProfile?> {
-        val cleanUid = partnerUid.trim()
-        return partnerProfileFlows.computeIfAbsent(cleanUid) { uid ->
-            repository.observeUserProfile(uid)
-                .catch { emit(null) }
-                .stateIn(viewModelScope, SharingStarted.Eagerly, null)
-        }
-    }
 
     // Server-side Admin Registry & Token Claim state
     private val _serverTokenVerifiedAdmin = MutableStateFlow(
@@ -227,6 +219,7 @@ class QawmiViewModel(
     )
 
     val adminRegistryEntryState: StateFlow<AdminRegistryEntry?> = repository.observeAdminRegistryEntry(currentUserId)
+        .catch { emit(null) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val isAdminState: StateFlow<Boolean> = combine(
@@ -263,11 +256,16 @@ class QawmiViewModel(
 
     val inspectedUserProfileState: StateFlow<UiState<UserProfile?>> = _inspectedUserTarget
         .flatMapLatest { target ->
-            if (target == null || target.first.isBlank()) {
+            val uid = target?.first.orEmpty().trim()
+            if (uid.isBlank() || uid == currentUserId) {
                 flowOf(UiState.Success(null))
             } else {
-                getOrCreatePartnerProfileFlow(target.first)
+                repository.observeUserProfile(uid)
                     .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
+                    .catch { e ->
+                        Log.w(TAG, "Error inspecting profile for $uid", e)
+                        emit(UiState.Error(formatFirestoreErrorBangla(e, "প্রোফাইল লোড করা যায়নি")))
+                    }
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
@@ -298,9 +296,7 @@ class QawmiViewModel(
     private val _localOptimisticMessages = MutableStateFlow<List<DirectMessage>>(emptyList())
 
     val feedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
-        _adminDataRefreshToken.flatMapLatest {
-            repository.observePublicFeedPosts()
-        },
+        repository.observePublicFeedPosts(),
         _localOptimisticPosts,
         _localPostEngagementOverrides,
         _localAdminPostOverrides
@@ -565,38 +561,20 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
-    // Real-time profiles of all conversation partners, feed post authors, comment authors & applicants
+    // Real-time profiles of active conversation partners and targeted direct message user
     val chatPartnerProfilesState: StateFlow<Map<String, UserProfile>> = combine(
-        combine(messagesState, userGroupsState, _messageTargetUser) { msgState, groupsState, targetUser ->
-            val messages = (msgState as? UiState.Success)?.data ?: emptyList()
-            val groups = (groupsState as? UiState.Success)?.data ?: emptyList()
-            val ids = messages.flatMap { msg -> listOf(msg.senderId, msg.receiverId) }.toMutableSet()
-            groups.forEach { group -> ids.addAll(group.memberIds) }
-            targetUser?.first?.takeIf { it.isNotBlank() && !it.startsWith("GROUP:") }?.let { ids.add(it) }
-            ids
-        },
-        feedPostsState,
-        postCommentsState,
-        receivedSubmissionsState
-    ) { chatIds, postsState, commentsState, receivedSubsState ->
-        val partnerIds = chatIds.toMutableSet()
-        val posts = (postsState as? UiState.Success)?.data ?: emptyList()
-        posts.take(40).forEach { post ->
-            if (post.authorId.isNotBlank()) partnerIds.add(post.authorId)
-            if (post.sharedAuthorId.isNotBlank()) partnerIds.add(post.sharedAuthorId)
-        }
-        val comments = (commentsState as? UiState.Success)?.data ?: emptyList()
-        comments.take(50).forEach { comment ->
-            if (comment.authorId.isNotBlank()) partnerIds.add(comment.authorId)
-        }
-        val subs = (receivedSubsState as? UiState.Success)?.data ?: emptyList()
-        subs.take(30).forEach { sub ->
-            if (sub.applicantId.isNotBlank()) partnerIds.add(sub.applicantId)
-        }
-        partnerIds
-            .filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
+        messagesState,
+        userGroupsState,
+        _messageTargetUser
+    ) { msgState, groupsState, targetUser ->
+        val messages = (msgState as? UiState.Success)?.data ?: emptyList()
+        val groups = (groupsState as? UiState.Success)?.data ?: emptyList()
+        val ids = messages.flatMap { msg -> listOf(msg.senderId, msg.receiverId) }.toMutableSet()
+        groups.forEach { group -> ids.addAll(group.memberIds) }
+        targetUser?.first?.takeIf { it.isNotBlank() && !it.startsWith("GROUP:") }?.let { ids.add(it) }
+        ids.filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
             .sorted()
-            .take(50)
+            .take(20)
     }
         .distinctUntilChanged()
         .flatMapLatest { validIds ->
@@ -604,28 +582,47 @@ class QawmiViewModel(
                 flowOf(emptyMap())
             } else {
                 val flows = validIds.map { partnerUid ->
-                    getOrCreatePartnerProfileFlow(partnerUid)
+                    repository.observeUserProfile(partnerUid)
+                        .catch { emit(null) }
                         .map { profile -> partnerUid to profile }
                 }
                 combine(flows) { pairs ->
-                    pairs.mapNotNull { (uid, profile) ->
-                        if (profile != null) uid to profile else null
+                    pairs.map { (uid, profile) ->
+                        val effective = profile ?: UserProfile(
+                            id = uid,
+                            userId = uid,
+                            fullName = if (uid == _messageTargetUser.value?.first) {
+                                _messageTargetUser.value?.second.orEmpty().ifBlank { "ব্যবহারকারী" }
+                            } else {
+                                "ব্যবহারকারী"
+                            }
+                        )
+                        uid to effective
                     }.toMap()
                 }
             }
         }
+        .catch { e ->
+            Log.w(TAG, "Error observing partner profiles", e)
+            emit(emptyMap())
+        }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
-    val activeChatPartnerProfileState: StateFlow<UserProfile?> = _messageTargetUser
-        .map { it?.first.orEmpty() }
-        .distinctUntilChanged()
-        .flatMapLatest { uid ->
-            if (uid.isBlank() || uid == currentUserId || uid.startsWith("GROUP:")) {
-                flowOf(null)
-            } else {
-                getOrCreatePartnerProfileFlow(uid)
-            }
-        }
+    val activeChatPartnerProfileState: StateFlow<UserProfile?> = combine(
+        chatPartnerProfilesState,
+        _messageTargetUser,
+        inspectedUserProfileState
+    ) { partnerProfiles, targetUser, inspectedState ->
+        val uid = targetUser?.first.orEmpty().trim()
+        if (uid.isBlank() || uid == currentUserId || uid.startsWith("GROUP:")) null
+        else partnerProfiles[uid]
+            ?: (inspectedState as? UiState.Success)?.data?.takeIf { it.id == uid }
+            ?: UserProfile(
+                id = uid,
+                userId = uid,
+                fullName = targetUser?.second.orEmpty().ifBlank { "ব্যবহারকারী" }
+            )
+    }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val notificationsState: StateFlow<UiState<List<AppNotification>>> = _adminDataRefreshToken
@@ -886,6 +883,7 @@ class QawmiViewModel(
      * resumes to foreground, without tearing down or duplicating already-healthy listeners.
      */
     fun onNetworkRestored() {
+        _adminDataRefreshToken.value = _adminDataRefreshToken.value + 1
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "NETWORK_RESTORED")
             setUserOnlineStatus(true)
@@ -896,6 +894,7 @@ class QawmiViewModel(
      * Refreshes live connection state when the Firebase Auth ID token is refreshed.
      */
     fun onAuthSessionRefreshed() {
+        _adminDataRefreshToken.value = _adminDataRefreshToken.value + 1
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "AUTH_TOKEN_REFRESHED")
             verifyAndSyncAdminIdentity()

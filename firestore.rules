@@ -844,15 +844,15 @@ service cloud.firestore {
     match /messages/{messageId} {
       function isMessageParticipant(data) {
         let groupMembers = data.get('groupMemberIds', []);
-        return data.senderId == request.auth.uid ||
-               data.receiverId == request.auth.uid ||
+        return data.get('senderId', '') == request.auth.uid ||
+               data.get('receiverId', '') == request.auth.uid ||
                (groupMembers is list && request.auth.uid in groupMembers);
       }
 
       allow get: if isSignedIn() && isValidId(messageId) && (resource == null || isMessageParticipant(existing()));
       allow list: if isSignedIn() && (
-                    existing().senderId == request.auth.uid ||
-                    existing().receiverId == request.auth.uid ||
+                    existing().get('senderId', '') == request.auth.uid ||
+                    existing().get('receiverId', '') == request.auth.uid ||
                     request.auth.uid in existing().get('groupMemberIds', [])
                   );
 
@@ -883,8 +883,8 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(messageId) &&
                        isMessageParticipant(existing()) &&
-                       incoming().senderId == existing().senderId &&
-                       incoming().receiverId == existing().receiverId &&
+                       incoming().get('senderId', '') == existing().get('senderId', '') &&
+                       incoming().get('receiverId', '') == existing().get('receiverId', '') &&
                        (incoming().createdAt == existing().createdAt ||
                         (request.auth.uid == existing().senderId && isValidTimestamp(incoming().createdAt))) &&
                        isValidReactionCode(incoming().get('senderReaction', '')) &&
