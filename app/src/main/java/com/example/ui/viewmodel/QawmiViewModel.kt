@@ -17,6 +17,7 @@ import com.example.data.model.MadrasaProfile
 import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.data.repository.QawmiRepository
+import com.example.data.repository.formatFirestoreErrorBangla
 import com.example.data.repository.isRetryableFirestoreMessageError
 import com.example.ui.util.AdminSecurityHelper
 import com.google.firebase.Timestamp
@@ -154,7 +155,7 @@ class QawmiViewModel(
                 throw e
             } catch (e: Throwable) {
                 Log.e(TAG, "Unexpected error in submitting action", e)
-                _errorBanner.value = e.localizedMessage ?: "কার্যক্রমটি সম্পন্ন করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
+                _errorBanner.value = formatFirestoreErrorBangla(e, "কার্যক্রমটি সম্পন্ন করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।")
                 onTimeoutOrError?.invoke(e)
             } finally {
                 _isSubmitting.value = false
@@ -229,7 +230,7 @@ class QawmiViewModel(
         .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
         .catch { e ->
             Log.w(TAG, "Error observing user profile", e)
-            emit(UiState.Error(e.localizedMessage ?: "প্রোফাইল লোড করা যায়নি"))
+            emit(UiState.Error(formatFirestoreErrorBangla(e, "প্রোফাইল লোড করা যায়নি")))
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
@@ -242,7 +243,7 @@ class QawmiViewModel(
                     .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
                     .catch { e ->
                         Log.w(TAG, "Error observing inspected user profile", e)
-                        emit(UiState.Error(e.localizedMessage ?: "ব্যবহারকারীর প্রোফাইল লোড করা যায়নি"))
+                        emit(UiState.Error(formatFirestoreErrorBangla(e, "ব্যবহারকারীর প্রোফাইল লোড করা যায়নি")))
                     }
             }
         }
@@ -275,10 +276,10 @@ class QawmiViewModel(
             if (fallback.isNotEmpty()) {
                 emit(UiState.Success(fallback))
             } else {
-                emit(UiState.Error(e.localizedMessage ?: "ফিড লোড করা যায়নি"))
+                emit(UiState.Error(formatFirestoreErrorBangla(e, "ফিড লোড করা যায়নি")))
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val postCommentsState: StateFlow<UiState<List<FeedComment>>> = _adminDataRefreshToken
         .flatMapLatest {
@@ -286,18 +287,21 @@ class QawmiViewModel(
                 .map<List<FeedComment>, UiState<List<FeedComment>>> { UiState.Success(it) }
                 .catch { e ->
                     Log.w(TAG, "Error observing post comments", e)
-                    emit(UiState.Error(e.localizedMessage ?: "কমেন্ট লোড করা যায়নি"))
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "কমেন্ট লোড করা যায়নি")))
                 }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
-    val bookmarksState: StateFlow<UiState<List<BookmarkItem>>> = repository.observeBookmarks(currentUserId)
-        .map<List<BookmarkItem>, UiState<List<BookmarkItem>>> { UiState.Success(it) }
-        .catch { e ->
-            Log.w(TAG, "Error observing bookmarks", e)
-            emit(UiState.Error(e.localizedMessage ?: "পছন্দের খেদমত লোড করা যায়নি"))
+    val bookmarksState: StateFlow<UiState<List<BookmarkItem>>> = _adminDataRefreshToken
+        .flatMapLatest {
+            repository.observeBookmarks(currentUserId)
+                .map<List<BookmarkItem>, UiState<List<BookmarkItem>>> { UiState.Success(it) }
+                .catch { e ->
+                    Log.w(TAG, "Error observing bookmarks", e)
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "পছন্দের খেদমত লোড করা যায়নি")))
+                }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val madrasasState: StateFlow<UiState<List<MadrasaProfile>>> = _adminDataRefreshToken
         .flatMapLatest {
@@ -305,13 +309,15 @@ class QawmiViewModel(
                 .map<List<MadrasaProfile>, UiState<List<MadrasaProfile>>> { UiState.Success(it) }
                 .catch { e ->
                     Log.w(TAG, "Error observing madrasas", e)
-                    emit(UiState.Error(e.localizedMessage ?: "মাদরাসার তালিকা লোড করা যায়নি"))
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "মাদরাসার তালিকা লোড করা যায়নি")))
                 }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val mySentSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
-        repository.observeMySentSubmissions(currentUserId),
+        _adminDataRefreshToken.flatMapLatest {
+            repository.observeMySentSubmissions(currentUserId)
+        },
         _localOptimisticSubmissions
     ) { remoteList, optimisticList ->
         val remoteIds = remoteList.map { it.id }.toSet()
@@ -323,31 +329,44 @@ class QawmiViewModel(
     }
         .catch { e ->
             Log.w(TAG, "Error observing sent submissions", e)
-            emit(UiState.Error(e.localizedMessage ?: "আবেদন তালিকা লোড করা যায়নি"))
+            val fallback = _localOptimisticSubmissions.value
+            if (fallback.isNotEmpty()) {
+                emit(UiState.Success(fallback))
+            } else {
+                emit(UiState.Error(formatFirestoreErrorBangla(e, "আবেদন তালিকা লোড করা যায়নি")))
+            }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
-    val receivedSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = repository.observeReceivedSubmissions(currentUserId)
-        .map<List<KhedmotSubmission>, UiState<List<KhedmotSubmission>>> { UiState.Success(it) }
-        .catch { e ->
-            Log.w(TAG, "Error observing received submissions", e)
-            emit(UiState.Error(e.localizedMessage ?: "প্রাপ্ত আবেদন লোড করা যায়নি"))
+    val receivedSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = _adminDataRefreshToken
+        .flatMapLatest {
+            repository.observeReceivedSubmissions(currentUserId)
+                .map<List<KhedmotSubmission>, UiState<List<KhedmotSubmission>>> { UiState.Success(it) }
+                .catch { e ->
+                    Log.w(TAG, "Error observing received submissions", e)
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "প্রাপ্ত আবেদন লোড করা যায়নি")))
+                }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     // Optimistic local read message IDs so unread badge decrements/clears immediately while Firestore batch commits
     private val _locallyReadMessageIds = MutableStateFlow<Set<String>>(emptySet())
 
-    val userGroupsState: StateFlow<UiState<List<ChatGroup>>> = repository.observeUserGroups(currentUserId)
-        .map<List<ChatGroup>, UiState<List<ChatGroup>>> { UiState.Success(it) }
-        .catch { e ->
-            Log.w(TAG, "Error observing chat groups", e)
-            emit(UiState.Error(e.localizedMessage ?: "গ্রুপ লোড করা যায়নি"))
+    val userGroupsState: StateFlow<UiState<List<ChatGroup>>> = _adminDataRefreshToken
+        .flatMapLatest {
+            repository.observeUserGroups(currentUserId)
+                .map<List<ChatGroup>, UiState<List<ChatGroup>>> { UiState.Success(it) }
+                .catch { e ->
+                    Log.w(TAG, "Error observing chat groups", e)
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "গ্রুপ লোড করা যায়নি")))
+                }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val messagesState: StateFlow<UiState<List<DirectMessage>>> = combine(
-        repository.observeUserMessages(currentUserId),
+        _adminDataRefreshToken.flatMapLatest {
+            repository.observeUserMessages(currentUserId)
+        },
         _locallyReadMessageIds,
         _localOptimisticMessages
     ) { list, locallyReadIds, optimisticMsgs ->
@@ -400,7 +419,7 @@ class QawmiViewModel(
             if (fallback.isNotEmpty()) {
                 emit(UiState.Success(fallback))
             } else {
-                emit(UiState.Error(e.localizedMessage ?: "মেসেজ লোড করা যায়নি"))
+                emit(UiState.Error(formatFirestoreErrorBangla(e, "মেসেজ লোড করা যায়নি")))
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
@@ -457,11 +476,14 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    val notificationsState: StateFlow<UiState<List<AppNotification>>> = repository.observeNotifications(currentUserId)
-        .map<List<AppNotification>, UiState<List<AppNotification>>> { UiState.Success(it) }
-        .catch { e ->
-            Log.w(TAG, "Error observing notifications", e)
-            emit(UiState.Error(e.localizedMessage ?: "নোটিফিকেশন লোড করা যায়নি"))
+    val notificationsState: StateFlow<UiState<List<AppNotification>>> = _adminDataRefreshToken
+        .flatMapLatest {
+            repository.observeNotifications(currentUserId)
+                .map<List<AppNotification>, UiState<List<AppNotification>>> { UiState.Success(it) }
+                .catch { e ->
+                    Log.w(TAG, "Error observing notifications", e)
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "নোটিফিকেশন লোড করা যায়নি")))
+                }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
@@ -478,7 +500,7 @@ class QawmiViewModel(
                     .map<List<TelegramNotificationLog>, UiState<List<TelegramNotificationLog>>> { UiState.Success(it) }
                     .catch { e ->
                         Log.w(TAG, "Error observing Telegram notifications", e)
-                        emit(UiState.Error(e.localizedMessage ?: "টেলিগ্রাম নোটিফিকেশন লগ লোড করা যায়নি"))
+                        emit(UiState.Error(formatFirestoreErrorBangla(e, "টেলিগ্রাম নোটিফিকেশন লগ লোড করা যায়নি")))
                     }
             }
         }
@@ -496,7 +518,7 @@ class QawmiViewModel(
                     .map<List<UserProfile>, UiState<List<UserProfile>>> { UiState.Success(it) }
                     .catch { e ->
                         Log.w(TAG, "Error observing admin users", e)
-                        emit(UiState.Error(e.localizedMessage ?: "ব্যবহারকারীর তালিকা লোড করা যায়নি"))
+                        emit(UiState.Error(formatFirestoreErrorBangla(e, "ব্যবহারকারীর তালিকা লোড করা যায়নি")))
                     }
             }
         }
@@ -514,7 +536,7 @@ class QawmiViewModel(
                     .map<List<KhedmotSubmission>, UiState<List<KhedmotSubmission>>> { UiState.Success(it) }
                     .catch { e ->
                         Log.w(TAG, "Error observing admin submissions", e)
-                        emit(UiState.Error(e.localizedMessage ?: "আবেদনের তালিকা লোড করা যায়নি"))
+                        emit(UiState.Error(formatFirestoreErrorBangla(e, "আবেদনের তালিকা লোড করা যায়নি")))
                     }
             }
         }
@@ -532,7 +554,7 @@ class QawmiViewModel(
                     .map<List<AdminRegistryEntry>, UiState<List<AdminRegistryEntry>>> { UiState.Success(it) }
                     .catch { e ->
                         Log.w(TAG, "Error observing admin registry list", e)
-                        emit(UiState.Error(e.localizedMessage ?: "অ্যাডমিন তালিকা লোড করা যায়নি"))
+                        emit(UiState.Error(formatFirestoreErrorBangla(e, "অ্যাডমিন তালিকা লোড করা যায়নি")))
                     }
             }
         }

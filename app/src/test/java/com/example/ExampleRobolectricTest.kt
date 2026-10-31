@@ -2316,11 +2316,206 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("prayer_live_widget_and_lockscreen_card").assertDoesNotExist()
     }
+
+    @Test
+    @Config(qualifiers = "w420dp-h1200dp")
+    fun `Full App Diagnosis Repair - FeedScreen, MessagesScreen Inbox and Groups, and SubmissionsManagementScreen load and operate without Error getting Query snapshot`() {
+        // 1. Verify formatFirestoreErrorBangla translates raw English "Error getting Query snapshot" into clean Bengali
+        val rawSnapshotError = RuntimeException("Error getting Query snapshot: Status{code=PERMISSION_DENIED, description=Missing or insufficient permissions.}")
+        val formattedBangla = com.example.data.repository.formatFirestoreErrorBangla(rawSnapshotError, "তথ্য লোড করা যায়নি")
+        assertTrue("Must not expose raw 'Error getting Query snapshot'", !formattedBangla.contains("Error getting Query snapshot"))
+        assertTrue("Must contain Bengali explanation", formattedBangla.contains("অনুমতি") || formattedBangla.contains("পুনরায়"))
+
+        // 2. Verify FeedScreen transitions cleanly from Loading ("ইসলামিক খেদমত ফিড লোড হচ্ছে...") to Success displaying posts
+        var feedState by mutableStateOf<UiState<List<com.example.data.model.FeedPost>>>(UiState.Loading)
+        var activeSection by mutableStateOf("FEED")
+        val messagesState = UiState.Success(
+            listOf(
+                DirectMessage(
+                    id = "msg_direct_1",
+                    senderId = "ustad_2",
+                    senderName = "মাওলানা জাকারিয়া",
+                    receiverId = "user_me",
+                    receiverName = "মাওলানা আব্দুল্লাহ",
+                    subject = "মুহাদ্দিস নিয়োগ প্রসঙ্গে",
+                    body = "আসসালামু আলাইকুম, আপনার আবেদনটি আমরা পেয়েছি।",
+                    isRead = false,
+                    createdAt = Timestamp.now()
+                ),
+                DirectMessage(
+                    id = "msg_group_1",
+                    senderId = "ustad_3",
+                    senderName = "মুফতি ইব্রাহিম",
+                    receiverId = "GROUP:grp_1",
+                    receiverName = "জামিয়া ইসলামিয়া শিক্ষক ফোরাম",
+                    groupId = "grp_1",
+                    groupName = "জামিয়া ইসলামিয়া শিক্ষক ফোরাম",
+                    groupMemberIds = listOf("user_me", "ustad_2", "ustad_3"),
+                    subject = "গ্রুপ আলোচনা",
+                    body = "আগামীকাল সকাল ১০টায় পরামর্শ সভা অনুষ্ঠিত হবে।",
+                    isRead = true,
+                    createdAt = Timestamp.now()
+                )
+            )
+        )
+        val groupsList = listOf(
+            com.example.data.model.ChatGroup(
+                id = "grp_1",
+                name = "জামিয়া ইসলামিয়া শিক্ষক ফোরাম",
+                creatorId = "ustad_3",
+                creatorName = "মুফতি ইব্রাহিম",
+                memberIds = listOf("user_me", "ustad_2", "ustad_3"),
+                memberNames = mapOf(
+                    "user_me" to "মাওলানা আব্দুল্লাহ",
+                    "ustad_2" to "মাওলানা জাকারিয়া",
+                    "ustad_3" to "মুফতি ইব্রাহিম"
+                ),
+                updatedAt = Timestamp.now()
+            )
+        )
+        val sentSubmissions = listOf(
+            com.example.data.model.KhedmotSubmission(
+                id = "sub_sent_1",
+                postId = "post_1",
+                postTitle = "সহকারী মুফতি নিয়োগ",
+                postDesignation = "সহকারী মুফতি",
+                applicantId = "user_me",
+                applicantName = "মাওলানা আব্দুল্লাহ",
+                applicantQualification = "ইফতা ও দাওরায়ে হাদিস",
+                applicantExperience = "৪ বছর",
+                applicantPhone = "01711000000",
+                coverNote = "আমি উক্ত খেদমতে আগ্রহী।",
+                recipientId = "madrasa_owner_1",
+                status = "PENDING",
+                createdAt = Timestamp.now()
+            )
+        )
+        var receivedSubmissions by mutableStateOf<List<com.example.data.model.KhedmotSubmission>>(
+            listOf(
+                com.example.data.model.KhedmotSubmission(
+                    id = "sub_rec_1",
+                    postId = "post_2",
+                    postTitle = "হিফজ বিভাগ শিক্ষক নিয়োগ",
+                    postDesignation = "হিফজ শিক্ষক",
+                    applicantId = "applicant_99",
+                    applicantName = "হাফেজ ক্বারী ওমর ফারুক",
+                    applicantQualification = "হিফজুল কুরআন ও ক্বিরাত",
+                    applicantExperience = "৬ বছর",
+                    applicantPhone = "01811000000",
+                    coverNote = "অভিজ্ঞতার আলোকে খেদমত করতে আগ্রহী।",
+                    recipientId = "user_me",
+                    status = "PENDING",
+                    createdAt = Timestamp.now()
+                )
+            )
+        )
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1100.dp)) {
+                    when (activeSection) {
+                        "FEED" -> com.example.ui.screens.FeedScreen(
+                            feedPostsState = feedState,
+                            bookmarksState = UiState.Success(emptyList()),
+                            selectedFilter = com.example.ui.viewmodel.FeedFilterTab.ALL,
+                            selectedDistrict = "সকল জেলা",
+                            searchQuery = "",
+                            currentUserId = "user_me",
+                            isAdmin = false,
+                            postCommentsState = UiState.Success(emptyList()),
+                            onSelectFilter = {},
+                            onSelectDistrict = {},
+                            onSearchQueryChange = {},
+                            onApplyClick = {},
+                            onViewProfileOrDetailClick = {},
+                            onToggleBookmark = { _, _ -> },
+                            onDeletePost = {},
+                            onNavigate = {}
+                        )
+                        "MESSAGES" -> MessagesScreen(
+                            messagesState = messagesState,
+                            currentUserId = "user_me",
+                            targetUser = null,
+                            userGroups = groupsList,
+                            isSubmitting = false,
+                            onSendMessage = { _, _, _, _ -> },
+                            onSelectRecipient = { _, _ -> },
+                            onClearRecipient = {},
+                            onMarkRead = {},
+                            onMarkConversationRead = {}
+                        )
+                        "SUBMISSIONS" -> com.example.ui.screens.SubmissionsManagementScreen(
+                            mySentState = UiState.Success(sentSubmissions),
+                            receivedState = UiState.Success(receivedSubmissions),
+                            onUpdateStatus = { sub, newStatus ->
+                                receivedSubmissions = receivedSubmissions.map { item ->
+                                    if (item.id == sub.id) item.copy(status = newStatus) else item
+                                }
+                            },
+                            onMessageUser = { _, _ -> },
+                            onInspectUserProfile = { _, _ -> },
+                            onNavigatePublishApplication = {}
+                        )
+                    }
+                }
+            }
+        }
+
+        // Verify initial loading indicator on Feed, then immediate transition to loaded posts
+        composeTestRule.onNodeWithText("ইসলামিক খেদমত ফিড লোড হচ্ছে...").assertIsDisplayed()
+        feedState = UiState.Success(
+            listOf(
+                com.example.data.model.FeedPost(
+                    id = "post_1",
+                    authorId = "madrasa_owner_1",
+                    authorName = "জামিয়া আরাবিয়া ঢাকা",
+                    postType = "JOB_CIRCULAR",
+                    title = "সহকারী মুফতি ও মুহাদ্দিস নিয়োগ বিজ্ঞপ্তি",
+                    district = "ঢাকা",
+                    upazilaOrLocation = "মোহাম্মদপুর",
+                    designation = "মুহাদ্দিস",
+                    qualification = "দাওরায়ে হাদিস ও ইফতা",
+                    salaryOrExperience = "আলোচনা সাপেক্ষ",
+                    deadlineOrPreferredDistricts = "৩০ নভেম্বর",
+                    description = "উপযুক্ত ও অভিজ্ঞ আলেমদের আবেদন করার আহ্বান করা যাচ্ছে।",
+                    contactNumber = "01700000000",
+                    visibility = "PUBLIC",
+                    createdAt = Timestamp.now()
+                )
+            )
+        )
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("ইসলামিক খেদমত ফিড লোড হচ্ছে...").assertDoesNotExist()
+        composeTestRule.onNodeWithText("সহকারী মুফতি ও মুহাদ্দিস নিয়োগ বিজ্ঞপ্তি").assertIsDisplayed()
+
+        // 3. Switch to Inbox & Group Conversations ("MESSAGES") and verify both 1-on-1 and Group conversations display without error
+        activeSection = "MESSAGES"
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("মাওলানা জাকারিয়া").assertIsDisplayed()
+        composeTestRule.onNodeWithText("জামিয়া ইসলামিয়া শিক্ষক ফোরাম").assertIsDisplayed()
+
+        // Filter by Group ("গ্রুপ") and Personal ("ব্যক্তিগত")
+        composeTestRule.onNodeWithText("গ্রুপ").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("জামিয়া ইসলামিয়া শিক্ষক ফোরাম").assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("ব্যক্তিগত").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("মাওলানা জাকারিয়া").assertIsDisplayed()
+
+        // 4. Switch to Application Management ("SUBMISSIONS") and verify both Sent and Received applications load & update status
+        activeSection = "SUBMISSIONS"
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("আমার প্রেরিত আবেদন").assertIsDisplayed()
+        composeTestRule.onNodeWithText("সহকারী মুফতি নিয়োগ").assertIsDisplayed()
+
+        // Switch to Received Applications tab ("মাদরাসায় প্রাপ্ত আবেদন")
+        composeTestRule.onNodeWithText("মাদরাসায় প্রাপ্ত আবেদন").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("প্রার্থীর নাম: হাফেজ ক্বারী ওমর ফারুক").assertIsDisplayed()
+        composeTestRule.onNodeWithText("কবুল করুন").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("ACCEPTED", receivedSubmissions.first().status)
+    }
 }
-
-
-
-
-
-
 

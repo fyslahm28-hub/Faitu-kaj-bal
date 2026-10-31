@@ -32,13 +32,16 @@ import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeoutOrNull
 
 class QawmiRepository(
     private val db: FirebaseFirestore,
@@ -63,6 +66,127 @@ class QawmiRepository(
     private fun <T> QuerySnapshot.safeToObjects(clazz: Class<T>): List<T> {
         return documents.mapNotNull { doc ->
             doc.safeToObject(clazz)
+        }
+    }
+
+    private fun resolveEffectiveUserId(userId: String): String {
+        val trimmed = userId.trim()
+        if (trimmed.isNotBlank()) return trimmed
+        return runCatching { auth.currentUser?.uid?.trim().orEmpty() }.getOrDefault("")
+    }
+
+    /**
+     * Observes a Firestore [com.google.firebase.firestore.Query] with:
+     * 1. Fast local cache seed (`Source.CACHE`) when cached documents exist.
+     * 2. Bounded server `.get()` fallback (`initialServerTimeoutMs`) so UI screens never hang
+     *    indefinitely in `UiState.Loading` (`"...লোড হচ্ছে..."`) if the gRPC watch stream is slow.
+     * 3. Continuous real-time `addSnapshotListener` updates with automatic recovery on listener
+     *    errors so screens never crash with raw `"Error getting Query snapshot"`.
+     */
+    private fun <T> observeQueryWithFastInitialAndFallback(
+        query: com.google.firebase.firestore.Query,
+        path: String,
+        includeMetadataChanges: Boolean = false,
+        initialServerTimeoutMs: Long = 3_500L,
+        mapper: (QuerySnapshot) -> List<T>
+    ): Flow<List<T>> = channelFlow {
+        var hasEmittedAny = false
+        val emitLock = Any()
+
+        fun tryEmitSafe(items: List<T>, markEmitted: Boolean = true) {
+            synchronized(emitLock) {
+                if (markEmitted) {
+                    hasEmittedAny = true
+                }
+            }
+            trySend(items)
+        }
+
+        launch {
+            val cachedSnap = withTimeoutOrNull(200L) {
+                runCatching { query.get(Source.CACHE).await() }.getOrNull()
+            }
+            if (cachedSnap != null && !cachedSnap.isEmpty) {
+                val mapped = runCatching { mapper(cachedSnap) }.getOrNull()
+                if (mapped != null) {
+                    synchronized(emitLock) {
+                        if (!hasEmittedAny) {
+                            hasEmittedAny = true
+                            trySend(mapped)
+                        }
+                    }
+                }
+            }
+        }
+
+        launch {
+            val serverSnap = withTimeoutOrNull(initialServerTimeoutMs) {
+                runCatching { query.get().await() }.getOrNull()
+            }
+            if (serverSnap != null) {
+                val mapped = runCatching { mapper(serverSnap) }.getOrDefault(emptyList())
+                tryEmitSafe(mapped, markEmitted = true)
+            } else {
+                val fallbackCache = withTimeoutOrNull(300L) {
+                    runCatching { query.get(Source.CACHE).await() }.getOrNull()
+                }
+                val fallbackList = if (fallbackCache != null) {
+                    runCatching { mapper(fallbackCache) }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
+                synchronized(emitLock) {
+                    if (!hasEmittedAny) {
+                        hasEmittedAny = true
+                        trySend(fallbackList)
+                    }
+                }
+            }
+        }
+
+        val metadataChoice = if (includeMetadataChanges) MetadataChanges.INCLUDE else MetadataChanges.EXCLUDE
+        val registration = try {
+            query.addSnapshotListener(metadataChoice) { snapshot, error ->
+                if (error != null) {
+                    handleFirestoreError(error, OperationType.LIST, path)
+                    launch {
+                        val recoveredSnap = withTimeoutOrNull(2_500L) {
+                            runCatching { query.get().await() }.getOrNull()
+                        } ?: withTimeoutOrNull(300L) {
+                            runCatching { query.get(Source.CACHE).await() }.getOrNull()
+                        }
+                        if (recoveredSnap != null) {
+                            val mapped = runCatching { mapper(recoveredSnap) }.getOrDefault(emptyList())
+                            tryEmitSafe(mapped, markEmitted = true)
+                        } else {
+                            synchronized(emitLock) {
+                                if (!hasEmittedAny) {
+                                    hasEmittedAny = true
+                                    trySend(emptyList())
+                                }
+                            }
+                        }
+                    }
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
+                    tryEmitSafe(mapped, markEmitted = true)
+                }
+            }
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            synchronized(emitLock) {
+                if (!hasEmittedAny) {
+                    hasEmittedAny = true
+                    trySend(emptyList())
+                }
+            }
+            null
+        }
+
+        awaitClose {
+            runCatching { registration?.remove() }
         }
     }
 
@@ -543,21 +667,25 @@ class QawmiRepository(
 
     fun observePublicFeedPosts(): Flow<List<FeedPost>> {
         val path = "feed_posts"
-        return db.collection(path)
-            .whereEqualTo("visibility", "PUBLIC")
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(FeedPost::class.java)
-                    .distinctBy { it.id }
-                    .sortedWith(
-                        compareByDescending<FeedPost> { it.isBoosted }
-                            .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
-                    )
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            val currentUid = resolveEffectiveUserId("")
+            snapshot.safeToObjects(FeedPost::class.java)
+                .filter { post ->
+                    post.visibility.isBlank() ||
+                        post.visibility.equals("PUBLIC", ignoreCase = true) ||
+                        (currentUid.isNotBlank() && post.authorId == currentUid)
+                }
+                .distinctBy { it.id }
+                .sortedWith(
+                    compareByDescending<FeedPost> { it.isBoosted }
+                        .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                )
+        }
     }
 
     suspend fun createFeedPost(
@@ -1141,21 +1269,25 @@ class QawmiRepository(
 
     fun observePublicPostComments(): Flow<List<FeedComment>> {
         val path = "post_comments"
-        return db.collection(path)
-            .whereEqualTo("visibility", "PUBLIC")
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(FeedComment::class.java)
-                    .distinctBy { it.id }
-                    .sortedWith(
-                        compareBy<FeedComment> { it.createdAt ?: Timestamp(0, 0) }
-                            .thenBy { it.id }
-                    )
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            val currentUid = resolveEffectiveUserId("")
+            snapshot.safeToObjects(FeedComment::class.java)
+                .filter { comment ->
+                    comment.visibility.isBlank() ||
+                        comment.visibility.equals("PUBLIC", ignoreCase = true) ||
+                        (currentUid.isNotBlank() && comment.authorId == currentUid)
+                }
+                .distinctBy { it.id }
+                .sortedWith(
+                    compareBy<FeedComment> { it.createdAt ?: Timestamp(0, 0) }
+                        .thenBy { it.id }
+                )
+        }
     }
 
     suspend fun addPostComment(
@@ -1476,18 +1608,18 @@ class QawmiRepository(
     // --- 3. BOOKMARKS (পছন্দের খেদমত) ---
 
     fun observeBookmarks(userId: String): Flow<List<BookmarkItem>> {
-        val path = "users/$userId/bookmarks"
-        return db.collection("users").document(userId).collection("bookmarks")
-            .whereEqualTo("userId", userId)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(BookmarkItem::class.java)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
+        val path = "users/$effectiveUid/bookmarks"
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection("users").document(effectiveUid).collection("bookmarks"),
+            path = path,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(BookmarkItem::class.java)
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     suspend fun toggleBookmark(post: FeedPost, currentlyBookmarked: Boolean): Result<Boolean> {
@@ -1526,17 +1658,22 @@ class QawmiRepository(
 
     fun observePublicMadrasas(): Flow<List<MadrasaProfile>> {
         val path = "madrasas"
-        return db.collection(path)
-            .whereEqualTo("visibility", "PUBLIC")
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(MadrasaProfile::class.java)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            val currentUid = resolveEffectiveUserId("")
+            snapshot.safeToObjects(MadrasaProfile::class.java)
+                .filter { madrasa ->
+                    madrasa.visibility.isBlank() ||
+                        madrasa.visibility.equals("PUBLIC", ignoreCase = true) ||
+                        (currentUid.isNotBlank() && madrasa.ownerId == currentUid)
+                }
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     suspend fun createMadrasa(
@@ -1644,33 +1781,35 @@ class QawmiRepository(
     // --- 5. KHEDMOT SUBMISSIONS (খেদমতে সরাসরি আবেদন) ---
 
     fun observeMySentSubmissions(userId: String): Flow<List<KhedmotSubmission>> {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
         val path = "khedmot_submissions"
-        return db.collection(path)
-            .whereEqualTo("applicantId", userId)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(KhedmotSubmission::class.java)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path).whereEqualTo("applicantId", effectiveUid),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(KhedmotSubmission::class.java)
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     fun observeReceivedSubmissions(userId: String): Flow<List<KhedmotSubmission>> {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
         val path = "khedmot_submissions"
-        return db.collection(path)
-            .whereEqualTo("recipientId", userId)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(KhedmotSubmission::class.java)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path).whereEqualTo("recipientId", effectiveUid),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(KhedmotSubmission::class.java)
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     suspend fun submitApplicationToCircular(
@@ -1803,18 +1942,19 @@ class QawmiRepository(
     }
 
     fun observeUserGroups(userId: String): Flow<List<ChatGroup>> {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
         val path = "chat_groups"
-        return db.collection(path)
-            .whereArrayContains("memberIds", userId)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { it.toChatGroupOrNull() }
-                    .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path).whereArrayContains("memberIds", effectiveUid),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.documents.mapNotNull { it.toChatGroupOrNull() }
+                .distinctBy { it.id }
+                .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     suspend fun createChatGroup(
@@ -2004,38 +2144,36 @@ class QawmiRepository(
     }
 
     fun observeUserMessages(userId: String): Flow<List<DirectMessage>> {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
         val path = "messages"
-        val sentFlow = db.collection(path)
-            .whereEqualTo("senderId", userId)
-            .snapshots(MetadataChanges.INCLUDE)
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
 
-        val receivedFlow = db.collection(path)
-            .whereEqualTo("receiverId", userId)
-            .snapshots(MetadataChanges.INCLUDE)
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        val sentFlow = observeQueryWithFastInitialAndFallback(
+            query = db.collection(path).whereEqualTo("senderId", effectiveUid),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
+        }
 
-        val groupMessagesFlow = db.collection(path)
-            .whereArrayContains("groupMemberIds", userId)
-            .snapshots(MetadataChanges.INCLUDE)
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
-            }
-            .catch {
-                emit(emptyList())
-            }
+        val receivedFlow = observeQueryWithFastInitialAndFallback(
+            query = db.collection(path).whereEqualTo("receiverId", effectiveUid),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
+        }
+
+        val groupMessagesFlow = observeQueryWithFastInitialAndFallback(
+            query = db.collection(path).whereArrayContains("groupMemberIds", effectiveUid),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
+        }
 
         return combine(sentFlow, receivedFlow, groupMessagesFlow) { sent, received, groupMsgs ->
             // Merge received and group messages first so read/reaction state is authoritative, and deduplicate strictly by document id
@@ -2141,6 +2279,7 @@ class QawmiRepository(
                 "senderPhotoUrl" to compactSenderPhoto,
                 "receiverId" to if (isGroupMessage) "GROUP:$resolvedGroupId" else trimmedReceiverId,
                 "receiverName" to safeReceiverName,
+                "groupMemberIds" to emptyList<String>(),
                 "subject" to subject.trim().ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }.take(195),
                 "body" to resolvedBody.take(1450),
                 "isRead" to false,
@@ -2635,51 +2774,45 @@ class QawmiRepository(
     // --- 7. NOTIFICATIONS (ব্যক্তিগত ও কমিউনিটি নোটিফিকেশন, অপঠিত ব্যাজ ও অ্যাডমিন ঘোষণা) ---
 
     fun observeNotifications(userId: String): Flow<List<AppNotification>> {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
         val notifPath = "notifications"
-        val readsPath = "users/$userId/notification_reads"
+        val readsPath = "users/$effectiveUid/notification_reads"
 
-        val directFlow = db.collection(notifPath)
-            .whereEqualTo("recipientId", userId)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(AppNotification::class.java)
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, notifPath)
-                throw error
-            }
+        val directFlow = observeQueryWithFastInitialAndFallback(
+            query = db.collection(notifPath).whereEqualTo("recipientId", effectiveUid),
+            path = notifPath,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(AppNotification::class.java)
+        }
 
-        val broadcastFlow = db.collection(notifPath)
-            .whereEqualTo("recipientId", "ALL_USERS")
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(AppNotification::class.java)
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, notifPath)
-                throw error
-            }
+        val broadcastFlow = observeQueryWithFastInitialAndFallback(
+            query = db.collection(notifPath).whereEqualTo("recipientId", "ALL_USERS"),
+            path = notifPath,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(AppNotification::class.java)
+        }
 
-        val readReceiptsFlow = db.collection("users")
-            .document(userId)
-            .collection("notification_reads")
-            .whereEqualTo("userId", userId)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(NotificationReadReceipt::class.java)
-                    .map { it.notificationId.ifBlank { it.id } }
-                    .toSet()
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, readsPath)
-                throw error
-            }
+        val readReceiptsFlow = observeQueryWithFastInitialAndFallback(
+            query = db.collection("users").document(effectiveUid).collection("notification_reads"),
+            path = readsPath,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(NotificationReadReceipt::class.java)
+                .map { it.notificationId.ifBlank { it.id } }
+        }
+            .map { it.toSet() }
 
         return combine(directFlow, broadcastFlow, readReceiptsFlow) { directList, broadcastList, readIds ->
             (directList + broadcastList)
                 .distinctBy { it.id }
                 // Never show self-generated notifications or Paygam chat messages in the Bell notification list
-                .filter { it.senderId != userId && !it.type.equals("MESSAGE", ignoreCase = true) }
+                .filter { it.senderId != effectiveUid && !it.type.equals("MESSAGE", ignoreCase = true) }
                 .map { notif ->
                     val resolvedRead = notif.isRead || readIds.contains(notif.id)
                     notif.copy(isRead = resolvedRead)

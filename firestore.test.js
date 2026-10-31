@@ -743,3 +743,118 @@ test("Feed Post Storage Metadata & Extended Attachments: prevents 1 MiB limit an
   );
   await assertFails(bobDb.collection("feed_post_attachments").doc("att_post_1").delete());
 });
+
+test("Collection List Queries (Query Snapshots): Inbox messages, Group conversations, Khedmot submissions (sent/received), and Feed posts succeed without Query snapshot errors", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = nowDate();
+
+  // Seed 1-on-1 message without groupMemberIds (legacy format) and with groupMemberIds: []
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("msg_list_1").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: BOB_UID,
+      receiverName: "মুফতি মাহমুদ",
+      subject: "খেদমত সংক্রান্ত যোগাযোগ",
+      body: "আসসালামু আলাইকুম, আপনার বিজ্ঞপ্তিটি দেখে যোগাযোগ করছি।",
+      isRead: false,
+      readByUserIds: [ALICE_UID],
+      createdAt: ts,
+    })
+  );
+
+  // Seed a chat group and a group message
+  await assertSucceeds(
+    aliceDb.collection("chat_groups").doc("grp_list_1").set({
+      groupId: "grp_list_1",
+      name: "উস্তায মুযাকারা গ্রুপ",
+      creatorId: ALICE_UID,
+      creatorName: "মাওলানা আব্দুল্লাহ",
+      memberIds: [ALICE_UID, BOB_UID],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("messages").doc("msg_grp_list_1").set({
+      senderId: ALICE_UID,
+      senderName: "মাওলানা আব্দুল্লাহ",
+      receiverId: "GROUP:grp_list_1",
+      receiverName: "উস্তায মুযাকারা গ্রুপ",
+      groupId: "grp_list_1",
+      groupName: "উস্তায মুযাকারা গ্রুপ",
+      groupMemberIds: [ALICE_UID, BOB_UID],
+      subject: "গ্রুপ কথোপকথন",
+      body: "গ্রুপে সবাইকে স্বাগতম।",
+      isRead: false,
+      readByUserIds: [ALICE_UID],
+      createdAt: ts,
+    })
+  );
+
+  // Seed a khedmot submission from Alice to Bob
+  await assertSucceeds(
+    aliceDb.collection("khedmot_submissions").doc("sub_list_1").set({
+      postId: "post_1",
+      postTitle: "জামিয়া রাহমানিয়া আরাবিয়া",
+      postDesignation: "মুহাদ্দিস",
+      applicantId: ALICE_UID,
+      applicantName: "মাওলানা আব্দুল্লাহ",
+      applicantQualification: "দাওরায়ে হাদিস ও ইফতা",
+      applicantExperience: "৫ বছর",
+      applicantPhone: "01711000000",
+      coverNote: "আমি উক্ত খেদমতে আগ্রহী।",
+      recipientId: BOB_UID,
+      status: "PENDING",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Seed a public feed post
+  await assertSucceeds(
+    bobDb.collection("feed_posts").doc("feed_list_1").set({
+      authorId: BOB_UID,
+      authorName: "মুফতি মাহমুদ",
+      postType: "JOB_CIRCULAR",
+      title: "জামিয়া ইসলামিয়া ঢাকা",
+      district: "ঢাকা",
+      upazilaOrLocation: "মিরপুর",
+      designation: "মুহাদ্দিস",
+      qualification: "দাওরায়ে হাদিস",
+      salaryOrExperience: "আলোচনা সাপেক্ষে",
+      deadlineOrPreferredDistricts: "৩০ নভেম্বর",
+      description: "জরুরি ভিত্তিতে একজন মুহাদ্দিস আবশ্যক।",
+      contactNumber: "01800000000",
+      madrasaId: "",
+      isVerifiedMadrasa: false,
+      visibility: "PUBLIC",
+      approvalStatus: "APPROVED",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Verify A. Inbox & Group Conversations list queries for both Alice and Bob
+  await assertSucceeds(aliceDb.collection("messages").where("senderId", "==", ALICE_UID).get());
+  await assertSucceeds(aliceDb.collection("messages").where("receiverId", "==", ALICE_UID).get());
+  await assertSucceeds(aliceDb.collection("messages").where("groupMemberIds", "array-contains", ALICE_UID).get());
+  await assertSucceeds(bobDb.collection("messages").where("senderId", "==", BOB_UID).get());
+  await assertSucceeds(bobDb.collection("messages").where("receiverId", "==", BOB_UID).get());
+  await assertSucceeds(bobDb.collection("messages").where("groupMemberIds", "array-contains", BOB_UID).get());
+  await assertSucceeds(aliceDb.collection("chat_groups").where("memberIds", "array-contains", ALICE_UID).get());
+  await assertSucceeds(bobDb.collection("chat_groups").where("memberIds", "array-contains", BOB_UID).get());
+
+  // Verify B. Application Management (আমার প্রেরিত আবেদন & মাদরাসায় প্রাপ্ত আবেদন) list queries
+  await assertSucceeds(aliceDb.collection("khedmot_submissions").where("applicantId", "==", ALICE_UID).get());
+  await assertSucceeds(bobDb.collection("khedmot_submissions").where("recipientId", "==", BOB_UID).get());
+  await assertFails(aliceDb.collection("khedmot_submissions").where("recipientId", "==", BOB_UID).get());
+
+  // Verify C. Feed Posts list queries
+  await assertSucceeds(aliceDb.collection("feed_posts").where("visibility", "==", "PUBLIC").get());
+  await assertSucceeds(bobDb.collection("feed_posts").get());
+  await assertFails(unauthDb.collection("feed_posts").get());
+});
+

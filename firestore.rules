@@ -45,25 +45,22 @@ service cloud.firestore {
     // Server-side Admin Role, Custom Claims & Authorized Admin Identity verification
     function isTokenVerifiedAdmin() {
       return isSignedIn() && (
-        ('admin' in request.auth.token && request.auth.token.admin == true) ||
-        ('role' in request.auth.token && request.auth.token.role == 'admin') ||
-        ('email' in request.auth.token && (
-          request.auth.token.email == 'foysalahamad102@gmail.com' ||
-          request.auth.token.email == 'foysalahamad204@gmail.com' ||
-          request.auth.token.email == 'fyslahm28@gmail.com'
-        )) ||
-        ('phone_number' in request.auth.token && (
-          request.auth.token.phone_number == '+8801300448147' ||
-          request.auth.token.phone_number == '01300448147'
-        ))
+        request.auth.token.get('admin', false) == true ||
+        request.auth.token.get('role', '') == 'admin' ||
+        request.auth.token.get('email', '') in [
+          'foysalahamad102@gmail.com',
+          'foysalahamad204@gmail.com',
+          'fyslahm28@gmail.com'
+        ] ||
+        request.auth.token.get('phone_number', '') in [
+          '+8801300448147',
+          '01300448147'
+        ]
       );
     }
 
     function isAdmin() {
-      return isSignedIn() && (
-        isTokenVerifiedAdmin() ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-      );
+      return isTokenVerifiedAdmin();
     }
 
     // 3. Entity Validation Blueprints
@@ -84,6 +81,13 @@ service cloud.firestore {
     }
 
     function isValidUserProfile(data) {
+      let photoUrl = data.get('photoUrl', '');
+      let isOnline = data.get('isOnline', false);
+      let lastSeenAt = data.get('lastSeenAt', request.time);
+      let typingToUserId = data.get('typingToUserId', '');
+      let typingUpdatedAt = data.get('typingUpdatedAt', request.time);
+      let blockedUserIds = data.get('blockedUserIds', []);
+      let chatThemes = data.get('chatThemes', {});
       return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 150 &&
              data.accountType is string && (data.accountType == 'khadim' || data.accountType == 'muhtamim') &&
@@ -95,13 +99,13 @@ service cloud.firestore {
              data.bio is string && data.bio.size() <= 1000 &&
              data.contactInfo is string && data.contactInfo.size() <= 150 &&
              data.madrasaName is string && data.madrasaName.size() <= 200 &&
-             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 250000)) &&
-             (!('isOnline' in data) || data.isOnline is bool) &&
-             (!('lastSeenAt' in data) || data.lastSeenAt == null || isValidTimestamp(data.lastSeenAt)) &&
-             (!('typingToUserId' in data) || (data.typingToUserId is string && data.typingToUserId.size() <= 128)) &&
-             (!('typingUpdatedAt' in data) || data.typingUpdatedAt == null || isValidTimestamp(data.typingUpdatedAt)) &&
-             (!('blockedUserIds' in data) || (data.blockedUserIds is list && data.blockedUserIds.size() <= 200)) &&
-             (!('chatThemes' in data) || (data.chatThemes is map && data.chatThemes.size() <= 200)) &&
+             (photoUrl is string && photoUrl.size() <= 250000) &&
+             (isOnline is bool) &&
+             (lastSeenAt == null || isValidTimestamp(lastSeenAt)) &&
+             (typingToUserId is string && typingToUserId.size() <= 128) &&
+             (typingUpdatedAt == null || isValidTimestamp(typingUpdatedAt)) &&
+             (blockedUserIds is list && blockedUserIds.size() <= 200) &&
+             (chatThemes is map && chatThemes.size() <= 200) &&
              data.isVerified is bool &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
@@ -130,7 +134,7 @@ service cloud.firestore {
     function isValidFeedPost(data) {
       return data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
-             (!('authorPhotoUrl' in data) || (data.authorPhotoUrl is string && data.authorPhotoUrl.size() <= 250000)) &&
+             (data.get('authorPhotoUrl', '') is string && data.get('authorPhotoUrl', '').size() <= 250000) &&
              data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION' || data.postType == 'GENERAL_POST') &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
              data.district is string && data.district.size() <= 100 && (data.postType == 'GENERAL_POST' || data.district.size() >= 1) &&
@@ -143,24 +147,24 @@ service cloud.firestore {
              data.contactNumber is string && data.contactNumber.size() <= 100 &&
              data.madrasaId is string && data.madrasaId.size() <= 128 &&
              data.isVerifiedMadrasa is bool &&
-             (!('isBoosted' in data) || data.isBoosted is bool) &&
-             (!('khedmotCategories' in data) || (data.khedmotCategories is list && data.khedmotCategories.size() <= 20)) &&
-             (!('customCategory' in data) || (data.customCategory is string && data.customCategory.size() <= 150)) &&
-             (!('imageUrls' in data) || (data.imageUrls is list && data.imageUrls.size() <= 5)) &&
-             (!('mediaTypes' in data) || (data.mediaTypes is list && data.mediaTypes.size() <= 5)) &&
-             (!('mediaMetadata' in data) || (data.mediaMetadata is list && data.mediaMetadata.size() <= 5)) &&
-             (!('attachmentDocId' in data) || (data.attachmentDocId is string && data.attachmentDocId.size() <= 128)) &&
-             (!('userReactions' in data) || (data.userReactions is map && data.userReactions.size() <= 500)) &&
-             (!('userReactionNames' in data) || (data.userReactionNames is map && data.userReactionNames.size() <= 500)) &&
-             (!('commentCount' in data) || (data.commentCount is int && data.commentCount >= 0 && data.commentCount <= 100000)) &&
-             (!('shareCount' in data) || (data.shareCount is int && data.shareCount >= 0 && data.shareCount <= 100000)) &&
-             (!('sharedPostId' in data) || (data.sharedPostId is string && data.sharedPostId.size() <= 128)) &&
-             (!('sharedAuthorId' in data) || (data.sharedAuthorId is string && data.sharedAuthorId.size() <= 128)) &&
-             (!('sharedAuthorName' in data) || (data.sharedAuthorName is string && data.sharedAuthorName.size() <= 200)) &&
-             (!('sharedTitle' in data) || (data.sharedTitle is string && data.sharedTitle.size() <= 200)) &&
-             (!('sharedDescription' in data) || (data.sharedDescription is string && data.sharedDescription.size() <= 2000)) &&
-             (!('sharedPostType' in data) || (data.sharedPostType is string && data.sharedPostType.size() <= 50)) &&
-             (!('isEdited' in data) || data.isEdited is bool) &&
+             (data.get('isBoosted', false) is bool) &&
+             (data.get('khedmotCategories', []) is list && data.get('khedmotCategories', []).size() <= 20) &&
+             (data.get('customCategory', '') is string && data.get('customCategory', '').size() <= 150) &&
+             (data.get('imageUrls', []) is list && data.get('imageUrls', []).size() <= 5) &&
+             (data.get('mediaTypes', []) is list && data.get('mediaTypes', []).size() <= 5) &&
+             (data.get('mediaMetadata', []) is list && data.get('mediaMetadata', []).size() <= 5) &&
+             (data.get('attachmentDocId', '') is string && data.get('attachmentDocId', '').size() <= 128) &&
+             (data.get('userReactions', {}) is map && data.get('userReactions', {}).size() <= 500) &&
+             (data.get('userReactionNames', {}) is map && data.get('userReactionNames', {}).size() <= 500) &&
+             (data.get('commentCount', 0) is int && data.get('commentCount', 0) >= 0 && data.get('commentCount', 0) <= 100000) &&
+             (data.get('shareCount', 0) is int && data.get('shareCount', 0) >= 0 && data.get('shareCount', 0) <= 100000) &&
+             (data.get('sharedPostId', '') is string && data.get('sharedPostId', '').size() <= 128) &&
+             (data.get('sharedAuthorId', '') is string && data.get('sharedAuthorId', '').size() <= 128) &&
+             (data.get('sharedAuthorName', '') is string && data.get('sharedAuthorName', '').size() <= 200) &&
+             (data.get('sharedTitle', '') is string && data.get('sharedTitle', '').size() <= 200) &&
+             (data.get('sharedDescription', '') is string && data.get('sharedDescription', '').size() <= 2000) &&
+             (data.get('sharedPostType', '') is string && data.get('sharedPostType', '').size() <= 50) &&
+             (data.get('isEdited', false) is bool) &&
              data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'ARCHIVED') &&
              data.approvalStatus is string && (data.approvalStatus == 'APPROVED' || data.approvalStatus == 'PENDING' || data.approvalStatus == 'REJECTED') &&
              isValidTimestamp(data.createdAt) &&
@@ -168,6 +172,10 @@ service cloud.firestore {
     }
 
     function isValidFeedPostExtendedAttachment(data) {
+      let fileName = data.get('fileName', '');
+      let downloadUrl = data.get('downloadUrl', '');
+      let extendedText = data.get('extendedText', '');
+      let mediaDataUrl = data.get('mediaDataUrl', '');
       return data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
              data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.attachmentType is string && (
@@ -176,10 +184,10 @@ service cloud.firestore {
                data.attachmentType == 'VIDEO'
              ) &&
              data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 100 &&
-             (!('fileName' in data) || (data.fileName is string && data.fileName.size() <= 250)) &&
-             (!('downloadUrl' in data) || (data.downloadUrl is string && data.downloadUrl.size() <= 2000)) &&
-             (!('extendedText' in data) || (data.extendedText is string && data.extendedText.size() <= 150000)) &&
-             (!('mediaDataUrl' in data) || (data.mediaDataUrl is string && data.mediaDataUrl.size() <= 750000)) &&
+             (fileName is string && fileName.size() <= 250) &&
+             (downloadUrl is string && downloadUrl.size() <= 2000) &&
+             (extendedText is string && extendedText.size() <= 150000) &&
+             (mediaDataUrl is string && mediaDataUrl.size() <= 750000) &&
              data.sizeBytes is int && data.sizeBytes >= 0 && data.sizeBytes <= 50000000 &&
              data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'ARCHIVED') &&
              isValidTimestamp(data.createdAt) &&
@@ -187,14 +195,18 @@ service cloud.firestore {
     }
 
     function isValidFeedComment(data) {
+      let authorPhotoUrl = data.get('authorPhotoUrl', '');
+      let parentCommentId = data.get('parentCommentId', '');
+      let replyToAuthorName = data.get('replyToAuthorName', '');
+      let isEdited = data.get('isEdited', false);
       return data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
              data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
-             (!('authorPhotoUrl' in data) || (data.authorPhotoUrl is string && data.authorPhotoUrl.size() <= 250000)) &&
+             (authorPhotoUrl is string && authorPhotoUrl.size() <= 250000) &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 1500 &&
-             (!('parentCommentId' in data) || (data.parentCommentId is string && data.parentCommentId.size() <= 128)) &&
-             (!('replyToAuthorName' in data) || (data.replyToAuthorName is string && data.replyToAuthorName.size() <= 200)) &&
-             (!('isEdited' in data) || data.isEdited is bool) &&
+             (parentCommentId is string && parentCommentId.size() <= 128) &&
+             (replyToAuthorName is string && replyToAuthorName.size() <= 200) &&
+             (isEdited is bool) &&
              data.visibility is string && (data.visibility == 'PUBLIC' || data.visibility == 'HIDDEN') &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
@@ -245,43 +257,50 @@ service cloud.firestore {
     }
 
     function isValidChatGroup(data) {
-      return (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 128)) &&
+      let groupId = data.get('groupId', '');
+      let photoUrl = data.get('photoUrl', '');
+      let memberNames = data.get('memberNames', {});
+      let memberPhotos = data.get('memberPhotos', {});
+      let themeSpec = data.get('themeSpec', '');
+      return (groupId is string && groupId.size() <= 128) &&
              data.name is string && data.name.size() >= 1 && data.name.size() <= 150 &&
-             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 250000)) &&
+             (photoUrl is string && photoUrl.size() <= 250000) &&
              data.creatorId is string && data.creatorId.size() >= 1 && data.creatorId.size() <= 128 &&
              data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 150 &&
              data.memberIds is list && data.memberIds.size() >= 1 && data.memberIds.size() <= 50 &&
-             (!('memberNames' in data) || (data.memberNames is map && data.memberNames.size() <= 50)) &&
-             (!('memberPhotos' in data) || (data.memberPhotos is map && data.memberPhotos.size() <= 50)) &&
-             (!('themeSpec' in data) || (data.themeSpec is string && data.themeSpec.size() <= 100)) &&
+             (memberNames is map && memberNames.size() <= 50) &&
+             (memberPhotos is map && memberPhotos.size() <= 50) &&
+             (themeSpec is string && themeSpec.size() <= 100) &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
     }
 
     function isValidDirectMessage(data) {
-      let hasImages = ('imageUrls' in data) && data.imageUrls is list && data.imageUrls.size() >= 1;
+      let imageUrls = data.get('imageUrls', []);
+      let hasImages = imageUrls is list && imageUrls.size() >= 1;
+      let editedAt = data.get('editedAt', request.time);
       return data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
-             (!('senderPhotoUrl' in data) || (data.senderPhotoUrl is string && data.senderPhotoUrl.size() <= 250000)) &&
+             (data.get('senderPhotoUrl', '') is string && data.get('senderPhotoUrl', '').size() <= 250000) &&
              data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 128 &&
              data.receiverName is string && data.receiverName.size() >= 1 && data.receiverName.size() <= 150 &&
-             (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 128)) &&
-             (!('groupName' in data) || (data.groupName is string && data.groupName.size() <= 150)) &&
-             (!('groupMemberIds' in data) || (data.groupMemberIds is list && data.groupMemberIds.size() <= 50)) &&
+             (data.get('groupId', '') is string && data.get('groupId', '').size() <= 128) &&
+             (data.get('groupName', '') is string && data.get('groupName', '').size() <= 150) &&
+             (data.get('groupMemberIds', []) is list && data.get('groupMemberIds', []).size() <= 50) &&
              data.subject is string && data.subject.size() <= 200 &&
              data.body is string && ((data.body.size() >= 1 && data.body.size() <= 1500) || (hasImages && data.body.size() <= 1500)) &&
-             (!('imageUrls' in data) || (data.imageUrls is list && data.imageUrls.size() <= 5)) &&
+             (imageUrls is list && imageUrls.size() <= 5) &&
              data.isRead is bool &&
-             (!('readByUserIds' in data) || (data.readByUserIds is list && data.readByUserIds.size() <= 50)) &&
-             (!('senderReaction' in data) || isValidReactionCode(data.senderReaction)) &&
-             (!('receiverReaction' in data) || isValidReactionCode(data.receiverReaction)) &&
-             (!('userReactions' in data) || (data.userReactions is map && data.userReactions.size() <= 50)) &&
-             (!('isEdited' in data) || data.isEdited is bool) &&
-             (!('editedAt' in data) || data.editedAt == null || isValidTimestamp(data.editedAt)) &&
-             (!('deletedForSender' in data) || data.deletedForSender is bool) &&
-             (!('deletedForReceiver' in data) || data.deletedForReceiver is bool) &&
-             (!('deletedForUserIds' in data) || (data.deletedForUserIds is list && data.deletedForUserIds.size() <= 50)) &&
-             (!('isDeletedForEveryone' in data) || data.isDeletedForEveryone is bool) &&
+             (data.get('readByUserIds', []) is list && data.get('readByUserIds', []).size() <= 50) &&
+             isValidReactionCode(data.get('senderReaction', '')) &&
+             isValidReactionCode(data.get('receiverReaction', '')) &&
+             (data.get('userReactions', {}) is map && data.get('userReactions', {}).size() <= 50) &&
+             (data.get('isEdited', false) is bool) &&
+             (editedAt == null || isValidTimestamp(editedAt)) &&
+             (data.get('deletedForSender', false) is bool) &&
+             (data.get('deletedForReceiver', false) is bool) &&
+             (data.get('deletedForUserIds', []) is list && data.get('deletedForUserIds', []).size() <= 50) &&
+             (data.get('isDeletedForEveryone', false) is bool) &&
              isValidTimestamp(data.createdAt);
     }
 
@@ -336,19 +355,26 @@ service cloud.firestore {
     }
 
     function isValidAppReleaseInfo(data) {
+      let apkSha256 = data.get('apkSha256', '');
+      let apkFileSizeBytes = data.get('apkFileSizeBytes', 0);
+      let commitSha = data.get('commitSha', '');
+      let githubReleaseTag = data.get('githubReleaseTag', '');
+      let isMandatory = data.get('isMandatory', false);
+      let isPublished = data.get('isPublished', true);
+      let releaseStatus = data.get('releaseStatus', 'PUBLISHED');
       return data.releaseId is string && data.releaseId.size() >= 1 && data.releaseId.size() <= 128 &&
              data.versionCode is int && data.versionCode >= 1 && data.versionCode <= 1000000000 &&
              data.versionName is string && data.versionName.size() >= 1 && data.versionName.size() <= 100 &&
              data.apkDownloadUrl is string && data.apkDownloadUrl.size() >= 8 && data.apkDownloadUrl.size() <= 2000 &&
              (data.apkDownloadUrl.matches('^https://.*') || data.apkDownloadUrl.matches('^http://.*')) &&
-             (!('apkSha256' in data) || (data.apkSha256 is string && data.apkSha256.size() <= 128)) &&
-             (!('apkFileSizeBytes' in data) || (data.apkFileSizeBytes is int && data.apkFileSizeBytes >= 0 && data.apkFileSizeBytes <= 1073741824)) &&
+             (apkSha256 is string && apkSha256.size() <= 128) &&
+             (apkFileSizeBytes is int && apkFileSizeBytes >= 0 && apkFileSizeBytes <= 1073741824) &&
              data.releaseNotes is string && data.releaseNotes.size() <= 4000 &&
-             (!('commitSha' in data) || (data.commitSha is string && data.commitSha.size() <= 128)) &&
-             (!('githubReleaseTag' in data) || (data.githubReleaseTag is string && data.githubReleaseTag.size() <= 128)) &&
-             (!('isMandatory' in data) || data.isMandatory is bool) &&
-             (!('isPublished' in data) || data.isPublished is bool) &&
-             (!('releaseStatus' in data) || (data.releaseStatus is string && data.releaseStatus in ['PUBLISHED', 'PAUSED', 'DISABLED'])) &&
+             (commitSha is string && commitSha.size() <= 128) &&
+             (githubReleaseTag is string && githubReleaseTag.size() <= 128) &&
+             (isMandatory is bool) &&
+             (isPublished is bool) &&
+             (releaseStatus is string && releaseStatus in ['PUBLISHED', 'PAUSED', 'DISABLED']) &&
              data.publishedBy is string && data.publishedBy.size() >= 1 && data.publishedBy.size() <= 200 &&
              isValidTimestamp(data.publishedAt) &&
              isValidTimestamp(data.updatedAt);
@@ -423,13 +449,13 @@ service cloud.firestore {
                              ]))
                           )) ||
                          (request.auth.uid == userId &&
-                          (!('isOnline' in incoming()) || incoming().isOnline is bool) &&
-                          (!('lastSeenAt' in incoming()) || incoming().lastSeenAt == null || isValidTimestamp(incoming().lastSeenAt)) &&
-                          (!('typingToUserId' in incoming()) || (incoming().typingToUserId is string && incoming().typingToUserId.size() <= 128)) &&
-                          (!('typingUpdatedAt' in incoming()) || incoming().typingUpdatedAt == null || isValidTimestamp(incoming().typingUpdatedAt)) &&
-                          (!('blockedUserIds' in incoming()) || (incoming().blockedUserIds is list && incoming().blockedUserIds.size() <= 200)) &&
-                          (!('chatThemes' in incoming()) || (incoming().chatThemes is map && incoming().chatThemes.size() <= 200)) &&
-                          (!('updatedAt' in incoming()) || isValidTimestamp(incoming().updatedAt)) &&
+                          (incoming().get('isOnline', false) is bool) &&
+                          (incoming().get('lastSeenAt', request.time) == null || isValidTimestamp(incoming().get('lastSeenAt', request.time))) &&
+                          (incoming().get('typingToUserId', '') is string && incoming().get('typingToUserId', '').size() <= 128) &&
+                          (incoming().get('typingUpdatedAt', request.time) == null || isValidTimestamp(incoming().get('typingUpdatedAt', request.time))) &&
+                          (incoming().get('blockedUserIds', []) is list && incoming().get('blockedUserIds', []).size() <= 200) &&
+                          (incoming().get('chatThemes', {}) is map && incoming().get('chatThemes', {}).size() <= 200) &&
+                          isValidTimestamp(incoming().get('updatedAt', request.time)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'isOnline', 'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
                             'blockedUserIds', 'chatThemes', 'updatedAt'
@@ -441,7 +467,7 @@ service cloud.firestore {
       // User Bookmarks Subcollection (পছন্দের খেদমত)
       match /bookmarks/{bookmarkId} {
         allow get: if isSignedIn() && isValidId(userId) && isValidId(bookmarkId) && request.auth.uid == userId;
-        allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+        allow list: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
 
         allow create: if isSignedIn() &&
                          isValidId(userId) &&
@@ -467,7 +493,7 @@ service cloud.firestore {
       // Per-User Notification Read Receipts (নোটিফিকেশন পঠিত অবস্থা)
       match /notification_reads/{notificationId} {
         allow get: if isSignedIn() && isValidId(userId) && isValidId(notificationId) && request.auth.uid == userId;
-        allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+        allow list: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
 
         allow create: if isSignedIn() &&
                          isValidId(userId) &&
@@ -493,12 +519,8 @@ service cloud.firestore {
 
     // Feed Posts (নিয়োগ বিজ্ঞপ্তি, চাকরিপ্রার্থীর আবেদন ও ইসলামিক ফিড পোস্ট)
     match /feed_posts/{postId} {
-      allow get: if isSignedIn() && isValidId(postId) && (
-        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
-      );
-      allow list: if isSignedIn() && (
-        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
-      );
+      allow get: if isSignedIn() && isValidId(postId);
+      allow list: if isSignedIn();
 
       allow create: if isSignedIn() &&
                        isValidId(postId) &&
@@ -525,13 +547,17 @@ service cloud.firestore {
                          'visibility', 'approvalStatus',
                          'createdAt', 'updatedAt'
                        ]) &&
-                       (!('isBoosted' in incoming()) || incoming().isBoosted == false || isAdmin()) &&
+                       (incoming().get('isBoosted', false) == false || isAdmin()) &&
                        isValidFeedPost(incoming());
 
       function canUpdateFeedPost(inc, ext) {
         let diffKeys = inc.diff(ext).affectedKeys();
-        let boostUnchanged = (!('isBoosted' in inc) || ('isBoosted' in ext && inc.isBoosted == ext.isBoosted) || (!('isBoosted' in ext) && inc.isBoosted == false));
+        let boostUnchanged = inc.get('isBoosted', false) == ext.get('isBoosted', false);
         let statusUnchanged = inc.approvalStatus == ext.approvalStatus && inc.isVerifiedMadrasa == ext.isVerifiedMadrasa && boostUnchanged;
+        let incReactions = inc.get('userReactions', {});
+        let extReactions = ext.get('userReactions', {});
+        let incReactionNames = inc.get('userReactionNames', {});
+        let extReactionNames = ext.get('userReactionNames', {});
         return inc.authorId == ext.authorId &&
                inc.postType == ext.postType &&
                inc.createdAt == ext.createdAt && (
@@ -550,9 +576,9 @@ service cloud.firestore {
                     'userReactions', 'userReactionNames', 'commentCount', 'shareCount', 'updatedAt'
                   ]) &&
                   (!('userReactions' in diffKeys) ||
-                   inc.userReactions.diff(ext.get('userReactions', {})).affectedKeys().hasOnly([request.auth.uid])) &&
+                   incReactions.diff(extReactions).affectedKeys().hasOnly([request.auth.uid])) &&
                   (!('userReactionNames' in diffKeys) ||
-                   inc.userReactionNames.diff(ext.get('userReactionNames', {})).affectedKeys().hasOnly([request.auth.uid]))) ||
+                   incReactionNames.diff(extReactionNames).affectedKeys().hasOnly([request.auth.uid]))) ||
                  (isAdmin() &&
                   diffKeys.hasOnly([
                     'approvalStatus', 'isVerifiedMadrasa', 'isBoosted', 'visibility', 'updatedAt'
@@ -570,12 +596,8 @@ service cloud.firestore {
 
     // Separate Extended Attachments & Long Text for Feed Posts (বড় টেক্সট ও অ্যাটাচমেন্ট আলাদা ডকুমেন্টে সংরক্ষণ)
     match /feed_post_attachments/{attachmentId} {
-      allow get: if isSignedIn() && isValidId(attachmentId) && (
-        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
-      );
-      allow list: if isSignedIn() && (
-        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
-      );
+      allow get: if isSignedIn() && isValidId(attachmentId);
+      allow list: if isSignedIn();
 
       allow create: if isSignedIn() &&
                        isValidId(attachmentId) &&
@@ -614,12 +636,8 @@ service cloud.firestore {
 
     // Feed Post Comments & Replies (কমেন্ট ও রিপ্লাই)
     match /post_comments/{commentId} {
-      allow get: if isSignedIn() && isValidId(commentId) && (
-        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
-      );
-      allow list: if isSignedIn() && (
-        existing().visibility == 'PUBLIC' || existing().authorId == request.auth.uid || isAdmin()
-      );
+      allow get: if isSignedIn() && isValidId(commentId);
+      allow list: if isSignedIn();
 
       allow create: if isSignedIn() &&
                        isValidId(commentId) &&
@@ -657,12 +675,8 @@ service cloud.firestore {
 
     // Madrasas Directory (মাদরাসা ও যাচাইকৃত মাদরাসা)
     match /madrasas/{madrasaId} {
-      allow get: if isSignedIn() && isValidId(madrasaId) && (
-        existing().visibility == 'PUBLIC' || existing().ownerId == request.auth.uid || isAdmin()
-      );
-      allow list: if isSignedIn() && (
-        existing().visibility == 'PUBLIC' || existing().ownerId == request.auth.uid || isAdmin()
-      );
+      allow get: if isSignedIn() && isValidId(madrasaId);
+      allow list: if isSignedIn();
 
       allow create: if isSignedIn() &&
                        isValidId(madrasaId) &&
@@ -704,10 +718,15 @@ service cloud.firestore {
     // Khedmot Submissions (আবেদনসমূহ)
     match /khedmot_submissions/{submissionId} {
       allow get: if isSignedIn() && isValidId(submissionId) && (
-        existing().applicantId == request.auth.uid || existing().recipientId == request.auth.uid || isAdmin()
+        resource == null ||
+        existing().applicantId == request.auth.uid ||
+        existing().recipientId == request.auth.uid ||
+        isAdmin()
       );
       allow list: if isSignedIn() && (
-        existing().applicantId == request.auth.uid || existing().recipientId == request.auth.uid || isAdmin()
+        existing().applicantId == request.auth.uid ||
+        existing().recipientId == request.auth.uid ||
+        isAdmin()
       );
 
       allow create: if isSignedIn() &&
@@ -746,6 +765,7 @@ service cloud.firestore {
     // Group Conversations (গ্রুপ কথোপকথন)
     match /chat_groups/{groupId} {
       allow get: if isSignedIn() && isValidId(groupId) && (
+        resource == null ||
         existing().creatorId == request.auth.uid ||
         request.auth.uid in existing().memberIds
       );
@@ -756,7 +776,7 @@ service cloud.firestore {
 
       allow create: if isSignedIn() &&
                        isValidId(groupId) &&
-                       (!('groupId' in incoming()) || incoming().groupId == groupId) &&
+                       (incoming().get('groupId', groupId) == groupId) &&
                        incoming().creatorId == request.auth.uid &&
                        incoming().memberIds is list &&
                        (request.auth.uid in incoming().memberIds) &&
@@ -774,7 +794,7 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(groupId) &&
                        isValidChatGroup(incoming()) &&
-                       (!('groupId' in incoming()) || !('groupId' in existing()) || incoming().groupId == existing().groupId) &&
+                       (incoming().get('groupId', groupId) == existing().get('groupId', groupId)) &&
                        incoming().creatorId == existing().creatorId &&
                        incoming().createdAt == existing().createdAt &&
                        (existing().creatorId == request.auth.uid ||
@@ -790,16 +810,17 @@ service cloud.firestore {
     // Direct & Group Messages (পয়গাম ও গ্রুপ কথোপকথন)
     match /messages/{messageId} {
       function isMessageParticipant(data) {
+        let groupMembers = data.get('groupMemberIds', []);
         return data.senderId == request.auth.uid ||
                data.receiverId == request.auth.uid ||
-               ('groupMemberIds' in data && data.groupMemberIds is list && request.auth.uid in data.groupMemberIds);
+               (groupMembers is list && request.auth.uid in groupMembers);
       }
 
       allow get: if isSignedIn() && isValidId(messageId) && (resource == null || isMessageParticipant(existing()));
       allow list: if isSignedIn() && (
                     existing().senderId == request.auth.uid ||
                     existing().receiverId == request.auth.uid ||
-                    request.auth.uid in existing().groupMemberIds
+                    request.auth.uid in existing().get('groupMemberIds', [])
                   );
 
       allow create: if isSignedIn() &&
@@ -807,9 +828,9 @@ service cloud.firestore {
                        incoming().senderId == request.auth.uid &&
                        incoming().isRead == false &&
                        (
-                         (('groupId' in incoming() && incoming().groupId is string && incoming().groupId.size() >= 1) &&
-                          ('groupMemberIds' in incoming() && incoming().groupMemberIds is list && request.auth.uid in incoming().groupMemberIds)) ||
-                         ((!('groupId' in incoming()) || incoming().groupId == '') &&
+                         ((incoming().get('groupId', '') is string && incoming().get('groupId', '').size() >= 1) &&
+                          (incoming().get('groupMemberIds', []) is list && request.auth.uid in incoming().get('groupMemberIds', []))) ||
+                         (incoming().get('groupId', '') == '' &&
                           incoming().receiverId != request.auth.uid &&
                           !isBlockedBetween(incoming().senderId, incoming().receiverId))
                        ) &&
@@ -833,16 +854,16 @@ service cloud.firestore {
                        incoming().receiverId == existing().receiverId &&
                        (incoming().createdAt == existing().createdAt ||
                         (request.auth.uid == existing().senderId && isValidTimestamp(incoming().createdAt))) &&
-                       (!('senderReaction' in incoming()) || isValidReactionCode(incoming().senderReaction)) &&
-                       (!('receiverReaction' in incoming()) || isValidReactionCode(incoming().receiverReaction)) &&
-                       (!('userReactions' in incoming()) || (incoming().userReactions is map && incoming().userReactions.size() <= 50)) &&
-                       (!('isEdited' in incoming()) || incoming().isEdited is bool) &&
-                       (!('editedAt' in incoming()) || incoming().editedAt == null || isValidTimestamp(incoming().editedAt)) &&
-                       (!('deletedForSender' in incoming()) || incoming().deletedForSender is bool) &&
-                       (!('deletedForReceiver' in incoming()) || incoming().deletedForReceiver is bool) &&
-                       (!('deletedForUserIds' in incoming()) || (incoming().deletedForUserIds is list && incoming().deletedForUserIds.size() <= 50)) &&
-                       (!('readByUserIds' in incoming()) || (incoming().readByUserIds is list && incoming().readByUserIds.size() <= 50)) &&
-                       (!('isDeletedForEveryone' in incoming()) || incoming().isDeletedForEveryone is bool) && (
+                       isValidReactionCode(incoming().get('senderReaction', '')) &&
+                       isValidReactionCode(incoming().get('receiverReaction', '')) &&
+                       (incoming().get('userReactions', {}) is map && incoming().get('userReactions', {}).size() <= 50) &&
+                       (incoming().get('isEdited', false) is bool) &&
+                       (incoming().get('editedAt', request.time) == null || isValidTimestamp(incoming().get('editedAt', request.time))) &&
+                       (incoming().get('deletedForSender', false) is bool) &&
+                       (incoming().get('deletedForReceiver', false) is bool) &&
+                       (incoming().get('deletedForUserIds', []) is list && incoming().get('deletedForUserIds', []).size() <= 50) &&
+                       (incoming().get('readByUserIds', []) is list && incoming().get('readByUserIds', []).size() <= 50) &&
+                       (incoming().get('isDeletedForEveryone', false) is bool) && (
                          (request.auth.uid != existing().senderId &&
                           incoming().isRead is bool &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -943,15 +964,12 @@ service cloud.firestore {
       allow list: if isSignedIn();
 
       allow create, update: if (isAdmin() || (
-                                 'apkDownloadUrl' in incoming() &&
-                                 incoming().apkDownloadUrl is string &&
-                                 incoming().apkDownloadUrl.matches('^https://github\\.com/fyslahm28-hub/Faitu-kaj-bal/releases/download/v[0-9.]+/Qawmi-Kormosangsthan-Bangladesh\\.apk$') &&
-                                 'apkSha256' in incoming() &&
-                                 incoming().apkSha256 is string &&
-                                 incoming().apkSha256.size() == 64 &&
-                                 'apkFileSizeBytes' in incoming() &&
-                                 incoming().apkFileSizeBytes is int &&
-                                 incoming().apkFileSizeBytes > 0
+                                 incoming().get('apkDownloadUrl', '') is string &&
+                                 incoming().get('apkDownloadUrl', '').matches('^https://github\\.com/fyslahm28-hub/Faitu-kaj-bal/releases/download/v[0-9.]+/Qawmi-Kormosangsthan-Bangladesh\\.apk$') &&
+                                 incoming().get('apkSha256', '') is string &&
+                                 incoming().get('apkSha256', '').size() == 64 &&
+                                 incoming().get('apkFileSizeBytes', 0) is int &&
+                                 incoming().get('apkFileSizeBytes', 0) > 0
                                )) &&
                                isValidId(releaseId) &&
                                incoming().releaseId == releaseId &&

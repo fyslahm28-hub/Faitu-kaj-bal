@@ -157,7 +157,33 @@ fun translateFirestoreExceptionToBangla(exception: Exception): Exception {
             exception
         )
     }
+    if (msg.contains("Error getting Query snapshot", ignoreCase = true) ||
+        msg.contains("Failed to get document", ignoreCase = true)
+    ) {
+        return IllegalStateException(
+            "সার্ভার থেকে তথ্য লোড করতে সাময়িক বিঘ্ন ঘটেছে। অনুগ্রহ করে পুনরায় চেষ্টা করুন।",
+            exception
+        )
+    }
     return exception
+}
+
+fun formatFirestoreErrorBangla(throwable: Throwable?, defaultBangla: String): String {
+    if (throwable == null) return defaultBangla
+    val translated = if (throwable is Exception) {
+        translateFirestoreExceptionToBangla(throwable)
+    } else {
+        throwable
+    }
+    val msg = translated.localizedMessage?.trim().orEmpty()
+    if (msg.isBlank() ||
+        msg.contains("Error getting Query snapshot", ignoreCase = true) ||
+        msg.contains("Failed to get documents", ignoreCase = true) ||
+        msg.contains("Failed to get document", ignoreCase = true)
+    ) {
+        return defaultBangla
+    }
+    return msg
 }
 
 /**
