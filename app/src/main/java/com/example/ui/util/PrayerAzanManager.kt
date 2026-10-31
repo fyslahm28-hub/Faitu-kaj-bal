@@ -11,9 +11,9 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
 import android.media.AudioAttributes
-import android.media.AudioFormat
 import android.media.AudioManager
-import android.media.AudioTrack
+import android.media.MediaPlayer
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
@@ -339,7 +339,7 @@ object PrayerAzanManager {
     private val audioScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var activePlaybackJob: Job? = null
     @Volatile
-    private var activeAudioTrack: AudioTrack? = null
+    private var activeMediaPlayer: MediaPlayer? = null
     @Volatile
     private var activeWakeLock: PowerManager.WakeLock? = null
 
@@ -1560,14 +1560,14 @@ object PrayerAzanManager {
 
         activePlaybackJob = audioScope.launch {
             try {
-                playSynthesizedIslamicSound(
+                playRealAzanAudio(
+                    appContext = context.applicationContext,
                     soundType = soundType,
-                    waqtKey = waqtKey,
                     volumeFraction = (volumePercent.coerceIn(0, 100) / 100f)
                 )
             } catch (_: Throwable) {
             } finally {
-                releaseAudioTrackSafely()
+                releaseMediaPlayerSafely()
                 releaseWakeLockSafely()
                 _playbackStateFlow.value = AzanPlaybackState(isPlaying = false)
                 runCatching {
@@ -1582,7 +1582,7 @@ object PrayerAzanManager {
     fun stopAzanPlayback(context: Context? = null) {
         activePlaybackJob?.cancel()
         activePlaybackJob = null
-        releaseAudioTrackSafely()
+        releaseMediaPlayerSafely()
         releaseWakeLockSafely()
         _playbackStateFlow.value = AzanPlaybackState(isPlaying = false)
         if (context != null) {
@@ -1619,185 +1619,106 @@ object PrayerAzanManager {
         }
     }
 
-    private fun releaseAudioTrackSafely() {
+    private fun releaseMediaPlayerSafely() {
         try {
-            val track = activeAudioTrack
-            activeAudioTrack = null
-            if (track != null) {
-                runCatching { track.pause() }
-                runCatching { track.flush() }
-                runCatching { track.stop() }
-                runCatching { track.release() }
+            val player = activeMediaPlayer
+            activeMediaPlayer = null
+            if (player != null) {
+                runCatching {
+                    if (player.isPlaying) {
+                        player.stop()
+                    }
+                }
+                runCatching { player.reset() }
+                runCatching { player.release() }
             }
         } catch (_: Throwable) {
         }
     }
 
     /**
-     * Synthesizes a warm, resonant Maqam Hijaz melodic sequence for Full Azan, Short Azan, or Reminder Tone.
-     * Operates 100% offline with zero network dependency and stops automatically when all phrases complete.
+     * Plays authentic recorded vocal Azan audio from bundled raw resources (100% offline capable)
+     * using Android MediaPlayer over the alarm stream and stops automatically on completion.
      */
-    private suspend fun kotlinx.coroutines.CoroutineScope.playSynthesizedIslamicSound(
+    private suspend fun kotlinx.coroutines.CoroutineScope.playRealAzanAudio(
+        appContext: Context,
         soundType: AzanSoundType,
-        waqtKey: PrayerWaqtKey?,
         volumeFraction: Float
     ) {
-        val sampleRate = 22050
-        // Maqam Hijaz frequencies (D4, Eb4, F#4, G4, A4, Bb4, C5, D5)
-        val d4 = 293.66
-        val eb4 = 311.13
-        val fs4 = 369.99
-        val g4 = 392.00
-        val a4 = 440.00
-        val bb4 = 466.16
+        if (soundType == AzanSoundType.NOTIFICATION_ONLY) return
 
-        data class ToneNote(val freqHz: Double, val durationMs: Int, val pauseMs: Int = 80)
-
-        val sequence: List<ToneNote> = when (soundType) {
-            AzanSoundType.REMINDER_TONE -> listOf(
-                // Gentle 3-chime Islamic reminder tone
-                ToneNote(d4, 280, 70),
-                ToneNote(fs4, 280, 70),
-                ToneNote(a4, 520, 180),
-                ToneNote(g4, 260, 70),
-                ToneNote(fs4, 260, 70),
-                ToneNote(d4, 600, 100)
-            )
-
-            AzanSoundType.SHORT_AZAN -> listOf(
-                // Takbeer 1: Allahu Akbar, Allahu Akbar
-                ToneNote(d4, 380, 60),
-                ToneNote(g4, 480, 90),
-                ToneNote(a4, 650, 180),
-                ToneNote(a4, 380, 60),
-                ToneNote(bb4, 450, 80),
-                ToneNote(a4, 520, 80),
-                ToneNote(g4, 700, 320),
-                // Shahadah: Ashhadu an la ilaha illallah
-                ToneNote(g4, 420, 70),
-                ToneNote(fs4, 500, 80),
-                ToneNote(eb4, 460, 80),
-                ToneNote(d4, 850, 200)
-            )
-
-            AzanSoundType.FULL_AZAN -> buildList {
-                // 1. Allahu Akbar (x2)
-                add(ToneNote(d4, 400, 60))
-                add(ToneNote(g4, 500, 80))
-                add(ToneNote(a4, 680, 180))
-                add(ToneNote(a4, 380, 60))
-                add(ToneNote(bb4, 460, 80))
-                add(ToneNote(a4, 500, 70))
-                add(ToneNote(g4, 720, 350))
-                // 2. Allahu Akbar (x2)
-                add(ToneNote(g4, 400, 60))
-                add(ToneNote(a4, 520, 80))
-                add(ToneNote(bb4, 680, 160))
-                add(ToneNote(a4, 460, 70))
-                add(ToneNote(fs4, 500, 70))
-                add(ToneNote(g4, 760, 380))
-                // 3. Ashhadu an la ilaha illallah
-                add(ToneNote(g4, 420, 70))
-                add(ToneNote(fs4, 520, 80))
-                add(ToneNote(g4, 480, 80))
-                add(ToneNote(eb4, 520, 80))
-                add(ToneNote(d4, 820, 360))
-                // 4. Ashhadu anna Muhammadar Rasulullah
-                add(ToneNote(d4, 380, 60))
-                add(ToneNote(fs4, 520, 80))
-                add(ToneNote(g4, 600, 90))
-                add(ToneNote(a4, 540, 80))
-                add(ToneNote(g4, 820, 360))
-                // 5. Hayya 'alas-Salah & Hayya 'alal-Falah
-                add(ToneNote(a4, 460, 70))
-                add(ToneNote(bb4, 560, 80))
-                add(ToneNote(a4, 520, 80))
-                add(ToneNote(g4, 760, 340))
-                // 6. Fajr special phrase: As-salatu khayrun minan-nawm
-                if (waqtKey == PrayerWaqtKey.FAJR) {
-                    add(ToneNote(g4, 450, 70))
-                    add(ToneNote(fs4, 520, 80))
-                    add(ToneNote(eb4, 500, 80))
-                    add(ToneNote(d4, 840, 340))
-                }
-                // 7. Allahu Akbar, La ilaha illallah
-                add(ToneNote(g4, 420, 70))
-                add(ToneNote(fs4, 460, 70))
-                add(ToneNote(eb4, 480, 70))
-                add(ToneNote(d4, 950, 150))
-            }
-
-            AzanSoundType.NOTIFICATION_ONLY -> emptyList()
+        val rawResId = when (soundType) {
+            AzanSoundType.FULL_AZAN -> R.raw.azan_full
+            AzanSoundType.SHORT_AZAN -> R.raw.azan_short
+            AzanSoundType.REMINDER_TONE -> R.raw.azan_reminder
+            AzanSoundType.NOTIFICATION_ONLY -> return
         }
 
-        if (sequence.isEmpty()) return
+        releaseMediaPlayerSafely()
 
-        val totalSamples = sequence.sumOf { ((it.durationMs + it.pauseMs) * sampleRate) / 1000 }
-        val pcmBuffer = ShortArray(totalSamples)
-        var writePos = 0
-        val amp = (volumeFraction.coerceIn(0f, 1f) * 21000f)
-
-        for (note in sequence) {
-            val toneSamples = (note.durationMs * sampleRate) / 1000
-            val pauseSamples = (note.pauseMs * sampleRate) / 1000
-            val attackSamples = (toneSamples * 0.12).toInt().coerceAtLeast(1)
-            val releaseSamples = (toneSamples * 0.22).toInt().coerceAtLeast(1)
-
-            for (i in 0 until toneSamples) {
-                if (writePos >= pcmBuffer.size) break
-                val t = i.toDouble() / sampleRate.toDouble()
-                val env = when {
-                    i < attackSamples -> i.toDouble() / attackSamples.toDouble()
-                    i > toneSamples - releaseSamples -> (toneSamples - i).toDouble() / releaseSamples.toDouble()
-                    else -> 1.0
-                }
-                // Warm fundamental + soft octave/fifth harmonics with gentle vibrato
-                val vibrato = 1.0 + 0.003 * sin(2.0 * PI * 5.2 * t)
-                val f = note.freqHz * vibrato
-                val wave = 0.72 * sin(2.0 * PI * f * t) +
-                    0.20 * sin(2.0 * PI * (f * 2.0) * t) +
-                    0.08 * sin(2.0 * PI * (f * 1.5) * t)
-                val sampleVal = (wave * env * amp).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                pcmBuffer[writePos++] = sampleVal.toShort()
-            }
-            writePos = (writePos + pauseSamples).coerceAtMost(pcmBuffer.size)
-        }
-
-        val minBufSize = AudioTrack.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(4096)
-
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setBufferSizeInBytes(minBufSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
+        val audioAttrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
             .build()
 
-        activeAudioTrack = track
-        track.play()
+        val mp = MediaPlayer()
+        var prepared = false
 
-        val chunkSize = 2048
-        var offset = 0
-        while (isActive && offset < pcmBuffer.size) {
-            val count = minOf(chunkSize, pcmBuffer.size - offset)
-            val written = track.write(pcmBuffer, offset, count)
-            if (written <= 0) break
-            offset += written
-            delay(10L)
+        if (soundType == AzanSoundType.REMINDER_TONE) {
+            val defaultUri = runCatching {
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            }.getOrNull()
+            if (defaultUri != null) {
+                prepared = runCatching {
+                    mp.setAudioAttributes(audioAttrs)
+                    mp.setDataSource(appContext, defaultUri)
+                    mp.isLooping = false
+                    mp.prepare()
+                    true
+                }.getOrDefault(false)
+            }
+        }
+
+        if (!prepared) {
+            runCatching { mp.reset() }
+            val afd = appContext.resources.openRawResourceFd(rawResId) ?: run {
+                runCatching { mp.release() }
+                return
+            }
+            afd.use { descriptor ->
+                mp.setAudioAttributes(audioAttrs)
+                mp.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.length)
+            }
+            mp.isLooping = false
+            mp.prepare()
+        }
+
+        val clampedVol = volumeFraction.coerceIn(0f, 1f)
+        mp.setVolume(clampedVol, clampedVol)
+
+        val playbackFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+        mp.setOnCompletionListener {
+            playbackFinished.set(true)
+        }
+        mp.setOnErrorListener { _, _, _ ->
+            playbackFinished.set(true)
+            true
+        }
+
+        activeMediaPlayer = mp
+        mp.start()
+
+        val durationMs = runCatching { mp.duration.toLong() }
+            .getOrDefault(140_000L)
+            .coerceIn(2_000L, 240_000L) + 2_500L
+        val startElapsed = System.currentTimeMillis()
+
+        while (isActive && !playbackFinished.get()) {
+            if (System.currentTimeMillis() - startElapsed > durationMs) {
+                break
+            }
+            delay(150L)
         }
     }
 
