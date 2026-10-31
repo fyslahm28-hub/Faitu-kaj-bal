@@ -2517,5 +2517,96 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         assertEquals("ACCEPTED", receivedSubmissions.first().status)
     }
+
+    @Test
+    fun `Paygam conversation image and emoji messages transition from SENDING spinner to SENT checkmark without infinite loading`() {
+        val sampleScreenshotDataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        var imageDeliveryState by mutableStateOf("SENDING")
+        var emojiDeliveryState by mutableStateOf("SENDING")
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(840.dp)) {
+                    val currentMessages = listOf(
+                        DirectMessage(
+                            id = "msg_incoming_0",
+                            senderId = "user_foysal",
+                            senderName = "Md Foysal",
+                            receiverId = "user_me",
+                            receiverName = "মাওলানা আব্দুল্লাহ",
+                            subject = "খেদমত প্রসঙ্গে",
+                            body = "🙏",
+                            isRead = true,
+                            readByUserIds = listOf("user_foysal", "user_me"),
+                            createdAt = Timestamp(1_700_000_000L, 0)
+                        ).apply {
+                            localDeliveryState = "SENT"
+                        },
+                        DirectMessage(
+                            id = "msg_img_1",
+                            senderId = "user_me",
+                            senderName = "মাওলানা আব্দুল্লাহ",
+                            receiverId = "user_foysal",
+                            receiverName = "Md Foysal",
+                            subject = "খেদমত প্রসঙ্গে",
+                            body = "",
+                            imageUrls = listOf(sampleScreenshotDataUrl),
+                            isRead = false,
+                            readByUserIds = listOf("user_me"),
+                            createdAt = Timestamp(1_700_000_120L, 0)
+                        ).apply {
+                            localDeliveryState = imageDeliveryState
+                        },
+                        DirectMessage(
+                            id = "msg_emoji_2",
+                            senderId = "user_me",
+                            senderName = "মাওলানা আব্দুল্লাহ",
+                            receiverId = "user_foysal",
+                            receiverName = "Md Foysal",
+                            subject = "খেদমত প্রসঙ্গে",
+                            body = "❤️",
+                            isRead = false,
+                            readByUserIds = listOf("user_me"),
+                            createdAt = Timestamp(1_700_000_240L, 0)
+                        ).apply {
+                            localDeliveryState = emojiDeliveryState
+                        }
+                    )
+
+                    MessagesScreen(
+                        messagesState = UiState.Success(currentMessages),
+                        currentUserId = "user_me",
+                        targetUser = "user_foysal" to "Md Foysal",
+                        userGroups = emptyList(),
+                        isSubmitting = false,
+                        onSendMessage = { _, _, _, _ -> },
+                        onSelectRecipient = { _, _ -> },
+                        onClearRecipient = {},
+                        onMarkRead = {},
+                        onMarkConversationRead = {}
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+
+        // 1. Initially while SENDING, both the image upload progress spinner and status spinners exist
+        composeTestRule.onNodeWithTag("attachment_upload_progress_msg_img_1", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("message_status_sending_msg_img_1", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("message_status_sending_msg_emoji_2", useUnmergedTree = true).assertExists()
+
+        // 2. Once staged/confirmed (SENT), spinners disappear immediately and SENT (✓) checkmarks appear
+        imageDeliveryState = "SENT"
+        emojiDeliveryState = "SENT"
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("attachment_upload_progress_msg_img_1", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("message_status_sending_msg_img_1", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("message_status_sending_msg_emoji_2", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("message_status_sent_msg_img_1", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("message_status_sent_msg_emoji_2", useUnmergedTree = true).assertExists()
+    }
 }
+
 

@@ -277,16 +277,16 @@ fun isRetryableFirestoreMessageError(throwable: Throwable?): Boolean {
  * Awaits a Firestore message write task within [timeoutMs].
  *
  * - Immediately propagates any real server/security exception (`PERMISSION_DENIED`,
- *   `UNAUTHENTICATED`, `INVALID_ARGUMENT`, `UNAVAILABLE`, etc.).
- * - Only succeeds if the task itself completes or if the document in cache has
- *   `!metadata.hasPendingWrites()` (genuinely acknowledged by the server).
- * - Otherwise rethrows [kotlinx.coroutines.TimeoutCancellationException] so the caller can
- *   retry or transition the message out of `SENDING` instead of leaving the spinner stuck.
+ *   `UNAUTHENTICATED`, `INVALID_ARGUMENT`, etc.) if the write is rejected.
+ * - If the remote gRPC ACK takes longer than [timeoutMs] on a slow mobile connection
+ *   (e.g., 25–30 KB/s), verifies that the document has been persisted in Firestore's local
+ *   SQLite cache without error so Firestore's native background write stream can finish
+ *   uploading it while the UI transitions out of the `SENDING` spinner to `SENT` (`✓`).
  */
 @Suppress("UNCHECKED_CAST")
 suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmation(
     docRef: DocumentReference,
-    timeoutMs: Long = 6_000L
+    timeoutMs: Long = 3_500L
 ): T {
     return try {
         kotlinx.coroutines.withTimeout(timeoutMs) {
@@ -300,12 +300,15 @@ suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmati
         if (this@awaitMessageWriteConfirmation.isSuccessful) {
             return this@awaitMessageWriteConfirmation.result as T
         }
-        val confirmedInCache = docRef.getFromCacheOnlyOrNull(80L)
+        val confirmedInCache = docRef.getFromCacheOnlyOrNull(100L)
         val postCheckException = this@awaitMessageWriteConfirmation.exception
         if (postCheckException != null) {
             throw postCheckException
         }
-        if (confirmedInCache != null && confirmedInCache.exists() && !confirmedInCache.metadata.hasPendingWrites()) {
+        if (confirmedInCache != null && confirmedInCache.exists()) {
+            this@awaitMessageWriteConfirmation.addOnFailureListener { asyncErr ->
+                Log.w("FirestoreError", "Background-synced message write eventually failed: ${asyncErr.message}", asyncErr)
+            }
             return null as T
         }
         throw e

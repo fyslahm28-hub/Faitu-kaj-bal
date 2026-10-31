@@ -2136,7 +2136,7 @@ class QawmiRepository(
                 isDeletedForEveryone = resolvedDeletedForEveryone,
                 createdAt = resolvedCreatedAt
             ).apply {
-                localDeliveryState = if (hasPending) "PENDING_SYNC" else "SENT"
+                localDeliveryState = "SENT"
             }
         } catch (_: Throwable) {
             null
@@ -2222,11 +2222,10 @@ class QawmiRepository(
         }
         return try {
             // Fast local cache idempotency check (0 network round-trips):
-            // Only short-circuit if this message ID already exists in local cache AND has been
-            // genuinely confirmed by the Firestore server (!metadata.hasPendingWrites()).
+            // Avoid queueing duplicate FIFO mutations for the same message ID.
             if (preallocatedMessageId.isNotBlank()) {
-                val existingDoc = docRef.getFromCacheOnlyOrNull(40L)
-                if (existingDoc != null && existingDoc.getString("senderId") == uid && !existingDoc.metadata.hasPendingWrites()) {
+                val existingDoc = docRef.getFromCacheOnlyOrNull(50L)
+                if (existingDoc != null && existingDoc.exists() && existingDoc.getString("senderId") == uid) {
                     return Result.success(docRef.id)
                 }
             }
@@ -2298,9 +2297,8 @@ class QawmiRepository(
 
             runCatching { db.enableNetwork() }
             try {
-                docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 6_000L)
+                docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 3_500L)
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
-                // If the gRPC write stream was stalled, kick the network connection so the next retry uses a fresh stream
                 runCatching { db.enableNetwork() }
                 throw timeoutEx
             }

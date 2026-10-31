@@ -582,15 +582,17 @@ object ProfilePhotoHelper {
         return trimmed.take(MAX_INLINE_AVATAR_CHARS_IN_POST)
     }
 
+    private const val MAX_INLINE_AVATAR_CHARS_IN_MESSAGE = 12_000
+
     /**
      * Synchronously compacts `senderPhotoUrl` for direct/group messages without making any
      * Firebase Storage network request. Ensures that 100KB–240KB raw Base64 profile photos
-     * never bloat message payloads or cause write timeouts.
+     * never bloat message payloads or cause write timeouts on slow mobile networks.
      */
     fun compactSenderPhotoForMessage(senderPhotoUrl: String): String {
         val trimmed = senderPhotoUrl.trim()
         if (trimmed.isBlank()) return ""
-        if (trimmed.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) return trimmed
+        if (trimmed.length <= MAX_INLINE_AVATAR_CHARS_IN_MESSAGE) return trimmed
         if (trimmed.startsWith("http://", ignoreCase = true) ||
             trimmed.startsWith("https://", ignoreCase = true) ||
             trimmed.startsWith("preset:", ignoreCase = true)
@@ -598,14 +600,14 @@ object ProfilePhotoHelper {
             return trimmed.take(2000)
         }
         if (trimmed.startsWith("data:image", ignoreCase = true)) {
-            val compacted = ensureDataUrlFitsBudget(trimmed, MAX_INLINE_AVATAR_CHARS_IN_POST)
-            return if (compacted.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) {
+            val compacted = ensureDataUrlFitsBudget(trimmed, MAX_INLINE_AVATAR_CHARS_IN_MESSAGE)
+            return if (compacted.length <= MAX_INLINE_AVATAR_CHARS_IN_MESSAGE) {
                 compacted
             } else {
                 ""
             }
         }
-        return trimmed.take(MAX_INLINE_AVATAR_CHARS_IN_POST)
+        return trimmed.take(MAX_INLINE_AVATAR_CHARS_IN_MESSAGE)
     }
 
     /**
@@ -689,46 +691,24 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Uploads up to 5 chat images to Firebase Storage and returns their URLs.
-     * If Firebase Storage is unavailable, fits each image into a strict safe Firestore document
-     * budget (~550 KB total Base64 across all images in the message) so the message document
-     * never approaches the 1 MiB Firestore limit.
+     * Compacts up to 5 chat images into a fast, mobile-network-friendly Firestore document budget
+     * without blocking on unprovisioned Firebase Storage buckets.
      */
     suspend fun uploadChatImagesToFirebaseStorage(
         imageItems: List<String>,
-        senderId: String
+        @Suppress("UNUSED_PARAMETER") senderId: String
     ): List<String> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
         val capped = imageItems.map { it.trim() }.filter { it.isNotBlank() }.take(MAX_CHAT_IMAGES_PER_MESSAGE)
         if (capped.isEmpty()) return@withContext emptyList()
-        val maxBase64CharsPerImage = (360_000 / capped.size.coerceAtLeast(1)).coerceIn(85_000, 260_000)
-        val safeSender = senderId.ifBlank { "user" }.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+        val maxBase64CharsPerImage = (160_000 / capped.size.coerceAtLeast(1)).coerceIn(60_000, 125_000)
 
         coroutineScope {
-            capped.mapIndexed { index, item ->
+            capped.map { item ->
                 async {
-                    if (!item.startsWith("data:image")) {
+                    if (!item.startsWith("data:image", ignoreCase = true)) {
                         item
                     } else {
-                        val compactedItem = ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
-                        val commaIdx = compactedItem.indexOf(',')
-                        val bytes = if (commaIdx != -1) {
-                            try {
-                                Base64.decode(compactedItem.substring(commaIdx + 1), Base64.DEFAULT)
-                            } catch (_: Exception) {
-                                null
-                            }
-                        } else null
-
-                        val uploadedUrl = if (bytes != null && bytes.isNotEmpty()) {
-                            tryUploadBytesToFirebaseStorage(
-                                storagePath = "chat_images/$safeSender/${System.currentTimeMillis()}_$index.jpg",
-                                bytes = bytes,
-                                mimeType = "image/jpeg",
-                                customMetadata = mapOf("senderId" to safeSender)
-                            )
-                        } else null
-
-                        uploadedUrl?.takeIf { it.isNotBlank() } ?: compactedItem
+                        ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
                     }
                 }
             }.map { it.await() }
