@@ -583,7 +583,17 @@ object IslamicDateAndPrayerHelper {
         return input.map { map[it] ?: it }.joinToString("")
     }
 
-    fun getFormattedHijriDate(): String {
+    fun toArabicDigits(input: String): String {
+        val map = mapOf(
+            '0' to '٠', '1' to '١', '2' to '٢', '3' to '٣', '4' to '٤',
+            '5' to '٥', '6' to '٦', '7' to '٧', '8' to '٨', '9' to '٩'
+        )
+        return input.map { map[it] ?: it }.joinToString("")
+    }
+
+    fun getFormattedHijriDate(
+        calendar: Calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
+    ): String {
         val hijriMonths = listOf(
             "মুহাররম", "সফর", "রবিউল আউয়াল", "রবিউস সানি",
             "জমাদিউল আউয়াল", "জমাদিউস সানি", "রজব", "শাবান",
@@ -591,7 +601,11 @@ object IslamicDateAndPrayerHelper {
         )
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val hijri = HijrahDate.now()
+                val gYear = calendar.get(Calendar.YEAR)
+                val gMonth = calendar.get(Calendar.MONTH) + 1
+                val gDay = calendar.get(Calendar.DAY_OF_MONTH)
+                val localDate = java.time.LocalDate.of(gYear, gMonth, gDay)
+                val hijri = HijrahDate.from(localDate)
                 val day = hijri.get(ChronoField.DAY_OF_MONTH)
                 val month = hijri.get(ChronoField.MONTH_OF_YEAR)
                 val year = hijri.get(ChronoField.YEAR)
@@ -603,6 +617,7 @@ object IslamicDateAndPrayerHelper {
         }
         return try {
             val icuCal = android.icu.util.IslamicCalendar()
+            icuCal.timeInMillis = calendar.timeInMillis
             val day = icuCal.get(android.icu.util.Calendar.DAY_OF_MONTH)
             val monthIndex = icuCal.get(android.icu.util.Calendar.MONTH)
             val year = icuCal.get(android.icu.util.Calendar.YEAR)
@@ -613,16 +628,17 @@ object IslamicDateAndPrayerHelper {
         }
     }
 
-    fun getFormattedGregorianDate(): String {
+    fun getFormattedGregorianDate(
+        calendar: Calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
+    ): String {
         val banglaMonths = listOf(
             "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
             "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"
         )
         return try {
-            val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
-            val day = cal.get(Calendar.DAY_OF_MONTH)
-            val monthIndex = cal.get(Calendar.MONTH)
-            val year = cal.get(Calendar.YEAR)
+            val day = calendar.get(Calendar.DAY_OF_MONTH)
+            val monthIndex = calendar.get(Calendar.MONTH)
+            val year = calendar.get(Calendar.YEAR)
             val monthName = banglaMonths.getOrElse(monthIndex) { "অক্টোবর" }
             "${toBanglaDigits(day.toString())} $monthName ${toBanglaDigits(year.toString())}"
         } catch (_: Throwable) {
@@ -630,9 +646,10 @@ object IslamicDateAndPrayerHelper {
         }
     }
 
-    fun getFormattedBanglaDayOfWeek(): String {
-        val cal = Calendar.getInstance()
-        return when (cal.get(Calendar.DAY_OF_WEEK)) {
+    fun getFormattedBanglaDayOfWeek(
+        calendar: Calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
+    ): String {
+        return when (calendar.get(Calendar.DAY_OF_WEEK)) {
             Calendar.SATURDAY -> "শনিবার"
             Calendar.SUNDAY -> "রবিবার"
             Calendar.MONDAY -> "সোমবার"

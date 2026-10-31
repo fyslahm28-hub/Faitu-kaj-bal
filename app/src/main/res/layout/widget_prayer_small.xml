@@ -5,137 +5,181 @@
     android:layout_height="match_parent"
     android:background="@drawable/bg_prayer_widget_card"
     android:orientation="vertical"
-    android:padding="10dp">
+    android:paddingLeft="8dp"
+    android:paddingTop="6dp"
+    android:paddingRight="8dp"
+    android:paddingBottom="6dp">
 
-    <!-- Header: District Name + Compact 3 Dates -->
+    <!-- 1. TOP SECTION: Left (Current Local Time + Short Date & District) | Right (Next Prayer + Live Countdown) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:baselineAligned="false"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/widget_district_name"
+        <!-- Left Column: Current Local Time (12-Hour AM/PM) + Date/District Pill -->
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="🕌 ঢাকা"
-            android:textColor="#FFD54F"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:gravity="center"
+            android:orientation="vertical"
+            android:paddingRight="4dp">
 
-        <TextView
-            android:id="@+id/widget_hijri_date"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="হিজরি তারিখ"
-            android:textColor="#DDF3EC"
-            android:textSize="10sp"
-            android:textStyle="bold" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/widget_dates_combined"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:ellipsize="end"
-        android:maxLines="1"
-        android:text="বাংলা তারিখ • ইংরেজি তারিখ"
-        android:textColor="#B5DCD0"
-        android:textSize="9.5sp" />
-
-    <!-- Hidden individual date views so common binder works uniformly -->
-    <TextView
-        android:id="@+id/widget_bangla_date"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:visibility="gone" />
-
-    <TextView
-        android:id="@+id/widget_english_date"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:visibility="gone" />
-
-    <!-- Highlighted Next Prayer + Live Countdown -->
-    <LinearLayout
-        android:id="@+id/widget_next_prayer_box"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="5dp"
-        android:background="@drawable/bg_prayer_widget_highlight_box"
-        android:gravity="center_vertical"
-        android:orientation="vertical"
-        android:paddingLeft="8dp"
-        android:paddingTop="5dp"
-        android:paddingRight="8dp"
-        android:paddingBottom="5dp">
-
-        <TextView
-            android:id="@+id/widget_next_prayer_title"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="পরবর্তী: আসর • ০৪:১৫ অপরাহ্ণ"
-            android:textColor="#FFFFFF"
-            android:textSize="11.5sp"
-            android:textStyle="bold" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/widget_countdown_text"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:text="০১ ঘণ্টা ২০ মিনিট বাকি"
-                android:textColor="#FFD54F"
-                android:textSize="10.5sp"
-                android:textStyle="bold" />
-
-            <Chronometer
-                android:id="@+id/widget_countdown_chronometer"
+            <TextClock
+                android:id="@+id/widget_live_text_clock"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:countDown="true"
-                android:textColor="#FFD54F"
-                android:textSize="10.5sp"
+                android:format12Hour="hh:mm a"
+                android:format24Hour="hh:mm a"
+                android:maxLines="1"
+                android:textColor="#084B2A"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:timeZone="Asia/Dhaka" />
+
+            <TextView
+                android:id="@+id/widget_current_time_text"
+                android:layout_width="wrap_content"
+                android:layout_height="0dp"
+                android:maxLines="1"
+                android:text="08:56 AM"
+                android:textColor="#084B2A"
+                android:textSize="1sp"
+                android:visibility="invisible" />
+
+            <TextView
+                android:id="@+id/widget_district_name"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:background="@drawable/bg_prayer_widget_green_pill"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:paddingLeft="8dp"
+                android:paddingTop="2dp"
+                android:paddingRight="8dp"
+                android:paddingBottom="2dp"
+                android:text="Sat, Oct 31 • ঢাকা"
+                android:textColor="#FFFFFF"
+                android:textSize="8.5sp"
                 android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Thin Vertical Divider -->
+        <TextView
+            android:layout_width="1dp"
+            android:layout_height="44dp"
+            android:background="#2E7D5B"
+            android:text="" />
+
+        <!-- Right Column: Next Prayer Badge, Prayer Name, Subtitle & Live Countdown Pill -->
+        <LinearLayout
+            android:id="@+id/widget_next_prayer_box"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1.15"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:paddingLeft="4dp">
+
+            <TextView
+                android:id="@+id/widget_next_prayer_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_prayer_widget_green_pill"
+                android:maxLines="1"
+                android:paddingLeft="8dp"
+                android:paddingTop="1.5dp"
+                android:paddingRight="8dp"
+                android:paddingBottom="1.5dp"
+                android:text="🕌 পরবর্তী নামাজ"
+                android:textColor="#FFFFFF"
+                android:textSize="8sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_next_prayer_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="যোহর"
+                android:textColor="#084B2A"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_current_waqt_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:maxLines="1"
+                android:text="( শুরু হতে বাকি )"
+                android:textColor="#145A38"
+                android:textSize="7.5sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1.5dp"
+                android:background="@drawable/bg_prayer_widget_green_pill"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingLeft="8dp"
+                android:paddingTop="1.5dp"
+                android:paddingRight="8dp"
+                android:paddingBottom="1.5dp">
+
+                <TextView
+                    android:id="@+id/widget_countdown_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:maxLines="1"
+                    android:text="⏱ 03:24:37"
+                    android:textColor="#FFFFFF"
+                    android:textSize="9sp"
+                    android:textStyle="bold" />
+
+                <Chronometer
+                    android:id="@+id/widget_countdown_chronometer"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:countDown="true"
+                    android:textColor="#FFFFFF"
+                    android:textSize="1sp"
+                    android:visibility="invisible" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 
-    <!-- Compact 5 Waqt Row -->
+    <!-- 2. MIDDLE SECTION: All 5 Waqts in a Single Compact Horizontal Row with Thin Dividers -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="5dp"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/bg_prayer_widget_inner_panel"
         android:baselineAligned="false"
-        android:orientation="horizontal">
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="4dp"
+        android:paddingTop="3dp"
+        android:paddingRight="4dp"
+        android:paddingBottom="3dp">
 
+        <!-- Fajr -->
         <LinearLayout
             android:id="@+id/widget_waqt_box_fajr"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginRight="2dp"
             android:layout_weight="1"
             android:background="@drawable/bg_prayer_widget_waqt_normal"
             android:gravity="center"
             android:orientation="vertical"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp">
+            android:paddingTop="1.5dp"
+            android:paddingBottom="1.5dp">
 
             <TextView
                 android:id="@+id/widget_waqt_name_fajr"
@@ -143,8 +187,8 @@
                 android:layout_height="wrap_content"
                 android:maxLines="1"
                 android:text="ফজর"
-                android:textColor="#DDF3EC"
-                android:textSize="9sp"
+                android:textColor="#084B2A"
+                android:textSize="8.5sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -152,23 +196,35 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="০৫:০০"
-                android:textColor="#FFFFFF"
-                android:textSize="9sp"
+                android:text="05:07 AM"
+                android:textColor="#0B3D24"
+                android:textSize="7.5sp"
                 android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_waqt_badge_fajr"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone" />
         </LinearLayout>
 
+        <TextView
+            android:layout_width="1dp"
+            android:layout_height="22dp"
+            android:background="#2E7D5B"
+            android:text="" />
+
+        <!-- Dhuhr -->
         <LinearLayout
             android:id="@+id/widget_waqt_box_dhuhr"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginRight="2dp"
             android:layout_weight="1"
             android:background="@drawable/bg_prayer_widget_waqt_normal"
             android:gravity="center"
             android:orientation="vertical"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp">
+            android:paddingTop="1.5dp"
+            android:paddingBottom="1.5dp">
 
             <TextView
                 android:id="@+id/widget_waqt_name_dhuhr"
@@ -176,8 +232,8 @@
                 android:layout_height="wrap_content"
                 android:maxLines="1"
                 android:text="যোহর"
-                android:textColor="#DDF3EC"
-                android:textSize="9sp"
+                android:textColor="#084B2A"
+                android:textSize="8.5sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -185,23 +241,35 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="১২:০৫"
-                android:textColor="#FFFFFF"
-                android:textSize="9sp"
+                android:text="11:45 AM"
+                android:textColor="#0B3D24"
+                android:textSize="7.5sp"
                 android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_waqt_badge_dhuhr"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone" />
         </LinearLayout>
 
+        <TextView
+            android:layout_width="1dp"
+            android:layout_height="22dp"
+            android:background="#2E7D5B"
+            android:text="" />
+
+        <!-- Asr -->
         <LinearLayout
             android:id="@+id/widget_waqt_box_asr"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginRight="2dp"
             android:layout_weight="1"
             android:background="@drawable/bg_prayer_widget_waqt_normal"
             android:gravity="center"
             android:orientation="vertical"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp">
+            android:paddingTop="1.5dp"
+            android:paddingBottom="1.5dp">
 
             <TextView
                 android:id="@+id/widget_waqt_name_asr"
@@ -209,8 +277,8 @@
                 android:layout_height="wrap_content"
                 android:maxLines="1"
                 android:text="আসর"
-                android:textColor="#DDF3EC"
-                android:textSize="9sp"
+                android:textColor="#084B2A"
+                android:textSize="8.5sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -218,23 +286,35 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="০৪:১৫"
-                android:textColor="#FFFFFF"
-                android:textSize="9sp"
+                android:text="03:38 PM"
+                android:textColor="#0B3D24"
+                android:textSize="7.5sp"
                 android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_waqt_badge_asr"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone" />
         </LinearLayout>
 
+        <TextView
+            android:layout_width="1dp"
+            android:layout_height="22dp"
+            android:background="#2E7D5B"
+            android:text="" />
+
+        <!-- Maghrib -->
         <LinearLayout
             android:id="@+id/widget_waqt_box_maghrib"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginRight="2dp"
             android:layout_weight="1"
             android:background="@drawable/bg_prayer_widget_waqt_normal"
             android:gravity="center"
             android:orientation="vertical"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp">
+            android:paddingTop="1.5dp"
+            android:paddingBottom="1.5dp">
 
             <TextView
                 android:id="@+id/widget_waqt_name_maghrib"
@@ -242,8 +322,8 @@
                 android:layout_height="wrap_content"
                 android:maxLines="1"
                 android:text="মাগরিব"
-                android:textColor="#DDF3EC"
-                android:textSize="9sp"
+                android:textColor="#084B2A"
+                android:textSize="8.5sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -251,12 +331,25 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="০৫:৩০"
-                android:textColor="#FFFFFF"
-                android:textSize="9sp"
+                android:text="05:27 PM"
+                android:textColor="#0B3D24"
+                android:textSize="7.5sp"
                 android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_waqt_badge_maghrib"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone" />
         </LinearLayout>
 
+        <TextView
+            android:layout_width="1dp"
+            android:layout_height="22dp"
+            android:background="#2E7D5B"
+            android:text="" />
+
+        <!-- Isha -->
         <LinearLayout
             android:id="@+id/widget_waqt_box_isha"
             android:layout_width="0dp"
@@ -265,8 +358,8 @@
             android:background="@drawable/bg_prayer_widget_waqt_normal"
             android:gravity="center"
             android:orientation="vertical"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp">
+            android:paddingTop="1.5dp"
+            android:paddingBottom="1.5dp">
 
             <TextView
                 android:id="@+id/widget_waqt_name_isha"
@@ -274,8 +367,8 @@
                 android:layout_height="wrap_content"
                 android:maxLines="1"
                 android:text="এশা"
-                android:textColor="#DDF3EC"
-                android:textSize="9sp"
+                android:textColor="#084B2A"
+                android:textSize="8.5sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -283,10 +376,101 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="০৭:০০"
-                android:textColor="#FFFFFF"
-                android:textSize="9sp"
+                android:text="06:47 PM"
+                android:textColor="#0B3D24"
+                android:textSize="7.5sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_waqt_badge_isha"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- 3. BOTTOM SECTION: Mandatory 3-Language Dates (Bangla, English, Arabic) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:orientation="vertical"
+        android:paddingLeft="2dp"
+        android:paddingRight="2dp">
+
+        <!-- Bangla Date Line (Hijri + Bangla Ponjika + Gregorian in Bangla) -->
+        <TextView
+            android:id="@+id/widget_bangla_date"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="২০ জমাদিউল আউয়াল ১৪৪৮ হিজরি | ১৫ কার্তিক ১৪৩৩ বঙ্গাব্দ | ৩১ অক্টোবর ২০২৬"
+            android:textColor="#073B22"
+            android:textSize="7.5sp"
+            android:textStyle="bold" />
+
+        <!-- Second Compact Line: English Date | Arabic Date -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/widget_english_date"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="31 October 2026 | 20 Jumada al-Awwal 1448 AH"
+                android:textColor="#0B3D24"
+                android:textSize="7sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="1dp"
+                android:layout_height="10dp"
+                android:layout_marginLeft="3dp"
+                android:layout_marginRight="3dp"
+                android:background="#2E7D5B"
+                android:text="" />
+
+            <TextView
+                android:id="@+id/widget_arabic_date"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="٣١ أكتوبر ٢٠٢٦ | ٢٠ جمادى الأولى ١٤٤٨ هـ"
+                android:textColor="#0B3D24"
+                android:textSize="7sp"
                 android:textStyle="bold" />
         </LinearLayout>
+
+        <!-- Auxiliary views for uniform access -->
+        <TextView
+            android:id="@+id/widget_hijri_date"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/widget_dates_combined"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/widget_sun_strip_text"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone" />
     </LinearLayout>
 </LinearLayout>

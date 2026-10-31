@@ -282,7 +282,16 @@ data class ComputedDailyPrayerSchedule(
     val banglaCalendarDateBangla: String,
     val banglaCalendarDateEnglish: String,
     val gregorianDateBangla: String,
-    val gregorianDateEnglish: String
+    val gregorianDateEnglish: String,
+    val currentTime12hEnglish: String = "",
+    val shortDayDateEnglish: String = "",
+    val countdownDigitalEnglish: String = "",
+    val countdownDigitalBangla: String = "",
+    val hijriDateArabic: String = "",
+    val gregorianDateArabic: String = "",
+    val widgetDateLineBangla: String = "",
+    val widgetDateLineEnglish: String = "",
+    val widgetDateLineArabic: String = ""
 )
 
 data class AzanPlaybackState(
@@ -810,8 +819,26 @@ object PrayerAzanManager {
 
         val currentClockEn = formatClockWithSecondsEnglish(hour24, minute, second)
         val currentClockBn = IslamicDateAndPrayerHelper.toBanglaDigits(currentClockEn)
+        val currentClock12hEn = formatMinutes12hEnglish(nowMinutes)
 
         val (banglaDateBn, banglaDateEn) = getFormattedBanglaPonjikaDate(year, month, day)
+        val hijriBn = IslamicDateAndPrayerHelper.getFormattedHijriDate(calendar)
+        val hijriEn = getFormattedHijriDateEnglish(calendar)
+        val hijriAr = getFormattedHijriDateArabic(calendar)
+
+        val gregDateOnlyBn = IslamicDateAndPrayerHelper.getFormattedGregorianDate(calendar)
+        val gregFullBn = "$gregDateOnlyBn (${IslamicDateAndPrayerHelper.getFormattedBanglaDayOfWeek(calendar)})"
+        val gregFullEn = getFormattedGregorianDateEnglish(calendar)
+        val gregDateOnlyEn = gregFullEn.substringBefore(" (")
+        val gregDateAr = getFormattedGregorianDateArabic(calendar)
+        val shortDayDateEn = getFormattedShortDayDateEnglish(calendar)
+
+        val digitalCountdownEn = String.format(Locale.ENGLISH, "%02d:%02d:%02d", remHours, remMins, remSecs)
+        val digitalCountdownBn = IslamicDateAndPrayerHelper.toBanglaDigits(digitalCountdownEn)
+
+        val widgetLineBn = "$hijriBn | $banglaDateBn | $gregDateOnlyBn"
+        val widgetLineEn = "$gregDateOnlyEn | $hijriEn"
+        val widgetLineAr = "$gregDateAr | $hijriAr"
 
         return ComputedDailyPrayerSchedule(
             locationNameBangla = locationNameBn,
@@ -852,12 +879,21 @@ object PrayerAzanManager {
             countdownEnglish = countdownEn,
             currentTimeBangla = currentClockBn,
             currentTimeEnglish = currentClockEn,
-            hijriDateBangla = IslamicDateAndPrayerHelper.getFormattedHijriDate(),
-            hijriDateEnglish = getFormattedHijriDateEnglish(),
+            hijriDateBangla = hijriBn,
+            hijriDateEnglish = hijriEn,
             banglaCalendarDateBangla = banglaDateBn,
             banglaCalendarDateEnglish = banglaDateEn,
-            gregorianDateBangla = "${IslamicDateAndPrayerHelper.getFormattedGregorianDate()} (${IslamicDateAndPrayerHelper.getFormattedBanglaDayOfWeek()})",
-            gregorianDateEnglish = getFormattedGregorianDateEnglish(calendar)
+            gregorianDateBangla = gregFullBn,
+            gregorianDateEnglish = gregFullEn,
+            currentTime12hEnglish = currentClock12hEn,
+            shortDayDateEnglish = shortDayDateEn,
+            countdownDigitalEnglish = digitalCountdownEn,
+            countdownDigitalBangla = digitalCountdownBn,
+            hijriDateArabic = hijriAr,
+            gregorianDateArabic = gregDateAr,
+            widgetDateLineBangla = widgetLineBn,
+            widgetDateLineEnglish = widgetLineEn,
+            widgetDateLineArabic = widgetLineAr
         )
     }
 
@@ -1090,7 +1126,9 @@ object PrayerAzanManager {
         return bnStr to enStr
     }
 
-    private fun getFormattedHijriDateEnglish(): String {
+    private fun getFormattedHijriDateEnglish(
+        calendar: Calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
+    ): String {
         val hijriMonthsEn = listOf(
             "Muharram", "Safar", "Rabi' al-Awwal", "Rabi' al-Thani",
             "Jumada al-Awwal", "Jumada al-Thani", "Rajab", "Sha'ban",
@@ -1098,7 +1136,11 @@ object PrayerAzanManager {
         )
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val hijri = HijrahDate.now()
+                val gYear = calendar.get(Calendar.YEAR)
+                val gMonth = calendar.get(Calendar.MONTH) + 1
+                val gDay = calendar.get(Calendar.DAY_OF_MONTH)
+                val localDate = java.time.LocalDate.of(gYear, gMonth, gDay)
+                val hijri = HijrahDate.from(localDate)
                 val day = hijri.get(ChronoField.DAY_OF_MONTH)
                 val month = hijri.get(ChronoField.MONTH_OF_YEAR)
                 val year = hijri.get(ChronoField.YEAR)
@@ -1107,7 +1149,64 @@ object PrayerAzanManager {
             }
         } catch (_: Throwable) {
         }
-        return "10 Rabi' al-Awwal 1448 AH"
+        return "20 Jumada al-Awwal 1448 AH"
+    }
+
+    private fun getFormattedHijriDateArabic(
+        calendar: Calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Dhaka"))
+    ): String {
+        val hijriMonthsAr = listOf(
+            "محرم", "صفر", "ربيع الأول", "ربيع الثاني",
+            "جمادى الأولى", "جمادى الآخرة", "رجب", "شعبان",
+            "رمضان", "شوال", "ذو القعدة", "ذو الحجة"
+        )
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val gYear = calendar.get(Calendar.YEAR)
+                val gMonth = calendar.get(Calendar.MONTH) + 1
+                val gDay = calendar.get(Calendar.DAY_OF_MONTH)
+                val localDate = java.time.LocalDate.of(gYear, gMonth, gDay)
+                val hijri = HijrahDate.from(localDate)
+                val day = IslamicDateAndPrayerHelper.toArabicDigits(hijri.get(ChronoField.DAY_OF_MONTH).toString())
+                val month = hijri.get(ChronoField.MONTH_OF_YEAR)
+                val year = IslamicDateAndPrayerHelper.toArabicDigits(hijri.get(ChronoField.YEAR).toString())
+                val monthName = hijriMonthsAr.getOrElse(month - 1) { "جمادى الأولى" }
+                return "$day $monthName $year هـ"
+            }
+        } catch (_: Throwable) {
+        }
+        return "٢٠ جمادى الأولى ١٤٤٨ هـ"
+    }
+
+    private fun getFormattedGregorianDateArabic(cal: Calendar): String {
+        val monthsAr = listOf(
+            "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+            "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
+        )
+        val d = IslamicDateAndPrayerHelper.toArabicDigits(cal.get(Calendar.DAY_OF_MONTH).toString())
+        val m = monthsAr.getOrElse(cal.get(Calendar.MONTH)) { "أكتوبر" }
+        val y = IslamicDateAndPrayerHelper.toArabicDigits(cal.get(Calendar.YEAR).toString())
+        return "$d $m $y"
+    }
+
+    private fun getFormattedShortDayDateEnglish(cal: Calendar): String {
+        val shortDaysEn = when (cal.get(Calendar.DAY_OF_WEEK)) {
+            Calendar.SATURDAY -> "Sat"
+            Calendar.SUNDAY -> "Sun"
+            Calendar.MONDAY -> "Mon"
+            Calendar.TUESDAY -> "Tue"
+            Calendar.WEDNESDAY -> "Wed"
+            Calendar.THURSDAY -> "Thu"
+            Calendar.FRIDAY -> "Fri"
+            else -> "Sat"
+        }
+        val shortMonthsEn = listOf(
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+        )
+        val d = cal.get(Calendar.DAY_OF_MONTH)
+        val m = shortMonthsEn.getOrElse(cal.get(Calendar.MONTH)) { "Oct" }
+        return "$shortDaysEn, $m $d"
     }
 
     private fun getFormattedGregorianDateEnglish(cal: Calendar): String {
