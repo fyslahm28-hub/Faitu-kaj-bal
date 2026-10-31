@@ -317,6 +317,52 @@ async function writeReleaseDoc({
 }
 
 /**
+ * Reads existing `/app_releases/{docId}` from Firestore if present.
+ * Returns null if document does not exist (404) or if GET fails.
+ */
+export async function fetchExistingReleaseDoc({
+  baseOrigin,
+  projectId,
+  databaseId,
+  docId,
+  bearerToken,
+}) {
+  const encodedProject = encodeURIComponent(projectId);
+  const encodedDb = encodeURIComponent(databaseId);
+  const encodedDoc = encodeURIComponent(docId);
+  const url = `${baseOrigin}/v1/projects/${encodedProject}/databases/${encodedDb}/documents/app_releases/${encodedDoc}`;
+
+  const headers = bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
+
+  try {
+    const res = await httpRequestJson(url, {
+      method: "GET",
+      headers,
+    });
+    const fields = res.data?.fields;
+    if (!fields) return null;
+
+    const versionCode = parseInt(fields.versionCode?.integerValue ?? "0", 10);
+    const versionName = fields.versionName?.stringValue ?? "";
+    const apkDownloadUrl = fields.apkDownloadUrl?.stringValue ?? "";
+    const apkSha256 = fields.apkSha256?.stringValue ?? "";
+    const commitSha = fields.commitSha?.stringValue ?? "";
+
+    return {
+      versionCode,
+      versionName,
+      apkDownloadUrl,
+      apkSha256,
+      commitSha,
+      fields,
+    };
+  } catch (err) {
+    if (err.statusCode === 404) return null;
+    throw err;
+  }
+}
+
+/**
  * Reads back `/app_releases/latest` from Firestore to verify that the release metadata
  * was genuinely persisted in the target database.
  */
@@ -594,7 +640,70 @@ async function main() {
     }
   }
 
-  const baseOrigin = "https://firestore.googleapis.com";
+  const baseOrigin = emulatorHost
+    ? (emulatorHost.startsWith("http") ? emulatorHost : `http://${emulatorHost}`)
+    : "https://firestore.googleapis.com";
+  const bearerToken = emulatorHost ? "owner" : accessToken;
+
+  // Smart Read-Before-Write (Idempotency Check):
+  // Query existing /app_releases/latest to avoid redundant Firestore writes if this version is already registered.
+  try {
+    const existingLatest = await fetchExistingReleaseDoc({
+      baseOrigin,
+      projectId,
+      databaseId,
+      docId: "latest",
+      bearerToken,
+    });
+
+    if (
+      existingLatest &&
+      existingLatest.versionCode === releaseData.versionCode &&
+      existingLatest.apkDownloadUrl === releaseData.apkDownloadUrl
+    ) {
+      console.log(
+        JSON.stringify({
+          status: "SKIPPED_IDEMPOTENT",
+          message: `Release version ${releaseData.versionName} (build #${releaseData.versionCode}) with URL "${releaseData.apkDownloadUrl}" is already registered in Firestore /app_releases/latest. Zero writes performed!`,
+          mode: emulatorHost ? "EMULATOR" : "PRODUCTION",
+          projectId,
+          databaseId,
+          versionCode: releaseData.versionCode,
+          versionName: releaseData.versionName,
+          apkDownloadUrl: releaseData.apkDownloadUrl,
+        })
+      );
+      return;
+    }
+  } catch (readErr) {
+    const isQuotaExceeded =
+      readErr.statusCode === 429 ||
+      (typeof readErr.message === "string" &&
+        (readErr.message.includes("429") || readErr.message.includes("RESOURCE_EXHAUSTED")));
+
+    if (isQuotaExceeded) {
+      console.warn(
+        `⚠️ [Firebase Firestore Quota Exceeded] Free daily read/write quota limit reached (HTTP 429 RESOURCE_EXHAUSTED) ` +
+          `for project "${projectId}", database "${databaseId}". ` +
+          `Skipping Firestore update. The APK build, artifact upload, and GitHub Release remain 100% functional and downloadable!`
+      );
+      console.log(
+        JSON.stringify({
+          status: "QUOTA_EXCEEDED_WARNING",
+          mode: emulatorHost ? "EMULATOR" : "PRODUCTION",
+          projectId,
+          databaseId,
+          versionCode: releaseData.versionCode,
+          versionName: releaseData.versionName,
+          apkDownloadUrl: releaseData.apkDownloadUrl,
+          message: "Daily quota limit reached. Auto-update skipped gracefully without failing workflow.",
+        })
+      );
+      return;
+    }
+    // For non-quota read errors, proceed to write attempt or throw if critical
+  }
+
   const serverTimestampIso = await fetchServerTimestampIso(baseOrigin);
   let currentStep = `PATCH /app_releases/latest`;
 
@@ -605,7 +714,7 @@ async function main() {
       databaseId,
       docId: "latest",
       release: releaseData,
-      bearerToken: accessToken,
+      bearerToken,
       timestampIso: serverTimestampIso,
     });
 
@@ -616,7 +725,7 @@ async function main() {
       databaseId,
       docId: `v_${versionCode}`,
       release: releaseData,
-      bearerToken: accessToken,
+      bearerToken,
       timestampIso: serverTimestampIso,
     });
 
@@ -627,13 +736,13 @@ async function main() {
       databaseId,
       docId: "latest",
       expectedRelease: releaseData,
-      bearerToken: accessToken,
+      bearerToken,
     });
 
     console.log(
       JSON.stringify({
         status: "SUCCESS",
-        mode: "PRODUCTION",
+        mode: emulatorHost ? "EMULATOR" : "PRODUCTION",
         projectId,
         databaseId,
         verifiedDocuments: ["/app_releases/latest", `/app_releases/v_${versionCode}`],
@@ -641,6 +750,32 @@ async function main() {
       })
     );
   } catch (err) {
+    const isQuotaExceeded =
+      err.statusCode === 429 ||
+      (typeof err.message === "string" &&
+        (err.message.includes("429") || err.message.includes("RESOURCE_EXHAUSTED")));
+
+    if (isQuotaExceeded) {
+      console.warn(
+        `⚠️ [Firebase Firestore Quota Exceeded] Free daily write quota limit reached (HTTP 429 RESOURCE_EXHAUSTED) ` +
+          `for project "${projectId}", database "${databaseId}". ` +
+          `Cannot write release metadata to Firestore. The APK build, artifact upload, and GitHub Release remain 100% functional and downloadable!`
+      );
+      console.log(
+        JSON.stringify({
+          status: "QUOTA_EXCEEDED_WARNING",
+          mode: emulatorHost ? "EMULATOR" : "PRODUCTION",
+          projectId,
+          databaseId,
+          versionCode: releaseData.versionCode,
+          versionName: releaseData.versionName,
+          apkDownloadUrl: releaseData.apkDownloadUrl,
+          message: "Daily quota limit reached. Auto-update skipped gracefully without failing workflow.",
+        })
+      );
+      return;
+    }
+
     const statusHint =
       err.statusCode === 404
         ? ` Ensure that Firestore database "${databaseId}" exists in Firebase project "${projectId}".`

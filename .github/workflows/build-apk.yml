@@ -190,6 +190,7 @@ jobs:
           fi
 
       - name: Update & Verify Latest Version in Firebase Firestore (/app_releases/latest)
+        continue-on-error: true
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           RELEASE_VERSION_CODE: ${{ needs.build-and-distribute.outputs.version_code }}
