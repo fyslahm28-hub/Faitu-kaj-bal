@@ -105,6 +105,7 @@ class QawmiRepository(
         }
 
         launch {
+            if (runCatching { auth.currentUser }.getOrNull() == null) return@launch
             val cachedSnap = withTimeoutOrNull(200L) {
                 runCatching { query.get(Source.CACHE).await() }.getOrNull()
             }
@@ -122,8 +123,11 @@ class QawmiRepository(
         }
 
         launch {
+            var serverErr: Throwable? = null
             val serverSnap = withTimeoutOrNull(initialServerTimeoutMs) {
-                runCatching { query.get().await() }.getOrNull()
+                runCatching { query.get().await() }
+                    .onFailure { serverErr = it }
+                    .getOrNull()
             }
             if (serverSnap != null) {
                 val mapped = runCatching { mapper(serverSnap) }.getOrDefault(emptyList())
@@ -134,9 +138,20 @@ class QawmiRepository(
                     }
                 }
             } else {
-                val fallbackCache = withTimeoutOrNull(300L) {
-                    runCatching { query.get(Source.CACHE).await() }.getOrNull()
+                val fsErr = serverErr as? com.google.firebase.firestore.FirebaseFirestoreException
+                if (fsErr != null &&
+                    fsErr.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED &&
+                    runCatching { auth.currentUser }.getOrNull() == null
+                ) {
+                    handleFirestoreError(fsErr, OperationType.LIST, path)
+                    close(fsErr)
+                    return@launch
                 }
+                val fallbackCache = if (runCatching { auth.currentUser }.getOrNull() != null) {
+                    withTimeoutOrNull(300L) {
+                        runCatching { query.get(Source.CACHE).await() }.getOrNull()
+                    }
+                } else null
                 val fallbackList = if (fallbackCache != null) {
                     runCatching { mapper(fallbackCache) }.getOrDefault(emptyList())
                 } else {
@@ -156,6 +171,12 @@ class QawmiRepository(
             query.addSnapshotListener(metadataChoice) { snapshot, error ->
                 if (error != null) {
                     handleFirestoreError(error, OperationType.LIST, path)
+                    if (error.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED &&
+                        runCatching { auth.currentUser }.getOrNull() == null
+                    ) {
+                        close(error)
+                        return@addSnapshotListener
+                    }
                     launch {
                         val recoveredSnap = withTimeoutOrNull(2_500L) {
                             runCatching { query.get().await() }.getOrNull()
@@ -204,8 +225,15 @@ class QawmiRepository(
 
     // --- 0. ADMIN IDENTITY, SERVER REGISTRY & PASSWORD RECOVERY ---
 
+    fun isCurrentUserAuthorizedAdmin(): Boolean {
+        val currentUser = runCatching { auth.currentUser }.getOrNull() ?: return false
+        val email = AdminSecurityHelper.resolveEffectiveUserEmail(currentUser)
+        val phone = AdminSecurityHelper.resolveEffectiveUserPhone(currentUser)
+        return AdminSecurityHelper.isAuthorizedAdminIdentity(email, phone)
+    }
+
     fun observeAdminRegistryEntry(userId: String): Flow<AdminRegistryEntry?> {
-        val path = "admins/$userId"
+        if (userId.isBlank()) return kotlinx.coroutines.flow.flowOf(null)
         return db.collection("admins").document(userId)
             .snapshots()
             .map { snapshot ->
@@ -222,17 +250,18 @@ class QawmiRepository(
      * Protected on the backend by `isTokenVerifiedAdmin()` in `firestore.rules`.
      */
     suspend fun ensureVerifiedAdminRegistryDocument(): Result<Boolean> {
-        val currentUser = auth.currentUser ?: return Result.success(false)
+        val currentUser = runCatching { auth.currentUser }.getOrNull() ?: return Result.success(false)
         val isVerifiedAdmin = AdminSecurityHelper.verifyServerTokenAdminClaims(currentUser)
         if (!isVerifiedAdmin) {
             return Result.success(false)
         }
         val uid = currentUser.uid
-        val normalizedEmail = AdminSecurityHelper.normalizeEmail(currentUser.email)
+        val resolvedEmail = AdminSecurityHelper.resolveEffectiveUserEmail(currentUser)
+        val normalizedEmail = resolvedEmail
             .takeIf { AdminSecurityHelper.isAuthorizedAdminEmail(it) }
             ?: "fyslahm28@gmail.com"
         val docRef = db.collection("admins").document(uid)
-        return try {
+        try {
             val payload = mapOf(
                 "adminId" to uid,
                 "email" to normalizedEmail,
@@ -241,37 +270,45 @@ class QawmiRepository(
                 "verifiedByAuthToken" to true,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).awaitWithTimeout(8_000L)
+            docRef.set(payload).awaitMessageWriteConfirmation(docRef, 3_500L)
 
-            enqueueAndDispatchTelegramNotification(
-                eventType = "ADMIN_LOGIN",
-                title = "অ্যাডমিন প্যানেল সেশন লগইন",
-                message = "অনুমোদিত অ্যাডমিন ($normalizedEmail) যাচাইকৃত সেশনে লগইন করেছেন।",
-                actorName = normalizedEmail,
-                referenceId = uid
-            )
-            Result.success(true)
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = "ADMIN_LOGIN",
+                        title = "অ্যাডমিন প্যানেল সেশন লগইন",
+                        message = "অনুমোদিত অ্যাডমিন ($normalizedEmail) যাচাইকৃত সেশনে লগইন করেছেন।",
+                        actorName = normalizedEmail,
+                        referenceId = uid
+                    )
+                }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, docRef.path)
-            Result.failure(e)
         }
+        return Result.success(true)
     }
 
     suspend fun recordAdminLogoutActivity(adminEmailOrName: String): Result<Unit> {
-        val currentUser = auth.currentUser ?: return Result.success(Unit)
+        val currentUser = runCatching { auth.currentUser }.getOrNull() ?: return Result.success(Unit)
         if (!AdminSecurityHelper.verifyServerTokenAdminClaims(currentUser)) {
             return Result.success(Unit)
         }
-        val actor = adminEmailOrName.ifBlank { currentUser.email ?: "নাজিমে আলা (অ্যাডমিন)" }
-        enqueueAndDispatchTelegramNotification(
-            eventType = "ADMIN_LOGOUT",
-            title = "অ্যাডমিন সেশন লগআউট",
-            message = "অনুমোদিত অ্যাডমিন ($actor) অ্যাপ থেকে লগআউট করেছেন।",
-            actorName = actor,
-            referenceId = currentUser.uid
-        )
+        val resolvedEmail = AdminSecurityHelper.resolveEffectiveUserEmail(currentUser)
+        val actor = adminEmailOrName.ifBlank { resolvedEmail.ifBlank { "নাজিমে আলা (অ্যাডমিন)" } }
+        kotlinx.coroutines.withTimeoutOrNull(1_200L) {
+            runCatching {
+                enqueueAndDispatchTelegramNotification(
+                    eventType = "ADMIN_LOGOUT",
+                    title = "অ্যাডমিন সেশন লগআউট",
+                    message = "অনুমোদিত অ্যাডমিন ($actor) অ্যাপ থেকে লগআউট করেছেন।",
+                    actorName = actor,
+                    referenceId = currentUser.uid
+                )
+            }
+        }
         return Result.success(Unit)
     }
 
@@ -1715,31 +1752,43 @@ class QawmiRepository(
                     "approvalStatus" to approvalStatus,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitWithTimeout(8_000L)
+            ).awaitMessageWriteConfirmation(docRef, 4_000L)
 
-            if (isVerified && post.authorId.isNotBlank() && post.authorId != uid) {
-                createNotification(
-                    recipientId = post.authorId,
-                    senderName = adminName,
-                    title = "বিজ্ঞপ্তি যাচাইকৃত ব্যাজ প্রাপ্তি",
-                    message = "আপনার প্রকাশিত '${post.title}' পোস্টটিতে যাচাইকৃত ব্যাজ যুক্ত করা হয়েছে।",
-                    type = "VERIFICATION",
-                    referenceId = post.id
-                )
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                coroutineScope {
+                    if (isVerified && post.authorId.isNotBlank() && post.authorId != uid) {
+                        launch {
+                            runCatching {
+                                createNotification(
+                                    recipientId = post.authorId,
+                                    senderName = adminName,
+                                    title = "বিজ্ঞপ্তি যাচাইকৃত ব্যাজ প্রাপ্তি",
+                                    message = "আপনার প্রকাশিত '${post.title}' পোস্টটিতে যাচাইকৃত ব্যাজ যুক্ত করা হয়েছে।",
+                                    type = "VERIFICATION",
+                                    referenceId = post.id
+                                )
+                            }
+                        }
+                    }
+                    launch {
+                        runCatching {
+                            enqueueAndDispatchTelegramNotification(
+                                eventType = "ADMIN_VERIFICATION",
+                                title = "পোস্ট যাচাইকরণ হালনাগাদ",
+                                message = "'${post.title}' (${post.designation}) পোস্টের যাচাইকরণ অবস্থা: ${if (isVerified) "যাচাইকৃত ✓" else "আনভেরিফাই"}",
+                                actorName = adminName,
+                                referenceId = post.id
+                            )
+                        }
+                    }
+                }
             }
-            enqueueAndDispatchTelegramNotification(
-                eventType = "ADMIN_VERIFICATION",
-                title = "পোস্ট যাচাইকরণ হালনাগাদ",
-                message = "'${post.title}' (${post.designation}) পোস্টের যাচাইকরণ অবস্থা: ${if (isVerified) "যাচাইকৃত ✓" else "আনভেরিফাই"}",
-                actorName = adminName,
-                referenceId = post.id
-            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -1756,31 +1805,43 @@ class QawmiRepository(
                     "isBoosted" to isBoosted,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitWithTimeout(8_000L)
+            ).awaitMessageWriteConfirmation(docRef, 4_000L)
 
-            if (isBoosted && post.authorId.isNotBlank() && post.authorId != uid) {
-                createNotification(
-                    recipientId = post.authorId,
-                    senderName = adminName,
-                    title = "বিজ্ঞপ্তিটি ফিডের শীর্ষে Boosted হয়েছে",
-                    message = "অ্যাডমিন প্যানেল থেকে আপনার '${post.title}' (${post.designation}) বিজ্ঞপ্তিটি ফিডের উপরে বিশেষভাবে প্রদর্শিত হচ্ছে।",
-                    type = "BOOST",
-                    referenceId = post.id
-                )
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                coroutineScope {
+                    if (isBoosted && post.authorId.isNotBlank() && post.authorId != uid) {
+                        launch {
+                            runCatching {
+                                createNotification(
+                                    recipientId = post.authorId,
+                                    senderName = adminName,
+                                    title = "বিজ্ঞপ্তিটি ফিডের শীর্ষে Boosted হয়েছে",
+                                    message = "অ্যাডমিন প্যানেল থেকে আপনার '${post.title}' (${post.designation}) বিজ্ঞপ্তিটি ফিডের উপরে বিশেষভাবে প্রদর্শিত হচ্ছে।",
+                                    type = "BOOST",
+                                    referenceId = post.id
+                                )
+                            }
+                        }
+                    }
+                    launch {
+                        runCatching {
+                            enqueueAndDispatchTelegramNotification(
+                                eventType = "ADMIN_VERIFICATION",
+                                title = if (isBoosted) "বিজ্ঞপ্তি Boosted করা হয়েছে" else "বিজ্ঞপ্তির Boost সরানো হয়েছে",
+                                message = "'${post.title}' (${post.designation} - ${post.district}) বিজ্ঞপ্তির Boost অবস্থা হালনাগাদ করা হয়েছে।",
+                                actorName = adminName,
+                                referenceId = post.id
+                            )
+                        }
+                    }
+                }
             }
-            enqueueAndDispatchTelegramNotification(
-                eventType = "ADMIN_VERIFICATION",
-                title = if (isBoosted) "বিজ্ঞপ্তি Boosted করা হয়েছে" else "বিজ্ঞপ্তির Boost সরানো হয়েছে",
-                message = "'${post.title}' (${post.designation} - ${post.district}) বিজ্ঞপ্তির Boost অবস্থা হালনাগাদ করা হয়েছে।",
-                actorName = adminName,
-                referenceId = post.id
-            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -2077,7 +2138,7 @@ class QawmiRepository(
                     "status" to newStatus,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitWithTimeout(8_000L)
+            ).awaitMessageWriteConfirmation(docRef, 4_000L)
 
             if (submission.applicantId.isNotBlank() && submission.applicantId != uid) {
                 val statusBangla = when (newStatus) {
@@ -2086,21 +2147,25 @@ class QawmiRepository(
                     "REJECTED" -> "অপেক্ষমাণ / এবারের জন্য নির্বাচিত হননি"
                     else -> "হালনাগাদ"
                 }
-                createNotification(
-                    recipientId = submission.applicantId,
-                    senderName = actorName,
-                    title = "আবেদনের অবস্থা হালনাগাদ",
-                    message = "'${submission.postTitle}'-এ আপনার খেদমতের আবেদনের বর্তমান অবস্থা: $statusBangla।",
-                    type = "APPLICATION",
-                    referenceId = submission.id
-                )
+                kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                    runCatching {
+                        createNotification(
+                            recipientId = submission.applicantId,
+                            senderName = actorName,
+                            title = "আবেদনের অবস্থা হালনাগাদ",
+                            message = "'${submission.postTitle}'-এ আপনার খেদমতের আবেদনের বর্তমান অবস্থা: $statusBangla।",
+                            type = "APPLICATION",
+                            referenceId = submission.id
+                        )
+                    }
+                }
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -3138,16 +3203,16 @@ class QawmiRepository(
 
     fun observeTelegramNotifications(): Flow<List<TelegramNotificationLog>> {
         val path = "telegram_notifications"
-        return db.collection(path)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(TelegramNotificationLog::class.java)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(TelegramNotificationLog::class.java)
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     suspend fun enqueueAndDispatchTelegramNotification(
@@ -3160,9 +3225,10 @@ class QawmiRepository(
         requireTelegramDeliverySuccess: Boolean = false,
         bypassDedup: Boolean = false
     ): Result<String> {
-        val currentUser = auth.currentUser
+        val currentUser = runCatching { auth.currentUser }.getOrNull()
         val uid = currentUser?.uid
-        val adminEmailSuffix = currentUser?.email?.takeIf { it.isNotBlank() }?.let { email ->
+        val effectiveEmail = AdminSecurityHelper.resolveEffectiveUserEmail(currentUser)
+        val adminEmailSuffix = effectiveEmail.takeIf { it.isNotBlank() }?.let { email ->
             if (actorName.contains(email, ignoreCase = true)) "" else " ($email)"
         }.orEmpty()
 
@@ -3182,15 +3248,38 @@ class QawmiRepository(
         val eventKey = "${eventType}_${referenceId}_${resolvedTitle.hashCode()}_${resolvedMessage.hashCode()}"
 
         // Verify bot via getMe and dispatch to Telegram Bot API (Chat ID: 6255562134), checking real "ok": true + message_id
-        val dispatchDiag = TelegramNotificationHelper.dispatchToTelegramBotVerified(
-            eventType = eventType,
-            title = resolvedTitle,
-            message = resolvedMessage,
-            actorName = resolvedActor,
-            targetPhone = resolvedTargetPhone,
-            eventKey = eventKey,
-            bypassDedup = bypassDedup
-        )
+        val dispatchDiag = if (requireTelegramDeliverySuccess) {
+            TelegramNotificationHelper.dispatchToTelegramBotVerified(
+                eventType = eventType,
+                title = resolvedTitle,
+                message = resolvedMessage,
+                actorName = resolvedActor,
+                targetPhone = resolvedTargetPhone,
+                eventKey = eventKey,
+                bypassDedup = bypassDedup
+            )
+        } else {
+            kotlinx.coroutines.withTimeoutOrNull(2_000L) {
+                TelegramNotificationHelper.dispatchToTelegramBotVerified(
+                    eventType = eventType,
+                    title = resolvedTitle,
+                    message = resolvedMessage,
+                    actorName = resolvedActor,
+                    targetPhone = resolvedTargetPhone,
+                    eventKey = eventKey,
+                    bypassDedup = bypassDedup
+                )
+            } ?: TelegramNotificationHelper.TelegramBotDiagnosticResult(
+                isTokenConfigured = TelegramNotificationHelper.isTelegramBotConfigured(),
+                isChatIdValid = true,
+                getMeVerified = false,
+                sendMessageOk = false,
+                deliveredMessageId = null,
+                sanitizedErrorDescription = "Timeout",
+                deliveryStatus = "FAILED",
+                diagnosticMessageBangla = "টেলিগ্রাম সংযোগ সময়সীমা অতিক্রম করেছে; অ্যাডমিন লগে সংরক্ষিত হয়েছে।"
+            )
+        }
 
         val delivered = dispatchDiag.sendMessageOk && (dispatchDiag.deliveredMessageId ?: 0L) > 0L
         val trueStatus = if (delivered) "DELIVERED" else "FAILED"
@@ -3230,7 +3319,7 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).awaitWithTimeout(8_000L)
+            docRef.set(payload).awaitMessageWriteConfirmation(docRef, 3_500L)
             if (requireTelegramDeliverySuccess && !delivered) {
                 Result.failure(IllegalStateException(dispatchDiag.diagnosticMessageBangla))
             } else if (delivered) {
@@ -3326,44 +3415,44 @@ class QawmiRepository(
 
     fun observeAllUsersForAdmin(): Flow<List<UserProfile>> {
         val path = "users"
-        return db.collection(path)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { it.toUserProfileOrNull() }
-                    .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.documents.mapNotNull { it.toUserProfileOrNull() }
+                .distinctBy { it.id.ifBlank { it.userId } }
+                .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     fun observeAllSubmissionsForAdmin(): Flow<List<KhedmotSubmission>> {
         val path = "khedmot_submissions"
-        return db.collection(path)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(KhedmotSubmission::class.java)
-                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.documents.mapNotNull { it.toKhedmotSubmissionOrNull() }
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        }
     }
 
     fun observeAllAdminsForAdmin(): Flow<List<AdminRegistryEntry>> {
         val path = "admins"
-        return db.collection(path)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.safeToObjects(AdminRegistryEntry::class.java)
-                    .sortedByDescending { it.updatedAt ?: Timestamp(0, 0) }
-            }
-            .catch { error ->
-                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                throw error
-            }
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = true,
+            initialServerTimeoutMs = 3_500L
+        ) { snapshot ->
+            snapshot.safeToObjects(AdminRegistryEntry::class.java)
+                .distinctBy { it.id.ifBlank { it.adminId } }
+                .sortedByDescending { it.updatedAt ?: Timestamp(0, 0) }
+        }
     }
 
     suspend fun adminUpdateUserVerification(
@@ -3383,7 +3472,7 @@ class QawmiRepository(
                     "isVerified" to verified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitWithTimeout(8_000L)
+            ).awaitMessageWriteConfirmation(docRef, 4_000L)
 
             val resolvedAdmin = adminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" }
             val eventType = if (verified) "ADMIN_VERIFICATION" else "CONTENT_MODERATION"
@@ -3397,19 +3486,23 @@ class QawmiRepository(
             } else {
                 "ব্যবহারকারী '${user.fullName.ifBlank { targetId }}'-এর অ্যাকাউন্ট নিষ্ক্রিয় / ব্লক করা হয়েছে।"
             }
-            enqueueAndDispatchTelegramNotification(
-                eventType = eventType,
-                title = title,
-                message = message,
-                actorName = resolvedAdmin,
-                referenceId = targetId
-            )
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = eventType,
+                        title = title,
+                        message = message,
+                        actorName = resolvedAdmin,
+                        referenceId = targetId
+                    )
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -3427,13 +3520,17 @@ class QawmiRepository(
                 "REJECTED" -> "বাতিল"
                 else -> "নতুন"
             }
-            enqueueAndDispatchTelegramNotification(
-                eventType = "KHEDMOT_SUBMISSION",
-                title = if (newStatus == "ACCEPTED") "আবেদন অনুমোদন করা হয়েছে" else "আবেদনের অবস্থা পরিবর্তন: $statusBangla",
-                message = "প্রার্থী: ${submission.applicantName} | পদ: ${submission.postDesignation} | বিজ্ঞপ্তি: ${submission.postTitle} | বর্তমান অবস্থা: $statusBangla",
-                actorName = resolvedAdmin,
-                referenceId = submission.id.ifBlank { "submission_update" }
-            )
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = "KHEDMOT_SUBMISSION",
+                        title = if (newStatus == "ACCEPTED") "আবেদন অনুমোদন করা হয়েছে" else "আবেদনের অবস্থা পরিবর্তন: $statusBangla",
+                        message = "প্রার্থী: ${submission.applicantName} | পদ: ${submission.postDesignation} | বিজ্ঞপ্তি: ${submission.postTitle} | বর্তমান অবস্থা: $statusBangla",
+                        actorName = resolvedAdmin,
+                        referenceId = submission.id.ifBlank { "submission_update" }
+                    )
+                }
+            }
         }
         return res
     }

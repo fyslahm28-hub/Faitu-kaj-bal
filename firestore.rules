@@ -90,7 +90,7 @@ service cloud.firestore {
       let chatThemes = data.get('chatThemes', {});
       return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 150 &&
-             data.accountType is string && (data.accountType == 'khadim' || data.accountType == 'muhtamim') &&
+             data.accountType is string && (data.accountType == 'khadim' || data.accountType == 'muhtamim' || data.accountType == 'admin') &&
              data.district is string && data.district.size() <= 100 &&
              data.designation is string && data.designation.size() <= 150 &&
              data.qualification is string && data.qualification.size() <= 200 &&
@@ -433,23 +433,24 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(userId) &&
                        (
-                         (isValidUserProfile(incoming()) &&
+                         (isAdmin() &&
+                          (incoming().get('isVerified', false) is bool) &&
+                          isValidTimestamp(incoming().get('updatedAt', request.time)) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'isVerified', 'updatedAt'
+                          ])) ||
+                         (request.auth.uid == userId &&
+                          isValidUserProfile(incoming()) &&
                           incoming().userId == existing().userId &&
-                          incoming().createdAt == existing().createdAt && (
-                            (request.auth.uid == userId &&
-                             incoming().isVerified == existing().isVerified &&
-                             incoming().diff(existing()).affectedKeys().hasOnly([
-                               'fullName', 'accountType', 'district', 'designation',
-                               'qualification', 'experience', 'preferredDistricts', 'bio',
-                               'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
-                               'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
-                               'blockedUserIds', 'chatThemes', 'updatedAt'
-                             ])) ||
-                            (isAdmin() &&
-                             incoming().diff(existing()).affectedKeys().hasOnly([
-                               'isVerified', 'updatedAt'
-                             ]))
-                          )) ||
+                          incoming().createdAt == existing().createdAt &&
+                          incoming().isVerified == existing().isVerified &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'fullName', 'accountType', 'district', 'designation',
+                            'qualification', 'experience', 'preferredDistricts', 'bio',
+                            'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
+                            'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
+                            'blockedUserIds', 'chatThemes', 'updatedAt'
+                          ])) ||
                          (request.auth.uid == userId &&
                           (incoming().get('isOnline', false) is bool) &&
                           (incoming().get('lastSeenAt', request.time) == null || isValidTimestamp(incoming().get('lastSeenAt', request.time))) &&
@@ -601,7 +602,11 @@ service cloud.firestore {
                   diffKeys.hasOnly([
                     'approvalStatus', 'isVerifiedMadrasa', 'isBoosted', 'visibility', 'updatedAt'
                   ]) &&
-                  isValidFeedPost(inc))
+                  (inc.get('approvalStatus', 'APPROVED') in ['APPROVED', 'PENDING', 'REJECTED']) &&
+                  (inc.get('isVerifiedMadrasa', false) is bool) &&
+                  (inc.get('isBoosted', false) is bool) &&
+                  (inc.get('visibility', 'PUBLIC') in ['PUBLIC', 'ARCHIVED']) &&
+                  isValidTimestamp(inc.get('updatedAt', request.time)))
                );
       }
 
@@ -714,19 +719,23 @@ service cloud.firestore {
 
       allow update: if isSignedIn() &&
                        isValidId(madrasaId) &&
-                       isValidMadrasaProfile(incoming()) &&
-                       incoming().ownerId == existing().ownerId &&
-                       incoming().createdAt == existing().createdAt && (
+                       (
+                         (isAdmin() &&
+                          (incoming().get('isVerified', false) is bool) &&
+                          (incoming().get('visibility', 'PUBLIC') in ['PUBLIC', 'HIDDEN']) &&
+                          isValidTimestamp(incoming().get('updatedAt', request.time)) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'isVerified', 'visibility', 'updatedAt'
+                          ])) ||
                          (request.auth.uid == existing().ownerId &&
+                          isValidMadrasaProfile(incoming()) &&
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().createdAt == existing().createdAt &&
                           incoming().isVerified == existing().isVerified &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'name', 'district', 'address', 'establishedYear',
                             'highestMarhala', 'facilities', 'studentCount',
                             'contactPhone', 'visibility', 'updatedAt'
-                          ])) ||
-                         (isAdmin() &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'isVerified', 'visibility', 'updatedAt'
                           ]))
                        );
 
@@ -767,12 +776,9 @@ service cloud.firestore {
 
       allow update: if isSignedIn() &&
                        isValidId(submissionId) &&
-                       isValidKhedmotSubmission(incoming()) &&
-                       incoming().applicantId == existing().applicantId &&
-                       incoming().recipientId == existing().recipientId &&
-                       incoming().postId == existing().postId &&
-                       incoming().createdAt == existing().createdAt &&
                        (request.auth.uid == existing().recipientId || isAdmin()) &&
+                       (incoming().get('status', '') in ['PENDING', 'SHORTLISTED', 'ACCEPTED', 'REJECTED']) &&
+                       isValidTimestamp(incoming().get('updatedAt', request.time)) &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
 
       allow delete: if isSignedIn() && isValidId(submissionId) && (

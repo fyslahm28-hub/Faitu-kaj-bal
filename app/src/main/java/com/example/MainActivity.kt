@@ -289,14 +289,16 @@ fun AppNavigation(
     }
 
     var manualAuthRefresh by remember { mutableIntStateOf(0) }
-    val initialUser = remember(resolvedAuth, manualAuthRefresh) {
-        runCatching { resolvedAuth.currentUser }.getOrNull()
+    var currentAuthUser by remember(resolvedAuth) {
+        mutableStateOf(runCatching { resolvedAuth.currentUser }.getOrNull())
     }
-    val authFlow = remember(resolvedAuth, manualAuthRefresh) {
-        resolvedAuth.authStateFlow()
+    LaunchedEffect(resolvedAuth, manualAuthRefresh) {
+        currentAuthUser = runCatching { resolvedAuth.currentUser }.getOrNull()
+        resolvedAuth.authStateFlow().collect { latestUser ->
+            currentAuthUser = latestUser
+        }
     }
-    val currentUser by authFlow.collectAsStateWithLifecycle(initialValue = initialUser)
-    val user = currentUser
+    val user = currentAuthUser
 
     if (user == null) {
         if (deepLink?.openPrayerSchedule == true) {
@@ -331,6 +333,7 @@ fun AppNavigation(
         DisposableEffect(lifecycleOwner, context) {
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_RESUME) {
+                    currentAuthUser = runCatching { resolvedAuth.currentUser }.getOrNull()
                     manualAuthRefresh++
                     unauthDismissedVersionCode = AppUpdateManagerHelper.getActiveCooldownDismissedVersionCode(context)
                     val lastCheck = AppUpdateManagerHelper.getLastUpdateCheckTimestampMs(context)
@@ -355,6 +358,7 @@ fun AppNavigation(
         Box(modifier = Modifier.fillMaxSize()) {
             AuthScreen(
                 onAuthSuccess = {
+                    currentAuthUser = runCatching { resolvedAuth.currentUser }.getOrNull()
                     manualAuthRefresh++
                 }
             )
@@ -386,7 +390,8 @@ fun AppNavigation(
         }
     } else {
         val currentUserId = user.uid
-        val currentUserEmail = user.email.orEmpty()
+        val currentUserEmail = com.example.ui.util.AdminSecurityHelper.resolveEffectiveUserEmail(user)
+        val currentUserPhone = com.example.ui.util.AdminSecurityHelper.resolveEffectiveUserPhone(user)
         val currentUserDisplayName = user.displayName.orEmpty()
 
         val qawmiViewModel: QawmiViewModel = viewModel(
@@ -413,7 +418,8 @@ fun AppNavigation(
                         repository = repository,
                         currentUserId = currentUserId,
                         currentUserEmail = currentUserEmail,
-                        currentUserDisplayName = currentUserDisplayName
+                        currentUserDisplayName = currentUserDisplayName,
+                        currentUserPhone = currentUserPhone
                     )
                 }
             }
@@ -448,6 +454,7 @@ fun AppNavigation(
         MainAppScaffold(
             viewModel = qawmiViewModel,
             onSignedOut = {
+                currentAuthUser = null
                 manualAuthRefresh++
             }
         )

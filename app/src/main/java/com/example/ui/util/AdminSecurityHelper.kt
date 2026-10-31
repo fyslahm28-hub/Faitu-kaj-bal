@@ -42,7 +42,39 @@ object AdminSecurityHelper {
 
     fun isAuthorizedAdminPhone(phone: String?): Boolean {
         val normalized = normalizeBdPhone(phone)
-        return normalized == ADMIN_MOBILE_NUMBER
+        return normalized.isNotBlank() && normalized == ADMIN_MOBILE_NUMBER
+    }
+
+    fun isAuthorizedAdminIdentity(email: String?, phone: String? = null): Boolean {
+        return isAuthorizedAdminEmail(email) || isAuthorizedAdminPhone(phone)
+    }
+
+    fun resolveEffectiveUserEmail(user: FirebaseUser?): String {
+        if (user == null) return ""
+        val primary = user.email?.trim().orEmpty()
+        if (primary.isNotBlank()) return primary
+        val fromProviders = runCatching {
+            user.providerData
+                .asSequence()
+                .mapNotNull { it.email?.trim() }
+                .firstOrNull { it.isNotBlank() }
+                .orEmpty()
+        }.getOrDefault("")
+        return fromProviders
+    }
+
+    fun resolveEffectiveUserPhone(user: FirebaseUser?): String {
+        if (user == null) return ""
+        val primary = user.phoneNumber?.trim().orEmpty()
+        if (primary.isNotBlank()) return primary
+        val fromProviders = runCatching {
+            user.providerData
+                .asSequence()
+                .mapNotNull { it.phoneNumber?.trim() }
+                .firstOrNull { it.isNotBlank() }
+                .orEmpty()
+        }.getOrDefault("")
+        return fromProviders
     }
 
     /**
@@ -101,14 +133,21 @@ object AdminSecurityHelper {
      */
     suspend fun verifyServerTokenAdminClaims(user: FirebaseUser?): Boolean {
         if (user == null) return false
+        val resolvedEmail = resolveEffectiveUserEmail(user)
+        val resolvedPhone = resolveEffectiveUserPhone(user)
+        if (isAuthorizedAdminIdentity(resolvedEmail, resolvedPhone)) {
+            return true
+        }
         return try {
-            val tokenResult = user.getIdToken(false).await()
+            val tokenResult = kotlinx.coroutines.withTimeoutOrNull(2_500L) {
+                user.getIdToken(false).await()
+            } ?: return isFirebaseAuthUserAdmin(authEmail = resolvedEmail, authPhone = resolvedPhone)
             val claims = tokenResult.claims
             val hasAdminClaim = (claims["admin"] as? Boolean == true) ||
                 (claims["role"] as? String == "admin") ||
                 (claims["role"] as? String == "SUPER_ADMIN")
-            val tokenEmail = (claims["email"] as? String) ?: user.email
-            val tokenPhone = (claims["phone_number"] as? String) ?: user.phoneNumber
+            val tokenEmail = (claims["email"] as? String)?.takeIf { it.isNotBlank() } ?: resolvedEmail
+            val tokenPhone = (claims["phone_number"] as? String)?.takeIf { it.isNotBlank() } ?: resolvedPhone
             isFirebaseAuthUserAdmin(
                 authEmail = tokenEmail,
                 authPhone = tokenPhone,
@@ -116,8 +155,8 @@ object AdminSecurityHelper {
             )
         } catch (_: Exception) {
             isFirebaseAuthUserAdmin(
-                authEmail = user.email,
-                authPhone = user.phoneNumber
+                authEmail = resolvedEmail,
+                authPhone = resolvedPhone
             )
         }
     }

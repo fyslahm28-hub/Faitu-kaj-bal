@@ -2753,4 +2753,118 @@ class ExampleRobolectricTest {
         assertEquals(1, postsList.first { it.id == "app_post_live_1" }.shareCount)
         assertTrue(postsList.any { it.id == "shared_post_1" })
     }
+
+    @Test
+    fun cuj25_adminPanelFullOperations_and_instantLoginLogout_verifiedEndToEnd() {
+        // 1. Verify Admin Identity resolution for all authorized emails & phone numbers
+        assertTrue(com.example.ui.util.AdminSecurityHelper.isAuthorizedAdminIdentity("foysalahamad102@gmail.com", ""))
+        assertTrue(com.example.ui.util.AdminSecurityHelper.isAuthorizedAdminIdentity("foysalahamad204@gmail.com", ""))
+        assertTrue(com.example.ui.util.AdminSecurityHelper.isAuthorizedAdminIdentity("fyslahm28@gmail.com", ""))
+        assertTrue(com.example.ui.util.AdminSecurityHelper.isAuthorizedAdminIdentity("", "01300448147"))
+        assertTrue(com.example.ui.util.AdminSecurityHelper.isAuthorizedAdminIdentity("", "+8801300448147"))
+        org.junit.Assert.assertFalse(com.example.ui.util.AdminSecurityHelper.isAuthorizedAdminIdentity("regularuser@gmail.com", "01700000000"))
+
+        // 2. Verify signOutUser triggers onSignOutComplete immediately (0ms synchronous callback)
+        var signedOutImmediately = false
+        com.example.ui.auth.signOutUser(
+            credentialManager = null,
+            onSignOutComplete = { signedOutImmediately = true },
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+        )
+        assertTrue("signOutUser must invoke onSignOutComplete immediately without delay", signedOutImmediately)
+
+        // 3. Verify Admin Panel Screen renders all tabs and executes user verification, application approval, and madrasa verification immediately
+        var usersList by androidx.compose.runtime.mutableStateOf(
+            listOf(
+                UserProfile(
+                    id = "u_admin_test_1",
+                    userId = "u_admin_test_1",
+                    fullName = "মাওলানা মাহমুদুল হাসান",
+                    accountType = "khadim",
+                    district = "ঢাকা",
+                    designation = "মুহাদ্দিস",
+                    qualification = "দাওরায়ে হাদিস",
+                    contactInfo = "01811223344",
+                    isVerified = false
+                )
+            )
+        )
+        var submissionsList by androidx.compose.runtime.mutableStateOf(
+            listOf(
+                com.example.data.model.KhedmotSubmission(
+                    id = "sub_admin_test_1",
+                    postId = "post_1",
+                    postTitle = "সহকারী শিক্ষক নিয়োগ",
+                    postDesignation = "সহকারী শিক্ষক",
+                    applicantId = "u_admin_test_1",
+                    applicantName = "মাওলানা মাহমুদুল হাসান",
+                    applicantQualification = "দাওরায়ে হাদিস",
+                    applicantExperience = "৩ বছর",
+                    applicantPhone = "01811223344",
+                    recipientId = "madrasa_owner_1",
+                    status = "PENDING",
+                    createdAt = Timestamp.now()
+                )
+            )
+        )
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                com.example.ui.screens.ModernAdminPanelRoot(
+                    isAdminUser = true,
+                    adminDisplayName = "নাজিমে আলা (অ্যাডমিন)",
+                    adminPhotoUrl = "",
+                    usersState = UiState.Success(usersList),
+                    submissionsState = UiState.Success(submissionsList),
+                    madrasasState = UiState.Success(emptyList()),
+                    feedPostsState = UiState.Success(emptyList()),
+                    telegramNotificationsState = UiState.Success(emptyList()),
+                    adminsState = UiState.Success(emptyList()),
+                    latestAppRelease = null,
+                    isSubmitting = false,
+                    onVerifyUser = { user, verified ->
+                        usersList = usersList.map {
+                            if (it.id == user.id) it.copy(isVerified = verified) else it
+                        }
+                    },
+                    onUpdateSubmissionStatus = { sub, newStatus ->
+                        submissionsList = submissionsList.map {
+                            if (it.id == sub.id) it.copy(status = newStatus) else it
+                        }
+                    },
+                    onVerifyMadrasa = { _, _ -> },
+                    onVerifyPost = { _, _, _ -> },
+                    onToggleBoostPost = { _, _ -> },
+                    onPublishQuickNotice = { _, _, _ -> },
+                    onSendAnnouncement = { _, _ -> },
+                    onRecordLiveAdminAction = { _, _, _, _ -> },
+                    onSendTestTelegramAlert = {},
+                    onPublishAppRelease = { _, _, _, _, _, _, _, _ -> },
+                    onRetryServerLoad = {},
+                    onDeletePost = {}
+                )
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("admin_panel_screen").assertIsDisplayed()
+
+        // Switch to Users tab and verify user activation via 3-dot option menu ("অপশন" -> "ব্যবহারকারী সক্রিয় করুন")
+        composeTestRule.onNodeWithTag("admin_tab_users").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNode(androidx.compose.ui.test.hasContentDescription("অপশন")).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("ব্যবহারকারী সক্রিয় করুন").performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(usersList.first { it.id == "u_admin_test_1" }.isVerified)
+
+        // Switch to Applications tab and approve submission via status menu ("নতুন" -> "নির্বাচিত (অনুমোদন)")
+        composeTestRule.onNodeWithTag("admin_tab_applications").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("সহকারী শিক্ষক").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("নির্বাচিত (অনুমোদন)").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("ACCEPTED", submissionsList.first { it.id == "sub_admin_test_1" }.status)
+    }
 }

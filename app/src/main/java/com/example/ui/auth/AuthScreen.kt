@@ -181,8 +181,8 @@ private val isRobolectricRuntime: Boolean
  */
 private suspend fun <T> runSignInStepWithLifecycleWatchdog(
     activity: Activity?,
-    initialLaunchTimeoutMs: Long = if (isRobolectricRuntime) 1500L else 20_000L,
-    postResumeGraceMs: Long = if (isRobolectricRuntime) 1500L else 20_000L,
+    initialLaunchTimeoutMs: Long = if (isRobolectricRuntime) 1500L else 8_000L,
+    postResumeGraceMs: Long = if (isRobolectricRuntime) 1500L else 3_500L,
     block: suspend () -> T
 ): T = coroutineScope {
     val lifecycle = (activity as? LifecycleOwner)?.lifecycle
@@ -245,7 +245,7 @@ private suspend fun <T> runSignInStepWithLifecycleWatchdog(
 private suspend fun signInFirebaseWithIdToken(googleIdToken: String): Boolean {
     if (googleIdToken.isBlank()) return false
     val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-    val authResult = withTimeout(25_000L) {
+    val authResult = withTimeout(12_000L) {
         Firebase.auth.signInWithCredential(authCredential).await()
     }
     return authResult?.user != null || Firebase.auth.currentUser != null
@@ -274,9 +274,9 @@ private suspend fun signInWithLegacyGooglePlayServices(
         .requestProfile()
         .build()
     val googleSignInClient = GoogleSignIn.getClient(activity, gso)
-    // Clear cached selection so the account chooser dialog always opens cleanly
+    // Clear cached selection with a fast non-blocking bound so the account chooser opens immediately
     runCatching {
-        withTimeout(1200L) {
+        withTimeout(250L) {
             googleSignInClient.signOut().await()
         }
     }
@@ -286,7 +286,17 @@ private suspend fun signInWithLegacyGooglePlayServices(
         resultDeferred.await()
     }
     val task = GoogleSignIn.getSignedInAccountFromIntent(activityResult.data)
-    val account = task.getResult(ApiException::class.java)
+    val account = try {
+        task.getResult(ApiException::class.java)
+    } catch (e: ApiException) {
+        if (activityResult.resultCode == Activity.RESULT_CANCELED ||
+            e.statusCode == CommonStatusCodes.CANCELED ||
+            e.statusCode == 12501
+        ) {
+            throw GetCredentialCancellationException("User cancelled Google Sign-In")
+        }
+        throw e
+    }
     val idToken = account?.idToken.orEmpty()
     return signInFirebaseWithIdToken(idToken)
 }
@@ -364,7 +374,11 @@ fun attemptAutoSignIn(
                 onUnauthenticated()
                 return@launch
             }
-            val result = runSignInStepWithLifecycleWatchdog(activity) {
+            val result = runSignInStepWithLifecycleWatchdog(
+                activity = activity,
+                initialLaunchTimeoutMs = if (isRobolectricRuntime) 1500L else 3_500L,
+                postResumeGraceMs = if (isRobolectricRuntime) 1500L else 2_500L
+            ) {
                 credentialManager.getCredential(activity, request)
             }
             if (signInFirebaseWithCredential(result.credential)) {
@@ -406,6 +420,7 @@ fun onGoogleSignInClicked(
     return scope.launch {
         var completed = false
         var lastException: Throwable? = null
+        var userExplicitlyCancelled = false
         try {
             val hostContext: Context = activity ?: context
 
@@ -429,17 +444,22 @@ fun onGoogleSignInClicked(
                         return@launch
                     }
                 } else {
-                    lastException = signInOptionResult.exceptionOrNull()
+                    val ex = signInOptionResult.exceptionOrNull()
+                    lastException = ex
+                    if (ex is GetCredentialCancellationException) {
+                        userExplicitlyCancelled = true
+                    }
                     Log.w(
                         "Auth",
-                        "Stage 1 (GetSignInWithGoogleOption) did not complete, proceeding to Stage 2: ${lastException?.message}"
+                        "Stage 1 (GetSignInWithGoogleOption) did not complete: ${ex?.message}"
                     )
                 }
             }
 
             // Stage 2: Google Play Services Auth (GoogleSignInClient / SignInHubActivity)
             // Works reliably across OEM ROMs (ColorOS, Realme UI, HyperOS, OneUI) where Android 14 CredentialManager may be disabled.
-            if (!isRobolectricRuntime &&
+            if (!userExplicitlyCancelled &&
+                !isRobolectricRuntime &&
                 launchLegacySignInIntent != null &&
                 activity != null &&
                 !activity.isFinishing &&
@@ -459,28 +479,21 @@ fun onGoogleSignInClicked(
                 } else if (legacyResult.isFailure) {
                     val ex = legacyResult.exceptionOrNull()
                     lastException = ex ?: lastException
-                    Log.w("Auth", "Stage 2 (GoogleSignInClient) did not complete, proceeding to Stage 3: ${ex?.message}")
+                    if (ex is GetCredentialCancellationException) {
+                        userExplicitlyCancelled = true
+                    }
+                    Log.w("Auth", "Stage 2 (GoogleSignInClient) did not complete: ${ex?.message}")
                 }
             }
 
-            // Stage 3: Firebase OAuthProvider ("google.com") with select_account prompt
-            // Opens the Google Account Selection screen in Custom Tab / Browser even if Play Services Auth is unavailable or has a SHA-1 mismatch.
-            if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
-                val webOAuthResult = runCatching {
-                    signInWithFirebaseWebOAuth(activity)
-                }
-                if (webOAuthResult.getOrDefault(false)) {
-                    completed = true
-                    onAuthSuccess()
-                    return@launch
-                } else if (webOAuthResult.isFailure) {
-                    lastException = webOAuthResult.exceptionOrNull() ?: lastException
-                    Log.w("Auth", "Stage 3 (Firebase OAuthProvider) did not complete: ${lastException?.message}")
-                }
+            if (userExplicitlyCancelled && !isRobolectricRuntime) {
+                completed = true
+                onAuthCancelled()
+                return@launch
             }
 
-            // Stage 4: Secondary CredentialManager GetGoogleIdOption (unfiltered) if still unauthenticated
-            if (credentialManager != null) {
+            // Stage 3: Secondary CredentialManager GetGoogleIdOption (unfiltered) if still unauthenticated
+            if (!userExplicitlyCancelled && credentialManager != null) {
                 val googleIdResult = runCatching {
                     val googleIdOption = GetGoogleIdOption.Builder()
                         .setFilterByAuthorizedAccounts(false)
@@ -502,7 +515,31 @@ fun onGoogleSignInClicked(
                         return@launch
                     }
                 } else {
-                    lastException = lastException ?: googleIdResult.exceptionOrNull()
+                    val ex = googleIdResult.exceptionOrNull()
+                    lastException = lastException ?: ex
+                    if (ex is GetCredentialCancellationException) {
+                        userExplicitlyCancelled = true
+                    }
+                }
+            }
+
+            // Stage 4: Firebase OAuthProvider ("google.com") fallback only if Play Services / CredentialManager could not open
+            if (!userExplicitlyCancelled &&
+                !isRobolectricRuntime &&
+                activity != null &&
+                !activity.isFinishing &&
+                !activity.isDestroyed
+            ) {
+                val webOAuthResult = runCatching {
+                    signInWithFirebaseWebOAuth(activity)
+                }
+                if (webOAuthResult.getOrDefault(false)) {
+                    completed = true
+                    onAuthSuccess()
+                    return@launch
+                } else if (webOAuthResult.isFailure) {
+                    lastException = webOAuthResult.exceptionOrNull() ?: lastException
+                    Log.w("Auth", "Stage 4 (Firebase OAuthProvider) did not complete: ${lastException?.message}")
                 }
             }
 
@@ -544,15 +581,16 @@ fun signOutUser(
     } catch (t: Throwable) {
         Log.e("Auth", "Firebase signOut error", t)
     }
-    scope.launch {
+    // Complete UI transition immediately so logout is instantaneous (0ms delay)
+    onSignOutComplete()
+    // Clear CredentialManager state asynchronously in the background
+    CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
         try {
             withTimeout(1500L) {
                 credentialManager?.clearCredentialState(ClearCredentialStateRequest())
             }
         } catch (t: Throwable) {
-            Log.e("Auth", "Failed to clear credential state", t)
-        } finally {
-            onSignOutComplete()
+            Log.d("Auth", "Background credential state clear finished: ${t.message}")
         }
     }
 }

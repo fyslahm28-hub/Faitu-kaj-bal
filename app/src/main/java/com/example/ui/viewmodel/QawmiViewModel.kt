@@ -96,7 +96,8 @@ class QawmiViewModel(
     private val repository: QawmiRepository,
     val currentUserId: String,
     val currentUserEmail: String,
-    val currentUserDisplayName: String
+    val currentUserDisplayName: String,
+    val currentUserPhone: String = ""
 ) : ViewModel() {
 
     private val _currentDestination = MutableStateFlow(MainDestination.HOME)
@@ -202,7 +203,8 @@ class QawmiViewModel(
 
     // Server-side Admin Registry & Token Claim state
     private val _serverTokenVerifiedAdmin = MutableStateFlow(
-        AdminSecurityHelper.isAuthorizedAdminEmail(currentUserEmail)
+        AdminSecurityHelper.isAuthorizedAdminIdentity(currentUserEmail, currentUserPhone) ||
+            repository.isCurrentUserAuthorizedAdmin()
     )
 
     val adminRegistryEntryState: StateFlow<AdminRegistryEntry?> = repository.observeAdminRegistryEntry(currentUserId)
@@ -212,19 +214,24 @@ class QawmiViewModel(
         _serverTokenVerifiedAdmin,
         adminRegistryEntryState
     ) { tokenVerified, registryEntry ->
-        AdminSecurityHelper.isFirebaseAuthUserAdmin(
-            authEmail = currentUserEmail,
-            hasCustomAdminClaim = tokenVerified,
-            hasServerRegistryEntry = registryEntry?.verifiedByAuthToken == true
-        )
+        AdminSecurityHelper.isAuthorizedAdminIdentity(currentUserEmail, currentUserPhone) ||
+            repository.isCurrentUserAuthorizedAdmin() ||
+            AdminSecurityHelper.isFirebaseAuthUserAdmin(
+                authEmail = currentUserEmail,
+                hasCustomAdminClaim = tokenVerified,
+                hasServerRegistryEntry = registryEntry?.verifiedByAuthToken == true
+            )
     }.stateIn(
         viewModelScope,
         SharingStarted.Eagerly,
-        AdminSecurityHelper.isAuthorizedAdminEmail(currentUserEmail)
+        AdminSecurityHelper.isAuthorizedAdminIdentity(currentUserEmail, currentUserPhone) ||
+            repository.isCurrentUserAuthorizedAdmin()
     )
 
     val isAdminUser: Boolean
-        get() = isAdminState.value
+        get() = isAdminState.value ||
+            AdminSecurityHelper.isAuthorizedAdminIdentity(currentUserEmail, currentUserPhone) ||
+            repository.isCurrentUserAuthorizedAdmin()
 
     // Real-time Firestore StateFlows (Two-tier error handling)
     val userProfileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
@@ -257,9 +264,19 @@ class QawmiViewModel(
         val minExpectedShareCount: Int = 0
     )
 
+    private data class AdminPostOverride(
+        val isVerifiedMadrasa: Boolean? = null,
+        val approvalStatus: String? = null,
+        val isBoosted: Boolean? = null
+    )
+
     private val _adminDataRefreshToken = MutableStateFlow(0)
     private val _localOptimisticPosts = MutableStateFlow<List<FeedPost>>(emptyList())
     private val _localPostEngagementOverrides = MutableStateFlow<Map<String, PostEngagementOverride>>(emptyMap())
+    private val _localAdminPostOverrides = MutableStateFlow<Map<String, AdminPostOverride>>(emptyMap())
+    private val _localAdminMadrasaVerificationOverrides = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val _localAdminUserVerificationOverrides = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val _localAdminSubmissionStatusOverrides = MutableStateFlow<Map<String, String>>(emptyMap())
     private val _localOptimisticComments = MutableStateFlow<List<FeedComment>>(emptyList())
     private val _locallyDeletedCommentIds = MutableStateFlow<Set<String>>(emptySet())
     private val _localOptimisticSubmissions = MutableStateFlow<List<KhedmotSubmission>>(emptyList())
@@ -270,13 +287,24 @@ class QawmiViewModel(
             repository.observePublicFeedPosts()
         },
         _localOptimisticPosts,
-        _localPostEngagementOverrides
-    ) { remotePosts, optimisticPosts, engagementOverrides ->
+        _localPostEngagementOverrides,
+        _localAdminPostOverrides
+    ) { remotePosts, optimisticPosts, engagementOverrides, adminOverrides ->
         val remoteIds = remotePosts.map { it.id }.toSet()
         val pendingOptimistic = optimisticPosts.filter { it.id.isNotBlank() && it.id !in remoteIds }
         val merged = (pendingOptimistic + remotePosts)
             .distinctBy { it.id }
-            .map { post ->
+            .map { rawPost ->
+                val adminOverride = adminOverrides[rawPost.id]
+                val post = if (adminOverride == null) {
+                    rawPost
+                } else {
+                    rawPost.copy(
+                        isVerifiedMadrasa = adminOverride.isVerifiedMadrasa ?: rawPost.isVerifiedMadrasa,
+                        approvalStatus = adminOverride.approvalStatus ?: rawPost.approvalStatus,
+                        isBoosted = adminOverride.isBoosted ?: rawPost.isBoosted
+                    )
+                }
                 val override = engagementOverrides[post.id]
                 if (override == null) {
                     post
@@ -371,14 +399,21 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
-    val madrasasState: StateFlow<UiState<List<MadrasaProfile>>> = _adminDataRefreshToken
-        .flatMapLatest {
+    val madrasasState: StateFlow<UiState<List<MadrasaProfile>>> = combine(
+        _adminDataRefreshToken.flatMapLatest {
             repository.observePublicMadrasas()
-                .map<List<MadrasaProfile>, UiState<List<MadrasaProfile>>> { UiState.Success(it) }
-                .catch { e ->
-                    Log.w(TAG, "Error observing madrasas", e)
-                    emit(UiState.Error(formatFirestoreErrorBangla(e, "মাদরাসার তালিকা লোড করা যায়নি")))
-                }
+        },
+        _localAdminMadrasaVerificationOverrides
+    ) { remoteMadrasas, verificationOverrides ->
+        val merged = remoteMadrasas.map { madrasa ->
+            val overrideVerified = verificationOverrides[madrasa.id]
+            if (overrideVerified == null) madrasa else madrasa.copy(isVerified = overrideVerified)
+        }
+        UiState.Success(merged) as UiState<List<MadrasaProfile>>
+    }
+        .catch { e ->
+            Log.w(TAG, "Error observing madrasas", e)
+            emit(UiState.Error(formatFirestoreErrorBangla(e, "মাদরাসার তালিকা লোড করা যায়নি")))
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
@@ -386,12 +421,17 @@ class QawmiViewModel(
         _adminDataRefreshToken.flatMapLatest {
             repository.observeMySentSubmissions(currentUserId)
         },
-        _localOptimisticSubmissions
-    ) { remoteList, optimisticList ->
+        _localOptimisticSubmissions,
+        _localAdminSubmissionStatusOverrides
+    ) { remoteList, optimisticList, statusOverrides ->
         val remoteIds = remoteList.map { it.id }.toSet()
         val pending = optimisticList.filter { it.id.isNotBlank() && it.id !in remoteIds }
         val merged = (pending + remoteList)
             .distinctBy { it.id }
+            .map { sub ->
+                val overrideStatus = statusOverrides[sub.id]
+                if (overrideStatus == null) sub else sub.copy(status = overrideStatus)
+            }
             .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
         UiState.Success(merged) as UiState<List<KhedmotSubmission>>
     }
@@ -406,14 +446,21 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
-    val receivedSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = _adminDataRefreshToken
-        .flatMapLatest {
+    val receivedSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
+        _adminDataRefreshToken.flatMapLatest {
             repository.observeReceivedSubmissions(currentUserId)
-                .map<List<KhedmotSubmission>, UiState<List<KhedmotSubmission>>> { UiState.Success(it) }
-                .catch { e ->
-                    Log.w(TAG, "Error observing received submissions", e)
-                    emit(UiState.Error(formatFirestoreErrorBangla(e, "প্রাপ্ত আবেদন লোড করা যায়নি")))
-                }
+        },
+        _localAdminSubmissionStatusOverrides
+    ) { remoteList, statusOverrides ->
+        val merged = remoteList.map { sub ->
+            val overrideStatus = statusOverrides[sub.id]
+            if (overrideStatus == null) sub else sub.copy(status = overrideStatus)
+        }
+        UiState.Success(merged) as UiState<List<KhedmotSubmission>>
+    }
+        .catch { e ->
+            Log.w(TAG, "Error observing received submissions", e)
+            emit(UiState.Error(formatFirestoreErrorBangla(e, "প্রাপ্ত আবেদন লোড করা যায়নি")))
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
@@ -581,12 +628,20 @@ class QawmiViewModel(
             if (!isAdmin) {
                 flowOf(UiState.Success(emptyList()))
             } else {
-                repository.observeAllUsersForAdmin()
-                    .map<List<UserProfile>, UiState<List<UserProfile>>> { UiState.Success(it) }
-                    .catch { e ->
-                        Log.w(TAG, "Error observing admin users", e)
-                        emit(UiState.Error(formatFirestoreErrorBangla(e, "ব্যবহারকারীর তালিকা লোড করা যায়নি")))
+                combine(
+                    repository.observeAllUsersForAdmin(),
+                    _localAdminUserVerificationOverrides
+                ) { users, overrides ->
+                    val merged = users.map { u ->
+                        val uidKey = u.id.ifBlank { u.userId }
+                        val overrideVerified = overrides[uidKey]
+                        if (overrideVerified == null) u else u.copy(isVerified = overrideVerified)
                     }
+                    UiState.Success(merged) as UiState<List<UserProfile>>
+                }.catch { e ->
+                    Log.w(TAG, "Error observing admin users", e)
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "ব্যবহারকারীর তালিকা লোড করা যায়নি")))
+                }
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
@@ -599,12 +654,25 @@ class QawmiViewModel(
             if (!isAdmin) {
                 flowOf(UiState.Success(emptyList()))
             } else {
-                repository.observeAllSubmissionsForAdmin()
-                    .map<List<KhedmotSubmission>, UiState<List<KhedmotSubmission>>> { UiState.Success(it) }
-                    .catch { e ->
-                        Log.w(TAG, "Error observing admin submissions", e)
-                        emit(UiState.Error(formatFirestoreErrorBangla(e, "আবেদনের তালিকা লোড করা যায়নি")))
-                    }
+                combine(
+                    repository.observeAllSubmissionsForAdmin(),
+                    _localOptimisticSubmissions,
+                    _localAdminSubmissionStatusOverrides
+                ) { remoteSubs, optimisticSubs, statusOverrides ->
+                    val remoteIds = remoteSubs.map { it.id }.toSet()
+                    val pending = optimisticSubs.filter { it.id.isNotBlank() && it.id !in remoteIds }
+                    val merged = (pending + remoteSubs)
+                        .distinctBy { it.id }
+                        .map { sub ->
+                            val overrideStatus = statusOverrides[sub.id]
+                            if (overrideStatus == null) sub else sub.copy(status = overrideStatus)
+                        }
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    UiState.Success(merged) as UiState<List<KhedmotSubmission>>
+                }.catch { e ->
+                    Log.w(TAG, "Error observing admin submissions", e)
+                    emit(UiState.Error(formatFirestoreErrorBangla(e, "আবেদনের তালিকা লোড করা যায়নি")))
+                }
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
@@ -688,10 +756,15 @@ class QawmiViewModel(
     }
 
     private fun verifyAndSyncAdminIdentity() {
+        val preAuthorized = AdminSecurityHelper.isAuthorizedAdminIdentity(currentUserEmail, currentUserPhone) ||
+            repository.isCurrentUserAuthorizedAdmin()
+        if (preAuthorized) {
+            _serverTokenVerifiedAdmin.value = true
+        }
         viewModelScope.launch {
             val result = repository.ensureVerifiedAdminRegistryDocument()
             result.onSuccess { isVerifiedAdmin ->
-                _serverTokenVerifiedAdmin.value = isVerifiedAdmin
+                _serverTokenVerifiedAdmin.value = isVerifiedAdmin || preAuthorized
             }
         }
     }
@@ -1928,6 +2001,10 @@ class QawmiViewModel(
             _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
             return
         }
+        val previous = _localAdminMadrasaVerificationOverrides.value[madrasa.id]
+        if (madrasa.id.isNotBlank()) {
+            _localAdminMadrasaVerificationOverrides.value = _localAdminMadrasaVerificationOverrides.value + (madrasa.id to verified)
+        }
         viewModelScope.launch {
             clearBanners()
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
@@ -1939,6 +2016,13 @@ class QawmiViewModel(
                     "মাদরাসার যাচাইকরণ স্ট্যাটাস পরিবর্তন করা হয়েছে।"
                 }
             }.onFailure { err ->
+                if (madrasa.id.isNotBlank()) {
+                    _localAdminMadrasaVerificationOverrides.value = if (previous == null) {
+                        _localAdminMadrasaVerificationOverrides.value - madrasa.id
+                    } else {
+                        _localAdminMadrasaVerificationOverrides.value + (madrasa.id to previous)
+                    }
+                }
                 _errorBanner.value = err.localizedMessage ?: "অ্যাডমিন অনুমোদন সম্পন্ন হয়নি।"
             }
         }
@@ -1949,6 +2033,14 @@ class QawmiViewModel(
             _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
             return
         }
+        val previous = _localAdminPostOverrides.value[post.id]
+        if (post.id.isNotBlank()) {
+            val updated = (previous ?: AdminPostOverride()).copy(
+                isVerifiedMadrasa = isVerified,
+                approvalStatus = approvalStatus
+            )
+            _localAdminPostOverrides.value = _localAdminPostOverrides.value + (post.id to updated)
+        }
         viewModelScope.launch {
             clearBanners()
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
@@ -1956,6 +2048,13 @@ class QawmiViewModel(
             result.onSuccess {
                 _feedbackBanner.value = "পোস্টের অনুমোদন অবস্থা হালনাগাদ হয়েছে।"
             }.onFailure { err ->
+                if (post.id.isNotBlank()) {
+                    _localAdminPostOverrides.value = if (previous == null) {
+                        _localAdminPostOverrides.value - post.id
+                    } else {
+                        _localAdminPostOverrides.value + (post.id to previous)
+                    }
+                }
                 _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ ব্যর্থ হয়েছে।"
             }
         }
@@ -1965,6 +2064,13 @@ class QawmiViewModel(
         if (!isAdminUser) {
             _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন বিজ্ঞপ্তি Boost করতে পারবেন।"
             return
+        }
+        val previous = _localAdminPostOverrides.value[post.id]
+        if (post.id.isNotBlank()) {
+            val updated = (previous ?: AdminPostOverride()).copy(
+                isBoosted = isBoosted
+            )
+            _localAdminPostOverrides.value = _localAdminPostOverrides.value + (post.id to updated)
         }
         viewModelScope.launch {
             clearBanners()
@@ -1977,6 +2083,13 @@ class QawmiViewModel(
                     "বিজ্ঞপ্তিটির Boosted অবস্থা সরানো হয়েছে।"
                 }
             }.onFailure { err ->
+                if (post.id.isNotBlank()) {
+                    _localAdminPostOverrides.value = if (previous == null) {
+                        _localAdminPostOverrides.value - post.id
+                    } else {
+                        _localAdminPostOverrides.value + (post.id to previous)
+                    }
+                }
                 _errorBanner.value = err.localizedMessage ?: "Boost অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
             }
         }
@@ -2044,6 +2157,11 @@ class QawmiViewModel(
             _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
             return
         }
+        val uidKey = user.id.ifBlank { user.userId }
+        val previous = _localAdminUserVerificationOverrides.value[uidKey]
+        if (uidKey.isNotBlank()) {
+            _localAdminUserVerificationOverrides.value = _localAdminUserVerificationOverrides.value + (uidKey to verified)
+        }
         viewModelScope.launch {
             clearBanners()
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
@@ -2057,6 +2175,13 @@ class QawmiViewModel(
                     "ব্যবহারকারী ব্লক / নিষ্ক্রিয় করা হয়েছে$tgSuffix"
                 }
             }.onFailure { err ->
+                if (uidKey.isNotBlank()) {
+                    _localAdminUserVerificationOverrides.value = if (previous == null) {
+                        _localAdminUserVerificationOverrides.value - uidKey
+                    } else {
+                        _localAdminUserVerificationOverrides.value + (uidKey to previous)
+                    }
+                }
                 _errorBanner.value = err.localizedMessage ?: "ব্যবহারকারীর অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
             }
         }
@@ -2067,6 +2192,11 @@ class QawmiViewModel(
             _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন আবেদনের অবস্থা পরিবর্তন করতে পারবেন।"
             return
         }
+        val subId = submission.id
+        val previous = _localAdminSubmissionStatusOverrides.value[subId]
+        if (subId.isNotBlank()) {
+            _localAdminSubmissionStatusOverrides.value = _localAdminSubmissionStatusOverrides.value + (subId to newStatus)
+        }
         viewModelScope.launch {
             clearBanners()
             val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
@@ -2074,6 +2204,13 @@ class QawmiViewModel(
             result.onSuccess {
                 _feedbackBanner.value = "আবেদনের অবস্থা হালনাগাদ হয়েছে এবং অ্যাডমিন অডিট লগে সংরক্ষিত হয়েছে।"
             }.onFailure { err ->
+                if (subId.isNotBlank()) {
+                    _localAdminSubmissionStatusOverrides.value = if (previous == null) {
+                        _localAdminSubmissionStatusOverrides.value - subId
+                    } else {
+                        _localAdminSubmissionStatusOverrides.value + (subId to previous)
+                    }
+                }
                 _errorBanner.value = err.localizedMessage ?: "আবেদনের অবস্থা পরিবর্তন ব্যর্থ হয়েছে।"
             }
         }
