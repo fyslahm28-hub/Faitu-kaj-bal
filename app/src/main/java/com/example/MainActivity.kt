@@ -53,6 +53,7 @@ import com.example.data.repository.QawmiRepository
 import com.example.ui.auth.AuthScreen
 import com.example.ui.screens.AppUpdatePromptOverlay
 import com.example.ui.screens.MainAppScaffold
+import com.example.ui.screens.PrayerTimesAndAzanScreen
 import com.example.ui.theme.ApplicationTheme
 import com.example.ui.theme.QawmiDeepGreen
 import com.example.ui.theme.QawmiSoftBg
@@ -169,7 +170,8 @@ class MainActivity : ComponentActivity() {
             val partnerName = intent.getStringExtra(QawmiNotificationHelper.EXTRA_OPEN_CHAT_PARTNER_NAME).orEmpty().trim()
             val openNotifs = intent.getBooleanExtra(QawmiNotificationHelper.EXTRA_OPEN_NOTIFICATIONS, false)
             val openSmoron = intent.getBooleanExtra(QawmiNotificationHelper.EXTRA_OPEN_AJKER_SMORON, false)
-            val openPrayer = intent.getBooleanExtra(PrayerAzanManager.EXTRA_OPEN_PRAYER_SCREEN, false)
+            val openPrayer = intent.getBooleanExtra(PrayerAzanManager.EXTRA_OPEN_PRAYER_SCREEN, false) ||
+                intent.data?.host == "prayer_schedule"
             val smoronId = intent.getStringExtra(QawmiNotificationHelper.EXTRA_AJKER_SMORON_ID).orEmpty().trim()
             if (partnerId.isNotBlank() || openNotifs || openSmoron || openPrayer) {
                 _deepLinkState.value = MainNotificationDeepLink(
@@ -232,6 +234,16 @@ fun AppNavigation(
     }
 
     if (resolvedAuth == null) {
+        if (deepLink?.openPrayerSchedule == true) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(QawmiSoftBg)
+            ) {
+                PrayerTimesAndAzanScreen()
+            }
+            return
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -287,6 +299,19 @@ fun AppNavigation(
     val user = currentUser
 
     if (user == null) {
+        if (deepLink?.openPrayerSchedule == true) {
+            androidx.activity.compose.BackHandler {
+                onDeepLinkConsumed()
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(QawmiSoftBg)
+            ) {
+                PrayerTimesAndAzanScreen()
+            }
+            return
+        }
         val lifecycleOwner = LocalLifecycleOwner.current
         val unauthScope = rememberCoroutineScope()
         val installedVersion = remember(context) { AppUpdateManagerHelper.getInstalledVersion(context) }

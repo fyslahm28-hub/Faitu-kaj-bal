@@ -27,8 +27,11 @@ class PrayerAzanAlarmReceiver : BroadcastReceiver() {
             Intent.ACTION_MY_PACKAGE_REPLACED,
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
-            ACTION_PRAYER_DAILY_RESCHEDULE -> {
+            Intent.ACTION_DATE_CHANGED,
+            ACTION_PRAYER_DAILY_RESCHEDULE,
+            ACTION_PRAYER_WIDGET_TRANSITION_REFRESH -> {
                 PrayerAzanManager.scheduleAllUpcomingPrayerAlarms(context)
+                PrayerTimeWidgetManager.updateAllWidgetsAndLockScreen(context)
             }
 
             ACTION_STOP_AZAN_PLAYBACK -> {
@@ -40,6 +43,7 @@ class PrayerAzanAlarmReceiver : BroadcastReceiver() {
                 val waqtKey = PrayerWaqtKey.fromId(waqtId)
                 PrayerAzanManager.triggerScheduledWaqtAzan(context, waqtKey)
                 PrayerAzanManager.scheduleAllUpcomingPrayerAlarms(context)
+                PrayerTimeWidgetManager.updateAllWidgetsAndLockScreen(context)
             }
 
             ACTION_PRAYER_PRE_REMINDER_ALARM -> {
@@ -47,6 +51,7 @@ class PrayerAzanAlarmReceiver : BroadcastReceiver() {
                 val waqtKey = PrayerWaqtKey.fromId(waqtId)
                 PrayerAzanManager.triggerScheduledPreWaqtReminder(context, waqtKey)
                 PrayerAzanManager.scheduleAllUpcomingPrayerAlarms(context)
+                PrayerTimeWidgetManager.updateAllWidgetsAndLockScreen(context)
             }
         }
     }
@@ -56,6 +61,7 @@ class PrayerAzanAlarmReceiver : BroadcastReceiver() {
         const val ACTION_PRAYER_PRE_REMINDER_ALARM = "com.example.action.PRAYER_PRE_REMINDER_ALARM"
         const val ACTION_STOP_AZAN_PLAYBACK = "com.example.action.STOP_AZAN_PLAYBACK"
         const val ACTION_PRAYER_DAILY_RESCHEDULE = "com.example.action.PRAYER_DAILY_RESCHEDULE"
+        const val ACTION_PRAYER_WIDGET_TRANSITION_REFRESH = "com.example.action.PRAYER_WIDGET_TRANSITION_REFRESH"
         const val EXTRA_WAQT_ID = "extra_prayer_waqt_id"
         const val EXTRA_SOUND_TYPE = "extra_azan_sound_type"
     }

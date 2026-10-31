@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">কওমি কর্মসংস্থান</string>
+    <string name="prayer_widget_small_title">নামাজের সময়সূচি (ছোট উইজেট)</string>
+    <string name="prayer_widget_small_desc">নির্বাচিত জেলা, পরবর্তী নামাজের লাইভ কাউন্টডাউন, তারিখ ও ৫ ওয়াক্তের সময়</string>
+    <string name="prayer_widget_medium_title">নামাজের সময়সূচি (মাঝারি উইজেট)</string>
+    <string name="prayer_widget_medium_desc">বাংলা, ইংরেজি ও হিজরি তারিখ, জেলা, পরবর্তী নামাজ হাইলাইট ও ৫ ওয়াক্তের সময়সূচি</string>
+    <string name="prayer_widget_large_title">নামাজের সময়সূচি (বড় উইজেট)</string>
+    <string name="prayer_widget_large_desc">পূর্ণাঙ্গ ৫ ওয়াক্ত নামাজের শুরু-শেষ সময়, ৩টি তারিখ, জেলা ও লাইভ কাউন্টডাউন</string>
 </resources>
+

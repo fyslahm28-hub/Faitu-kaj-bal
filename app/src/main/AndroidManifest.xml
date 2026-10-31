@@ -87,11 +87,49 @@
                 <action android:name="com.example.action.PRAYER_PRE_REMINDER_ALARM" />
                 <action android:name="com.example.action.STOP_AZAN_PLAYBACK" />
                 <action android:name="com.example.action.PRAYER_DAILY_RESCHEDULE" />
+                <action android:name="com.example.action.PRAYER_WIDGET_TRANSITION_REFRESH" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.TIME_SET" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
             </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".ui.util.PrayerTimeSmallWidgetProvider"
+            android:exported="true"
+            android:label="@string/prayer_widget_small_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/prayer_widget_small_info" />
+        </receiver>
+
+        <receiver
+            android:name=".ui.util.PrayerTimeMediumWidgetProvider"
+            android:exported="true"
+            android:label="@string/prayer_widget_medium_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/prayer_widget_medium_info" />
+        </receiver>
+
+        <receiver
+            android:name=".ui.util.PrayerTimeLargeWidgetProvider"
+            android:exported="true"
+            android:label="@string/prayer_widget_large_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/prayer_widget_large_info" />
         </receiver>
 
         <service

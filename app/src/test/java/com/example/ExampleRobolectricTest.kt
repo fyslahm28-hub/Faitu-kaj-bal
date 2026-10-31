@@ -2169,7 +2169,136 @@ class ExampleRobolectricTest {
             )
         )
     }
+
+    @Test
+    @Config(qualifiers = "w420dp-h1800dp")
+    fun `Live Prayer Time Small Medium and Large Widgets display 3 dates, district, 5 waqts, highlighted next prayer, live countdown, auto-update, and Lock Screen notification`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        org.robolectric.Shadows.shadowOf(context as android.app.Application)
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        com.example.ui.util.PrayerAzanManager.initWithContext(context)
+        com.example.ui.util.PrayerAzanManager.setManualDistrictSelection(context, "ঢাকা")
+
+        val fixedCal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("Asia/Dhaka")).apply {
+            set(2026, java.util.Calendar.OCTOBER, 30, 14, 15, 0) // 2:15 PM (Dhuhr active, Asr is next)
+        }
+        val dhakaSchedule = com.example.ui.util.PrayerAzanManager.computeDailyPrayerSchedule(
+            districtBangla = "ঢাকা",
+            calendar = fixedCal
+        )
+        assertEquals(com.example.ui.util.PrayerWaqtKey.ASR, dhakaSchedule.nextWaqtKey)
+
+        // 1. Verify Small, Medium, and Large Widgets render District, Bangla/English/Hijri dates, 5 Waqts, Highlighted Next Prayer, and Live Countdown
+        com.example.ui.util.PrayerWidgetSize.entries.forEach { widgetSize ->
+            val remoteViews = com.example.ui.util.PrayerTimeWidgetManager.buildRemoteViews(
+                context = context,
+                size = widgetSize,
+                schedule = dhakaSchedule
+            )
+            val parent = android.widget.FrameLayout(context)
+            val inflatedView = remoteViews.apply(context, parent)
+
+            val districtTv = inflatedView.findViewById<android.widget.TextView>(R.id.widget_district_name)
+            val hijriTv = inflatedView.findViewById<android.widget.TextView>(R.id.widget_hijri_date)
+            val banglaTv = inflatedView.findViewById<android.widget.TextView>(R.id.widget_bangla_date)
+            val englishTv = inflatedView.findViewById<android.widget.TextView>(R.id.widget_english_date)
+            val combinedDatesTv = inflatedView.findViewById<android.widget.TextView>(R.id.widget_dates_combined)
+            val nextPrayerTv = inflatedView.findViewById<android.widget.TextView>(R.id.widget_next_prayer_title)
+            val countdownTv = inflatedView.findViewById<android.widget.TextView>(R.id.widget_countdown_text)
+            val chronometer = inflatedView.findViewById<android.widget.Chronometer>(R.id.widget_countdown_chronometer)
+
+            assertTrue("${widgetSize.id} must show selected district ঢাকা", districtTv.text.toString().contains("ঢাকা"))
+            assertTrue("${widgetSize.id} must show Hijri date", hijriTv.text.toString().contains("হিজরি"))
+            assertTrue("${widgetSize.id} must show Bangla Ponjika date", banglaTv.text.toString().contains("বঙ্গাব্দ") || combinedDatesTv.text.toString().contains("বঙ্গাব্দ"))
+            assertTrue("${widgetSize.id} must show English/Gregorian date", englishTv.text.toString().isNotBlank() && combinedDatesTv.text.toString().isNotBlank())
+            assertTrue("${widgetSize.id} must highlight Next Prayer আসর", nextPrayerTv.text.toString().contains("আসর"))
+            assertTrue("${widgetSize.id} must show live countdown text", countdownTv.text.toString().contains("বাকি"))
+            assertTrue("${widgetSize.id} must include live Chronometer", chronometer != null)
+
+            // Verify all 5 waqts are displayed and next prayer (Asr) is highlighted
+            val fajrName = inflatedView.findViewById<android.widget.TextView>(R.id.widget_waqt_name_fajr).text.toString()
+            val dhuhrName = inflatedView.findViewById<android.widget.TextView>(R.id.widget_waqt_name_dhuhr).text.toString()
+            val asrName = inflatedView.findViewById<android.widget.TextView>(R.id.widget_waqt_name_asr).text.toString()
+            val maghribName = inflatedView.findViewById<android.widget.TextView>(R.id.widget_waqt_name_maghrib).text.toString()
+            val ishaName = inflatedView.findViewById<android.widget.TextView>(R.id.widget_waqt_name_isha).text.toString()
+
+            assertTrue(fajrName.contains("ফজর"))
+            assertTrue(dhuhrName.contains("যোহর"))
+            assertTrue("Next prayer Asr must be highlighted with marker", asrName.contains("★ আসর") || asrName.contains("▶ আসর"))
+            assertTrue(maghribName.contains("মাগরিব"))
+            assertTrue(ishaName.contains("এশা"))
+        }
+
+        // 2. Verify automatic update when district changes (e.g. সিলেট) or time advances to next waqt (Maghrib)
+        com.example.ui.util.PrayerAzanManager.setManualDistrictSelection(context, "সিলেট")
+        val eveningCal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("Asia/Dhaka")).apply {
+            set(2026, java.util.Calendar.OCTOBER, 30, 16, 45, 0) // 4:45 PM (Asr active, Maghrib is next)
+        }
+        val sylhetSchedule = com.example.ui.util.PrayerAzanManager.computeDailyPrayerSchedule(
+            districtBangla = com.example.ui.util.IslamicDateAndPrayerHelper.selectedDistrictFlow.value,
+            calendar = eveningCal
+        )
+        val updatedLargeViews = com.example.ui.util.PrayerTimeWidgetManager.buildRemoteViews(
+            context = context,
+            size = com.example.ui.util.PrayerWidgetSize.LARGE,
+            schedule = sylhetSchedule
+        )
+        val inflatedUpdated = updatedLargeViews.apply(context, android.widget.FrameLayout(context))
+        assertTrue(
+            inflatedUpdated.findViewById<android.widget.TextView>(R.id.widget_district_name)
+                .text.toString().contains("সিলেট")
+        )
+        assertTrue(
+            inflatedUpdated.findViewById<android.widget.TextView>(R.id.widget_next_prayer_title)
+                .text.toString().contains("মাগরিব")
+        )
+
+        // 3. Verify clicking the widget creates an Intent that opens exclusively the Prayer Times page
+        val openIntent = com.example.ui.util.PrayerTimeWidgetManager.createOpenPrayerScreenIntent(context, "widget_large")
+        assertTrue(openIntent.getBooleanExtra(com.example.ui.util.PrayerAzanManager.EXTRA_OPEN_PRAYER_SCREEN, false))
+        assertEquals("prayer_schedule", openIntent.data?.host)
+
+        // 4. Verify UI controls in PrayerTimesAndAzanScreen and Optional Lock Screen Notification
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1750.dp)) {
+                    com.example.ui.screens.PrayerTimesAndAzanScreen()
+                }
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("prayer_live_widget_and_lockscreen_card").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("add_prayer_widget_SMALL").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("add_prayer_widget_MEDIUM").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("add_prayer_widget_LARGE").assertIsDisplayed()
+
+        // Toggle Lock Screen Notification ON and verify public lock-screen notification is posted
+        val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNotifManager = org.robolectric.Shadows.shadowOf(notifManager)
+        composeTestRule.onNodeWithTag("prayer_lock_screen_notif_switch").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        assertTrue(com.example.ui.util.PrayerAzanManager.preferencesFlow.value.lockScreenNotificationEnabled)
+        val lockNotif = shadowNotifManager.getNotification(
+            com.example.ui.util.PrayerTimeWidgetManager.LOCK_SCREEN_PRAYER_NOTIFICATION_ID
+        )
+        assertTrue("Lock screen prayer notification must be posted when enabled", lockNotif != null)
+        assertEquals(android.app.Notification.VISIBILITY_PUBLIC, lockNotif!!.visibility)
+
+        // Toggle Lock Screen Notification OFF and verify it is removed
+        composeTestRule.onNodeWithTag("prayer_lock_screen_notif_switch").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(!com.example.ui.util.PrayerAzanManager.preferencesFlow.value.lockScreenNotificationEnabled)
+        assertEquals(
+            null,
+            shadowNotifManager.getNotification(
+                com.example.ui.util.PrayerTimeWidgetManager.LOCK_SCREEN_PRAYER_NOTIFICATION_ID
+            )
+        )
+    }
 }
+
 
 
 

@@ -214,6 +214,7 @@ data class PrayerSystemPreferences(
     val gpsLocationLabelBangla: String = "",
     val gpsLocationLabelEnglish: String = "",
     val respectSilentAndDndMode: Boolean = true,
+    val lockScreenNotificationEnabled: Boolean = false,
     val waqtConfigs: Map<PrayerWaqtKey, WaqtAzanConfig> = PrayerWaqtKey.entries.associateWith {
         WaqtAzanConfig(waqtKey = it)
     }
@@ -315,6 +316,7 @@ object PrayerAzanManager {
     private const val KEY_GPS_LABEL_BN = "gps_label_bn"
     private const val KEY_GPS_LABEL_EN = "gps_label_en"
     private const val KEY_RESPECT_SILENT_DND = "respect_silent_dnd"
+    private const val KEY_LOCK_SCREEN_NOTIF_ENABLED = "lock_screen_prayer_notif_enabled"
     private const val KEY_FIRED_HISTORY_SET = "fired_azan_history_keys"
 
     const val AZAN_CHANNEL_ID = "qawmi_prayer_azan_channel_v1"
@@ -325,6 +327,7 @@ object PrayerAzanManager {
 
     private const val ALARM_BASE_CODE_AZAN = 788_100
     private const val ALARM_BASE_CODE_PRE = 788_200
+    private const val ALARM_CODE_WIDGET_TRANSITION = 788_998
     private const val ALARM_CODE_DAILY_ROLLOVER = 788_999
 
     private val _preferencesFlow = MutableStateFlow(PrayerSystemPreferences())
@@ -410,6 +413,7 @@ object PrayerAzanManager {
             val gpsLabelBn = prefs.getString(KEY_GPS_LABEL_BN, "").orEmpty()
             val gpsLabelEn = prefs.getString(KEY_GPS_LABEL_EN, "").orEmpty()
             val respectSilent = prefs.getBoolean(KEY_RESPECT_SILENT_DND, true)
+            val lockScreenNotif = prefs.getBoolean(KEY_LOCK_SCREEN_NOTIF_ENABLED, false)
 
             val waqtMap = PrayerWaqtKey.entries.associateWith { waqt ->
                 val enabled = prefs.getBoolean("waqt_${waqt.id}_enabled", true)
@@ -437,6 +441,7 @@ object PrayerAzanManager {
                 gpsLocationLabelBangla = gpsLabelBn,
                 gpsLocationLabelEnglish = gpsLabelEn,
                 respectSilentAndDndMode = respectSilent,
+                lockScreenNotificationEnabled = lockScreenNotif,
                 waqtConfigs = waqtMap
             )
         } catch (_: Exception) {
@@ -460,6 +465,7 @@ object PrayerAzanManager {
                 .putString(KEY_GPS_LABEL_BN, prefsState.gpsLocationLabelBangla)
                 .putString(KEY_GPS_LABEL_EN, prefsState.gpsLocationLabelEnglish)
                 .putBoolean(KEY_RESPECT_SILENT_DND, prefsState.respectSilentAndDndMode)
+                .putBoolean(KEY_LOCK_SCREEN_NOTIF_ENABLED, prefsState.lockScreenNotificationEnabled)
 
             prefsState.waqtConfigs.forEach { (waqt, cfg) ->
                 editor.putBoolean("waqt_${waqt.id}_enabled", cfg.azanEnabled)
@@ -470,6 +476,7 @@ object PrayerAzanManager {
             editor.apply()
         } catch (_: Exception) {
         }
+        PrayerTimeWidgetManager.updateAllWidgetsAndLockScreen(context)
     }
 
     fun setMasterAzanEnabled(context: Context, enabled: Boolean) {
@@ -510,6 +517,11 @@ object PrayerAzanManager {
 
     fun setRespectSilentAndDndMode(context: Context, respect: Boolean) {
         val updated = _preferencesFlow.value.copy(respectSilentAndDndMode = respect)
+        savePreferencesToDisk(context, updated)
+    }
+
+    fun setLockScreenNotificationEnabled(context: Context, enabled: Boolean) {
+        val updated = _preferencesFlow.value.copy(lockScreenNotificationEnabled = enabled)
         savePreferencesToDisk(context, updated)
     }
 
@@ -1371,6 +1383,21 @@ object PrayerAzanManager {
                 pendingFlags
             )
             scheduleAlarmSafely(alarmManager, rolloverCal.timeInMillis, rolloverPending)
+
+            // Also schedule an exact widget & lock-screen refresh at the next waqt transition boundary
+            val nextTransitionMillis = nowMillis + (todaySchedule.totalRemainingSeconds.coerceAtLeast(5L) * 1000L) + 1_500L
+            val widgetRefreshIntent = Intent(appContext, PrayerAzanAlarmReceiver::class.java).apply {
+                action = PrayerAzanAlarmReceiver.ACTION_PRAYER_WIDGET_TRANSITION_REFRESH
+            }
+            val widgetRefreshPending = PendingIntent.getBroadcast(
+                appContext,
+                ALARM_CODE_WIDGET_TRANSITION,
+                widgetRefreshIntent,
+                pendingFlags
+            )
+            scheduleAlarmSafely(alarmManager, nextTransitionMillis, widgetRefreshPending)
+
+            PrayerTimeWidgetManager.updateAllWidgetsAndLockScreen(appContext, nowCal)
         } catch (_: Exception) {
         }
     }

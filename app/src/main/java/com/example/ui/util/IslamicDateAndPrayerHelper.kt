@@ -215,6 +215,9 @@ object IslamicDateAndPrayerHelper {
                 ?.edit()
                 ?.putString(KEY_SELECTED_DISTRICT, valid)
                 ?.apply()
+            if (context != null) {
+                PrayerTimeWidgetManager.updateAllWidgetsAndLockScreen(context)
+            }
         } catch (_: Exception) {
         }
     }
@@ -233,6 +236,9 @@ object IslamicDateAndPrayerHelper {
                 ?.putString(KEY_SELECTED_DISTRICT, valid)
                 ?.putString(KEY_FAVORITE_DISTRICTS, updatedFavs.joinToString(","))
                 ?.apply()
+            if (context != null) {
+                PrayerTimeWidgetManager.updateAllWidgetsAndLockScreen(context)
+            }
         } catch (_: Exception) {
         }
     }
