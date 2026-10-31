@@ -249,8 +249,18 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
+    private data class PostEngagementOverride(
+        val userReactions: Map<String, String>? = null,
+        val userReactionNames: Map<String, String>? = null,
+        val commentCountDelta: Int = 0,
+        val minExpectedShareCount: Int = 0
+    )
+
     private val _adminDataRefreshToken = MutableStateFlow(0)
     private val _localOptimisticPosts = MutableStateFlow<List<FeedPost>>(emptyList())
+    private val _localPostEngagementOverrides = MutableStateFlow<Map<String, PostEngagementOverride>>(emptyMap())
+    private val _localOptimisticComments = MutableStateFlow<List<FeedComment>>(emptyList())
+    private val _locallyDeletedCommentIds = MutableStateFlow<Set<String>>(emptySet())
     private val _localOptimisticSubmissions = MutableStateFlow<List<KhedmotSubmission>>(emptyList())
     private val _localOptimisticMessages = MutableStateFlow<List<DirectMessage>>(emptyList())
 
@@ -258,12 +268,50 @@ class QawmiViewModel(
         _adminDataRefreshToken.flatMapLatest {
             repository.observePublicFeedPosts()
         },
-        _localOptimisticPosts
-    ) { remotePosts, optimisticPosts ->
+        _localOptimisticPosts,
+        _localPostEngagementOverrides
+    ) { remotePosts, optimisticPosts, engagementOverrides ->
         val remoteIds = remotePosts.map { it.id }.toSet()
         val pendingOptimistic = optimisticPosts.filter { it.id.isNotBlank() && it.id !in remoteIds }
         val merged = (pendingOptimistic + remotePosts)
             .distinctBy { it.id }
+            .map { post ->
+                val override = engagementOverrides[post.id]
+                if (override == null) {
+                    post
+                } else {
+                    val mergedReactions = if (override.userReactions != null && currentUserId.isNotBlank()) {
+                        val baseMap = post.userReactions.toMutableMap()
+                        val myOverrideReaction = override.userReactions[currentUserId]
+                        if (myOverrideReaction.isNullOrBlank()) {
+                            baseMap.remove(currentUserId)
+                        } else {
+                            baseMap[currentUserId] = myOverrideReaction
+                        }
+                        baseMap
+                    } else {
+                        post.userReactions
+                    }
+                    val mergedNames = if (override.userReactionNames != null && currentUserId.isNotBlank()) {
+                        val baseNames = post.userReactionNames.toMutableMap()
+                        val myOverrideName = override.userReactionNames[currentUserId]
+                        if (myOverrideName.isNullOrBlank()) {
+                            baseNames.remove(currentUserId)
+                        } else {
+                            baseNames[currentUserId] = myOverrideName
+                        }
+                        baseNames
+                    } else {
+                        post.userReactionNames
+                    }
+                    post.copy(
+                        userReactions = mergedReactions,
+                        userReactionNames = mergedNames,
+                        commentCount = (post.commentCount + override.commentCountDelta).coerceAtLeast(0),
+                        shareCount = maxOf(post.shareCount, override.minExpectedShareCount)
+                    )
+                }
+            }
             .sortedWith(
                 compareByDescending<FeedPost> { it.isBoosted }
                     .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
@@ -281,14 +329,33 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
-    val postCommentsState: StateFlow<UiState<List<FeedComment>>> = _adminDataRefreshToken
-        .flatMapLatest {
+    val postCommentsState: StateFlow<UiState<List<FeedComment>>> = combine(
+        _adminDataRefreshToken.flatMapLatest {
             repository.observePublicPostComments()
-                .map<List<FeedComment>, UiState<List<FeedComment>>> { UiState.Success(it) }
-                .catch { e ->
-                    Log.w(TAG, "Error observing post comments", e)
-                    emit(UiState.Error(formatFirestoreErrorBangla(e, "কমেন্ট লোড করা যায়নি")))
-                }
+        },
+        _localOptimisticComments,
+        _locallyDeletedCommentIds
+    ) { remoteComments, optimisticComments, deletedIds ->
+        val optimisticById = optimisticComments.associateBy { it.id }
+        val remoteIds = remoteComments.map { it.id }.toSet()
+        val pendingOptimistic = optimisticComments.filter { it.id.isNotBlank() && it.id !in remoteIds && it.id !in deletedIds }
+        val merged = (remoteComments.map { remote -> optimisticById[remote.id] ?: remote } + pendingOptimistic)
+            .filter { it.id.isNotBlank() && it.id !in deletedIds }
+            .distinctBy { it.id }
+            .sortedWith(
+                compareBy<FeedComment> { it.createdAt ?: Timestamp(0, 0) }
+                    .thenBy { it.id }
+            )
+        UiState.Success(merged) as UiState<List<FeedComment>>
+    }
+        .catch { e ->
+            Log.w(TAG, "Error observing post comments", e)
+            val fallback = _localOptimisticComments.value.filterNot { it.id in _locallyDeletedCommentIds.value }
+            if (fallback.isNotEmpty()) {
+                emit(UiState.Success(fallback))
+            } else {
+                emit(UiState.Error(formatFirestoreErrorBangla(e, "কমেন্ট লোড করা যায়নি")))
+            }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
@@ -1003,10 +1070,37 @@ class QawmiViewModel(
     }
 
     fun togglePostReaction(post: FeedPost, reactionCode: String) {
+        val reactorName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই").trim().ifBlank { "সম্মানিত সদস্য" }.take(120)
+        val previousOverride = _localPostEngagementOverrides.value[post.id]
+        val currentReactions = (previousOverride?.userReactions ?: post.userReactions).toMutableMap()
+        val currentNames = (previousOverride?.userReactionNames ?: post.userReactionNames).toMutableMap()
+        val existingReaction = currentReactions[currentUserId].orEmpty()
+
+        if (reactionCode.isBlank() || existingReaction == reactionCode) {
+            currentReactions.remove(currentUserId)
+            currentNames.remove(currentUserId)
+        } else if (currentUserId.isNotBlank()) {
+            currentReactions[currentUserId] = reactionCode
+            currentNames[currentUserId] = reactorName
+        }
+
+        val updatedOverride = (previousOverride ?: PostEngagementOverride()).copy(
+            userReactions = currentReactions,
+            userReactionNames = currentNames
+        )
+        _localPostEngagementOverrides.value = _localPostEngagementOverrides.value + (post.id to updatedOverride)
+
         viewModelScope.launch {
-            val reactorName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
             val res = repository.togglePostReaction(post, reactionCode, reactorName)
             res.onFailure { err ->
+                // Roll back optimistic reaction override on failure
+                val rollbackMap = _localPostEngagementOverrides.value.toMutableMap()
+                if (previousOverride == null) {
+                    rollbackMap.remove(post.id)
+                } else {
+                    rollbackMap[post.id] = previousOverride
+                }
+                _localPostEngagementOverrides.value = rollbackMap
                 _errorBanner.value = err.localizedMessage ?: "রিঅ্যাকশন যুক্ত করা যায়নি।"
             }
         }
@@ -1018,54 +1112,111 @@ class QawmiViewModel(
         parentCommentId: String = "",
         replyToAuthorName: String = ""
     ) {
-        if (text.trim().isBlank()) {
+        val cleanText = text.trim()
+        if (cleanText.isBlank()) {
             _errorBanner.value = "অনুগ্রহ করে কমেন্ট লিখুন।"
             return
         }
+        val authorName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
+        val authorPhoto = ProfilePhotoHelper.compactSenderPhotoForMessage(resolveActorPhotoUrl())
+        val tempCommentId = "temp_comment_${System.currentTimeMillis()}"
+        val optimisticComment = FeedComment(
+            id = tempCommentId,
+            postId = post.id,
+            authorId = currentUserId,
+            authorName = authorName,
+            authorPhotoUrl = authorPhoto,
+            text = cleanText,
+            parentCommentId = parentCommentId.trim(),
+            replyToAuthorName = replyToAuthorName.trim(),
+            isEdited = false,
+            visibility = "PUBLIC",
+            createdAt = Timestamp.now(),
+            updatedAt = Timestamp.now()
+        )
+        _localOptimisticComments.value = (_localOptimisticComments.value + optimisticComment).distinctBy { it.id }
+
+        val prevOverride = _localPostEngagementOverrides.value[post.id] ?: PostEngagementOverride()
+        _localPostEngagementOverrides.value = _localPostEngagementOverrides.value + (
+            post.id to prevOverride.copy(commentCountDelta = prevOverride.commentCountDelta + 1)
+            )
+
         viewModelScope.launch {
-            val authorName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
-            val authorPhoto = resolveActorPhotoUrl()
             val res = repository.addPostComment(
                 post = post,
                 authorName = authorName,
                 authorPhotoUrl = authorPhoto,
-                text = text.trim(),
+                text = cleanText,
                 parentCommentId = parentCommentId,
                 replyToAuthorName = replyToAuthorName
             )
-            res.onSuccess {
+            res.onSuccess { realCommentId ->
+                _localOptimisticComments.value = _localOptimisticComments.value
+                    .filterNot { it.id == tempCommentId } +
+                    optimisticComment.copy(id = realCommentId)
+                val latestMap = _localPostEngagementOverrides.value.toMutableMap()
+                val cur = latestMap[post.id]
+                if (cur != null) {
+                    val newDelta = (cur.commentCountDelta - 1).coerceAtLeast(0)
+                    latestMap[post.id] = cur.copy(commentCountDelta = newDelta)
+                    _localPostEngagementOverrides.value = latestMap
+                }
                 _feedbackBanner.value = if (parentCommentId.isNotBlank()) {
                     "আপনার উত্তর যুক্ত হয়েছে।"
                 } else {
                     "আপনার কমেন্ট যুক্ত হয়েছে।"
                 }
             }.onFailure { err ->
+                _localOptimisticComments.value = _localOptimisticComments.value.filterNot { it.id == tempCommentId }
+                val latestMap = _localPostEngagementOverrides.value.toMutableMap()
+                val cur = latestMap[post.id]
+                if (cur != null) {
+                    val newDelta = (cur.commentCountDelta - 1).coerceAtLeast(0)
+                    latestMap[post.id] = cur.copy(commentCountDelta = newDelta)
+                    _localPostEngagementOverrides.value = latestMap
+                }
                 _errorBanner.value = err.localizedMessage ?: "কমেন্ট যুক্ত করা যায়নি।"
             }
         }
     }
 
     fun editPostComment(commentId: String, newText: String) {
-        if (newText.trim().isBlank()) {
+        val cleanText = newText.trim()
+        if (cleanText.isBlank()) {
             _errorBanner.value = "কমেন্ট খালি রাখা যাবে না।"
             return
         }
+        val existingComment = ((postCommentsState.value as? UiState.Success)?.data ?: emptyList())
+            .firstOrNull { it.id == commentId }
+        if (existingComment != null) {
+            val editedOptimistic = existingComment.copy(
+                text = cleanText,
+                isEdited = true,
+                updatedAt = Timestamp.now()
+            )
+            _localOptimisticComments.value = _localOptimisticComments.value
+                .filterNot { it.id == commentId } + editedOptimistic
+        }
         viewModelScope.launch {
-            val res = repository.editPostComment(commentId, newText.trim())
+            val res = repository.editPostComment(commentId, cleanText)
             res.onSuccess {
                 _feedbackBanner.value = "কমেন্ট সম্পাদনা করা হয়েছে।"
             }.onFailure { err ->
+                _localOptimisticComments.value = _localOptimisticComments.value.filterNot { it.id == commentId }
                 _errorBanner.value = err.localizedMessage ?: "কমেন্ট সম্পাদনা করা যায়নি।"
             }
         }
     }
 
     fun deletePostComment(commentId: String, postId: String, currentCommentCount: Int) {
+        _locallyDeletedCommentIds.value = _locallyDeletedCommentIds.value + commentId
+        _localOptimisticComments.value = _localOptimisticComments.value.filterNot { it.id == commentId }
         viewModelScope.launch {
             val res = repository.deletePostComment(commentId, postId, currentCommentCount)
             res.onSuccess {
                 _feedbackBanner.value = "কমেন্ট মুছে ফেলা হয়েছে।"
             }.onFailure { err ->
+                _locallyDeletedCommentIds.value = _locallyDeletedCommentIds.value - commentId
                 _errorBanner.value = err.localizedMessage ?: "কমেন্ট মুছে ফেলা যায়নি।"
             }
         }
@@ -1074,8 +1225,21 @@ class QawmiViewModel(
     fun sharePostInApp(post: FeedPost, caption: String) {
         runSubmittingAction {
             val sharerName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
-            val sharerPhoto = resolveActorPhotoUrl()
+            val sharerPhoto = ProfilePhotoHelper.compactSenderPhotoForMessage(resolveActorPhotoUrl())
             val sharerDistrict = (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
+            val targetOriginalId = post.sharedPostId.ifBlank { post.id }
+            val targetOriginalAuthorId = post.sharedAuthorId.ifBlank { post.authorId }
+            val targetOriginalAuthorName = post.sharedAuthorName.ifBlank { post.authorName.ifBlank { post.title } }
+            val targetOriginalTitle = post.sharedTitle.ifBlank { post.title }
+            val targetOriginalDesc = post.sharedDescription.ifBlank {
+                buildString {
+                    if (post.designation.isNotBlank()) append("পদ/বিভাগ: ${post.designation} | ")
+                    if (post.district.isNotBlank()) append("জেলা: ${post.district} | ")
+                    append(post.description)
+                }
+            }
+            val targetOriginalType = post.sharedPostType.ifBlank { post.postType }
+
             val res = repository.shareFeedPostInApp(
                 originalPost = post,
                 sharerName = sharerName,
@@ -1083,7 +1247,42 @@ class QawmiViewModel(
                 sharerDistrict = sharerDistrict,
                 shareCaption = caption
             )
-            res.onSuccess {
+            res.onSuccess { newSharedPostId ->
+                if (newSharedPostId.isNotBlank()) {
+                    val optimisticSharedPost = FeedPost(
+                        id = newSharedPostId,
+                        authorId = currentUserId,
+                        authorName = sharerName,
+                        authorPhotoUrl = sharerPhoto,
+                        postType = "GENERAL_POST",
+                        title = caption.trim().ifBlank { "$targetOriginalAuthorName-এর পোস্ট শেয়ার করেছেন" }.take(200),
+                        district = sharerDistrict.ifBlank { post.district },
+                        upazilaOrLocation = post.upazilaOrLocation,
+                        designation = post.designation.ifBlank { "দ্বীনি খেদমত শেয়ার" },
+                        qualification = post.qualification,
+                        salaryOrExperience = post.salaryOrExperience,
+                        deadlineOrPreferredDistricts = post.deadlineOrPreferredDistricts,
+                        description = caption.trim(),
+                        contactNumber = post.contactNumber,
+                        khedmotCategories = post.khedmotCategories,
+                        customCategory = post.customCategory,
+                        sharedPostId = targetOriginalId,
+                        sharedAuthorId = targetOriginalAuthorId,
+                        sharedAuthorName = targetOriginalAuthorName,
+                        sharedTitle = targetOriginalTitle,
+                        sharedDescription = targetOriginalDesc,
+                        sharedPostType = targetOriginalType,
+                        visibility = "PUBLIC",
+                        createdAt = Timestamp.now(),
+                        updatedAt = Timestamp.now()
+                    )
+                    _localOptimisticPosts.value = (listOf(optimisticSharedPost) + _localOptimisticPosts.value).distinctBy { it.id }
+                }
+                val prevOverride = _localPostEngagementOverrides.value[post.id] ?: PostEngagementOverride()
+                val newExpectedShares = maxOf(post.shareCount + 1, prevOverride.minExpectedShareCount + 1)
+                _localPostEngagementOverrides.value = _localPostEngagementOverrides.value + (
+                    post.id to prevOverride.copy(minExpectedShareCount = newExpectedShares)
+                    )
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি।"

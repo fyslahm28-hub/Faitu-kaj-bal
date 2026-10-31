@@ -550,18 +550,32 @@ service cloud.firestore {
                        (incoming().get('isBoosted', false) == false || isAdmin()) &&
                        isValidFeedPost(incoming());
 
+      function isValidFeedPostEngagementUpdate(inc, ext) {
+        let diffKeys = inc.diff(ext).affectedKeys();
+        return diffKeys.hasOnly([
+                 'userReactions', 'userReactionNames', 'commentCount', 'shareCount', 'updatedAt'
+               ]) &&
+               (inc.get('userReactions', {}) is map && inc.get('userReactions', {}).size() <= 500) &&
+               (inc.get('userReactionNames', {}) is map && inc.get('userReactionNames', {}).size() <= 500) &&
+               (inc.get('commentCount', 0) is int && inc.get('commentCount', 0) >= 0 && inc.get('commentCount', 0) <= 100000) &&
+               (inc.get('shareCount', 0) is int && inc.get('shareCount', 0) >= 0 && inc.get('shareCount', 0) <= 100000) &&
+               isValidTimestamp(inc.updatedAt);
+      }
+
       function canUpdateFeedPost(inc, ext) {
         let diffKeys = inc.diff(ext).affectedKeys();
         let boostUnchanged = inc.get('isBoosted', false) == ext.get('isBoosted', false);
-        let statusUnchanged = inc.approvalStatus == ext.approvalStatus && inc.isVerifiedMadrasa == ext.isVerifiedMadrasa && boostUnchanged;
+        let statusUnchanged = inc.get('approvalStatus', 'APPROVED') == ext.get('approvalStatus', 'APPROVED') &&
+                              inc.get('isVerifiedMadrasa', false) == ext.get('isVerifiedMadrasa', false) &&
+                              boostUnchanged;
         let incReactions = inc.get('userReactions', {});
         let extReactions = ext.get('userReactions', {});
         let incReactionNames = inc.get('userReactionNames', {});
         let extReactionNames = ext.get('userReactionNames', {});
-        return inc.authorId == ext.authorId &&
-               inc.postType == ext.postType &&
-               inc.createdAt == ext.createdAt && (
-                 (request.auth.uid == ext.authorId &&
+        return inc.get('authorId', '') == ext.get('authorId', '') &&
+               inc.get('postType', '') == ext.get('postType', '') &&
+               inc.get('createdAt', request.time) == ext.get('createdAt', request.time) && (
+                 (request.auth.uid == ext.get('authorId', '') &&
                   statusUnchanged &&
                   diffKeys.hasOnly([
                     'authorName', 'authorPhotoUrl', 'title', 'district', 'upazilaOrLocation',
@@ -588,8 +602,8 @@ service cloud.firestore {
 
       allow update: if isSignedIn() &&
                        isValidId(postId) &&
-                       isValidFeedPost(incoming()) &&
-                       canUpdateFeedPost(incoming(), existing());
+                       canUpdateFeedPost(incoming(), existing()) &&
+                       (isValidFeedPost(incoming()) || isValidFeedPostEngagementUpdate(incoming(), existing()));
 
       allow delete: if isSignedIn() && isValidId(postId) && (existing().authorId == request.auth.uid || isAdmin());
     }

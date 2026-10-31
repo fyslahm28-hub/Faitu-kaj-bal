@@ -900,6 +900,153 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             savedPost.imageUrls.all { it.startsWith("https://") && it.length < 300 }
         )
     }
+
+    @Test
+    fun publishApplication_submitApplication_andLiveReactionsCommentsShares_syncAcrossUsersInRealTime() = runBlocking {
+        // 1. User A (Seeker) publishes a SEEKER_APPLICATION with a large profile avatar -> goes live to everyone fast
+        val userAEmail = "seeker_live_${UUID.randomUUID()}@test.com"
+        val userAUid = signInTestUser(userAEmail)
+        val repoA = QawmiRepository(firestore, auth)
+
+        val largeAvatarDataUrl = "data:image/jpeg;base64," + "B".repeat(90_000)
+        val appCreateRes = withTimeout(5_000L) {
+            repoA.createFeedPost(
+                authorName = "মাওলানা তানভীর আহমদ",
+                postType = "SEEKER_APPLICATION",
+                title = "মুহাদ্দিস ও ফিকহ বিভাগে খেদমতপ্রার্থী",
+                district = "ঢাকা",
+                upazilaOrLocation = "যাত্রাবাড়ী",
+                designation = "মুহাদ্দিস",
+                qualification = "দাওরায়ে হাদিস ও ইফতা",
+                salaryOrExperience = "৫ বছর",
+                deadlineOrPreferredDistricts = "ঢাকা, নারায়ণগঞ্জ",
+                description = "সহীহ বুখারী ও ফিকহুল ইসলামীর দরস দানে অভিজ্ঞ।",
+                contactNumber = "01711009988",
+                authorPhotoUrl = largeAvatarDataUrl,
+                khedmotCategories = listOf("কিতাব বিভাগ", "ইফতা বিভাগ")
+            )
+        }
+        assertTrue("Application post creation should succeed rapidly: ${appCreateRes.exceptionOrNull()}", appCreateRes.isSuccess)
+        val applicationPostId = appCreateRes.getOrThrow()
+
+        // 2. User B (Madrasa Muhtamim) signs in and immediately sees User A's published application online
+        val userBEmail = "muhtamim_live_${UUID.randomUUID()}@test.com"
+        val userBUid = signInTestUser(userBEmail)
+        val repoB = QawmiRepository(firestore, auth)
+
+        val feedForUserB = withTimeout(5_000L) {
+            repoB.observePublicFeedPosts().first { list -> list.any { it.id == applicationPostId } }
+        }
+        val onlineApplicationPost = feedForUserB.first { it.id == applicationPostId }
+        assertEquals("মুহাদ্দিস ও ফিকহ বিভাগে খেদমতপ্রার্থী", onlineApplicationPost.title)
+        assertEquals(userAUid, onlineApplicationPost.authorId)
+        assertTrue(
+            "Compacted authorPhotoUrl on feed_posts must be <= 12,000 chars",
+            onlineApplicationPost.authorPhotoUrl.length <= 12_000
+        )
+
+        // 3. User B reacts ("MASHALLAH"), comments, and shares User A's application post live online
+        val reactRes = withTimeout(4_000L) {
+            repoB.togglePostReaction(
+                post = onlineApplicationPost,
+                reactionCode = "MASHALLAH",
+                reactorName = "মুফতি আব্দুল্লাহ (মুহতামিম)"
+            )
+        }
+        assertTrue("togglePostReaction should succeed: ${reactRes.exceptionOrNull()}", reactRes.isSuccess)
+
+        val commentRes = withTimeout(4_000L) {
+            repoB.addPostComment(
+                post = onlineApplicationPost,
+                authorName = "মুফতি আব্দুল্লাহ (মুহতামিম)",
+                authorPhotoUrl = largeAvatarDataUrl,
+                text = "মাশাআল্লাহ, আমাদের মাদরাসার জন্য আপনার সাথে যোগাযোগ করতে আগ্রহী।"
+            )
+        }
+        assertTrue("addPostComment should succeed: ${commentRes.exceptionOrNull()}", commentRes.isSuccess)
+        val commentId = commentRes.getOrThrow()
+
+        val shareRes = withTimeout(5_000L) {
+            repoB.shareFeedPostInApp(
+                originalPost = onlineApplicationPost,
+                sharerName = "মুফতি আব্দুল্লাহ (মুহতামিম)",
+                sharerPhotoUrl = largeAvatarDataUrl,
+                sharerDistrict = "ঢাকা",
+                shareCaption = "উপযুক্ত ও অভিজ্ঞ উস্তাযের আবেদনটি সবাই দেখুন।"
+            )
+        }
+        assertTrue("shareFeedPostInApp should succeed: ${shareRes.exceptionOrNull()}", shareRes.isSuccess)
+        val sharedPostId = shareRes.getOrThrow()
+
+        // 4. User B also publishes a JOB_CIRCULAR so User A can submit an application to it
+        val circularRes = withTimeout(5_000L) {
+            repoB.createFeedPost(
+                authorName = "জামিয়া রাহমানিয়া ঢাকা",
+                postType = "JOB_CIRCULAR",
+                title = "জরুরি মুহাদ্দিস নিয়োগ বিজ্ঞপ্তি",
+                district = "ঢাকা",
+                upazilaOrLocation = "মোহাম্মদপুর",
+                designation = "মুহাদ্দিস",
+                qualification = "দাওরায়ে হাদিস ও ইফতা",
+                salaryOrExperience = "আলোচনা সাপেক্ষ",
+                deadlineOrPreferredDistricts = "চলমান",
+                description = "অভিজ্ঞ উস্তায আবশ্যক।",
+                contactNumber = "01811223344"
+            )
+        }
+        assertTrue("Circular post creation should succeed: ${circularRes.exceptionOrNull()}", circularRes.isSuccess)
+        val circularPostId = circularRes.getOrThrow()
+
+        // 5. Switch back to User A and verify live reaction, live comment, live shareCount, shared post, and circular visibility
+        signInTestUser(userAEmail)
+        val updatedFeedForA = withTimeout(5_000L) {
+            repoA.observePublicFeedPosts().first { list ->
+                val appPost = list.firstOrNull { it.id == applicationPostId }
+                val hasShared = list.any { it.id == sharedPostId }
+                val hasCircular = list.any { it.id == circularPostId }
+                appPost != null &&
+                    appPost.userReactions[userBUid] == "MASHALLAH" &&
+                    appPost.commentCount >= 1 &&
+                    appPost.shareCount >= 1 &&
+                    hasShared &&
+                    hasCircular
+            }
+        }
+        val syncedAppPost = updatedFeedForA.first { it.id == applicationPostId }
+        assertEquals("MASHALLAH", syncedAppPost.userReactions[userBUid])
+        assertEquals("মুফতি আব্দুল্লাহ (মুহতামিম)", syncedAppPost.userReactionNames[userBUid])
+        assertEquals(1, syncedAppPost.commentCount)
+        assertEquals(1, syncedAppPost.shareCount)
+
+        val liveCommentsForA = withTimeout(5_000L) {
+            repoA.observePublicPostComments().first { list -> list.any { it.id == commentId } }
+        }
+        val syncedComment = liveCommentsForA.first { it.id == commentId }
+        assertEquals("মাশাআল্লাহ, আমাদের মাদরাসার জন্য আপনার সাথে যোগাযোগ করতে আগ্রহী।", syncedComment.text)
+
+        // 6. User A submits an application (submitApplicationToCircular) to User B's circular -> completes rapidly and syncs live
+        val circularPost = updatedFeedForA.first { it.id == circularPostId }
+        val submitRes = withTimeout(5_000L) {
+            repoA.submitApplicationToCircular(
+                post = circularPost,
+                applicantName = "মাওলানা তানভীর আহমদ",
+                applicantQualification = "দাওরায়ে হাদিস ও ইফতা",
+                applicantExperience = "৫ বছর",
+                applicantPhone = "01711009988",
+                coverNote = "মুহতারাম, আমি উক্ত খেদমতে আগ্রহী।"
+            )
+        }
+        assertTrue("submitApplicationToCircular should succeed rapidly: ${submitRes.exceptionOrNull()}", submitRes.isSuccess)
+        val submissionId = submitRes.getOrThrow()
+
+        // Verify User B receives the submitted application live online
+        signInTestUser(userBEmail)
+        val receivedByB = withTimeout(5_000L) {
+            repoB.observeReceivedSubmissions(userBUid).first { list -> list.any { it.id == submissionId } }
+        }
+        assertEquals("মাওলানা তানভীর আহমদ", receivedByB.first { it.id == submissionId }.applicantName)
+    }
 }
+
 
 

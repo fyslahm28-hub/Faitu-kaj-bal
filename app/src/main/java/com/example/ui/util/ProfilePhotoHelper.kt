@@ -428,8 +428,9 @@ object ProfilePhotoHelper {
                 val fileName = "media_${index}_${System.currentTimeMillis()}.$ext"
                 val storagePath = "feed_posts/$safeAuthor/$safePostId/$fileName"
 
-                // Attempt upload to Firebase Storage first
-                val uploadedDownloadUrl = if (decodedBytes != null && decodedBytes.isNotEmpty()) {
+                // Attempt upload to Firebase Storage only for video payloads;
+                // for images, offload immediately to /feed_post_attachments without blocking on unprovisioned Storage.
+                val uploadedDownloadUrl = if (isVideo && decodedBytes != null && decodedBytes.isNotEmpty()) {
                     tryUploadBytesToFirebaseStorage(
                         storagePath = storagePath,
                         bytes = decodedBytes,
@@ -492,7 +493,7 @@ object ProfilePhotoHelper {
             val ext = if (isVideoUri) "mp4" else "jpg"
             val fileName = "media_${index}_${System.currentTimeMillis()}.$ext"
             val storagePath = "feed_posts/$safeAuthor/$safePostId/$fileName"
-            val uploadedFromUri = if (System.currentTimeMillis() < storageUnavailableUntilMs.get()) {
+            val uploadedFromUri = if (!isVideoUri || System.currentTimeMillis() < storageUnavailableUntilMs.get()) {
                 null
             } else {
                 try {
@@ -535,51 +536,15 @@ object ProfilePhotoHelper {
     }
 
     /**
-     * Ensures `authorPhotoUrl` stored on `/feed_posts/{postId}` stays compact (`<= 45 KB`) or
-     * is uploaded to Firebase Storage so it never contributes hundreds of KB to feed post documents.
+     * Synchronously ensures `authorPhotoUrl` stored on `/feed_posts/{postId}` stays compact (`<= 12 KB`)
+     * without blocking on unprovisioned Firebase Storage uploads, so feed post publishing completes fast
+     * even on slow mobile networks.
      */
-    suspend fun uploadOrCompactAuthorPhotoForFeedPost(
+    fun uploadOrCompactAuthorPhotoForFeedPost(
         authorPhotoUrl: String,
-        authorId: String
+        @Suppress("UNUSED_PARAMETER") authorId: String = ""
     ): String {
-        val trimmed = authorPhotoUrl.trim()
-        if (trimmed.isBlank()) return ""
-        if (trimmed.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) return trimmed
-        if (trimmed.startsWith("http://", ignoreCase = true) ||
-            trimmed.startsWith("https://", ignoreCase = true) ||
-            trimmed.startsWith("preset:", ignoreCase = true)
-        ) {
-            return trimmed.take(2000)
-        }
-        if (trimmed.startsWith("data:image", ignoreCase = true)) {
-            val safeAuthor = authorId.ifBlank { "user" }.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
-            val commaIdx = trimmed.indexOf(',')
-            if (commaIdx != -1) {
-                val bytes = try {
-                    Base64.decode(trimmed.substring(commaIdx + 1), Base64.DEFAULT)
-                } catch (_: Exception) {
-                    null
-                }
-                if (bytes != null && bytes.isNotEmpty()) {
-                    val uploadedUrl = tryUploadBytesToFirebaseStorage(
-                        storagePath = "profile_photos/$safeAuthor/avatar_feed.jpg",
-                        bytes = bytes,
-                        mimeType = "image/jpeg",
-                        customMetadata = mapOf("authorId" to safeAuthor)
-                    )
-                    if (!uploadedUrl.isNullOrBlank()) {
-                        return uploadedUrl
-                    }
-                }
-            }
-            val compacted = ensureDataUrlFitsBudget(trimmed, MAX_INLINE_AVATAR_CHARS_IN_POST)
-            return if (compacted.length <= MAX_INLINE_AVATAR_CHARS_IN_POST) {
-                compacted
-            } else {
-                ""
-            }
-        }
-        return trimmed.take(MAX_INLINE_AVATAR_CHARS_IN_POST)
+        return compactSenderPhotoForMessage(authorPhotoUrl)
     }
 
     private const val MAX_INLINE_AVATAR_CHARS_IN_MESSAGE = 12_000

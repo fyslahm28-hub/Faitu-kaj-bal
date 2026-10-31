@@ -91,12 +91,14 @@ class QawmiRepository(
         mapper: (QuerySnapshot) -> List<T>
     ): Flow<List<T>> = channelFlow {
         var hasEmittedAny = false
+        var listenerHasEmitted = false
         val emitLock = Any()
 
-        fun tryEmitSafe(items: List<T>, markEmitted: Boolean = true) {
+        fun tryEmitSafe(items: List<T>, fromListener: Boolean = false) {
             synchronized(emitLock) {
-                if (markEmitted) {
-                    hasEmittedAny = true
+                hasEmittedAny = true
+                if (fromListener) {
+                    listenerHasEmitted = true
                 }
             }
             trySend(items)
@@ -110,7 +112,7 @@ class QawmiRepository(
                 val mapped = runCatching { mapper(cachedSnap) }.getOrNull()
                 if (mapped != null) {
                     synchronized(emitLock) {
-                        if (!hasEmittedAny) {
+                        if (!hasEmittedAny && !listenerHasEmitted) {
                             hasEmittedAny = true
                             trySend(mapped)
                         }
@@ -125,7 +127,12 @@ class QawmiRepository(
             }
             if (serverSnap != null) {
                 val mapped = runCatching { mapper(serverSnap) }.getOrDefault(emptyList())
-                tryEmitSafe(mapped, markEmitted = true)
+                synchronized(emitLock) {
+                    if (!listenerHasEmitted) {
+                        hasEmittedAny = true
+                        trySend(mapped)
+                    }
+                }
             } else {
                 val fallbackCache = withTimeoutOrNull(300L) {
                     runCatching { query.get(Source.CACHE).await() }.getOrNull()
@@ -136,7 +143,7 @@ class QawmiRepository(
                     emptyList()
                 }
                 synchronized(emitLock) {
-                    if (!hasEmittedAny) {
+                    if (!hasEmittedAny && !listenerHasEmitted) {
                         hasEmittedAny = true
                         trySend(fallbackList)
                     }
@@ -157,7 +164,7 @@ class QawmiRepository(
                         }
                         if (recoveredSnap != null) {
                             val mapped = runCatching { mapper(recoveredSnap) }.getOrDefault(emptyList())
-                            tryEmitSafe(mapped, markEmitted = true)
+                            tryEmitSafe(mapped, fromListener = false)
                         } else {
                             synchronized(emitLock) {
                                 if (!hasEmittedAny) {
@@ -171,7 +178,7 @@ class QawmiRepository(
                 }
                 if (snapshot != null) {
                     val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
-                    tryEmitSafe(mapped, markEmitted = true)
+                    tryEmitSafe(mapped, fromListener = true)
                 }
             }
         } catch (e: Exception) {
@@ -665,6 +672,125 @@ class QawmiRepository(
 
     // --- 2. FEED POSTS (নিয়োগ বিজ্ঞপ্তি ও চাকরিপ্রার্থীর আবেদন, Boosted সহ) ---
 
+    private fun DocumentSnapshot.toFeedPostOrNull(): FeedPost? {
+        if (!exists()) return null
+        return try {
+            val base = toObject(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: FeedPost()
+            val rawReactions = (get("userReactions") as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (k, v) ->
+                    val key = k?.toString()?.trim().orEmpty()
+                    val value = v?.toString()?.trim().orEmpty()
+                    if (key.isNotBlank() && value.isNotBlank()) key to value else null
+                }?.toMap() ?: base.userReactions
+            val rawReactionNames = (get("userReactionNames") as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (k, v) ->
+                    val key = k?.toString()?.trim().orEmpty()
+                    val value = v?.toString()?.trim().orEmpty()
+                    if (key.isNotBlank() && value.isNotBlank()) key to value else null
+                }?.toMap() ?: base.userReactionNames
+            val rawCategories = (get("khedmotCategories") as? List<*>)
+                ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }
+                ?: base.khedmotCategories
+            val rawImages = (get("imageUrls") as? List<*>)
+                ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }
+                ?: base.imageUrls
+            val rawMediaTypes = (get("mediaTypes") as? List<*>)
+                ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }
+                ?: base.mediaTypes
+            base.copy(
+                id = id,
+                authorId = getString("authorId") ?: base.authorId,
+                authorName = getString("authorName") ?: base.authorName,
+                authorPhotoUrl = getString("authorPhotoUrl") ?: base.authorPhotoUrl,
+                postType = getString("postType") ?: base.postType,
+                title = getString("title") ?: base.title,
+                district = getString("district") ?: base.district,
+                upazilaOrLocation = getString("upazilaOrLocation") ?: base.upazilaOrLocation,
+                designation = getString("designation") ?: base.designation,
+                khedmotCategories = rawCategories,
+                customCategory = getString("customCategory") ?: base.customCategory,
+                qualification = getString("qualification") ?: base.qualification,
+                salaryOrExperience = getString("salaryOrExperience") ?: base.salaryOrExperience,
+                deadlineOrPreferredDistricts = getString("deadlineOrPreferredDistricts") ?: base.deadlineOrPreferredDistricts,
+                description = getString("description") ?: base.description,
+                contactNumber = getString("contactNumber") ?: base.contactNumber,
+                madrasaId = getString("madrasaId") ?: base.madrasaId,
+                isVerifiedMadrasa = getBoolean("isVerifiedMadrasa") ?: base.isVerifiedMadrasa,
+                isBoosted = getBoolean("isBoosted") ?: base.isBoosted,
+                imageUrls = rawImages,
+                mediaTypes = rawMediaTypes,
+                attachmentDocId = getString("attachmentDocId") ?: base.attachmentDocId,
+                userReactions = rawReactions,
+                userReactionNames = rawReactionNames,
+                commentCount = getLong("commentCount")?.toInt() ?: base.commentCount,
+                shareCount = getLong("shareCount")?.toInt() ?: base.shareCount,
+                sharedPostId = getString("sharedPostId") ?: base.sharedPostId,
+                sharedAuthorId = getString("sharedAuthorId") ?: base.sharedAuthorId,
+                sharedAuthorName = getString("sharedAuthorName") ?: base.sharedAuthorName,
+                sharedTitle = getString("sharedTitle") ?: base.sharedTitle,
+                sharedDescription = getString("sharedDescription") ?: base.sharedDescription,
+                sharedPostType = getString("sharedPostType") ?: base.sharedPostType,
+                isEdited = getBoolean("isEdited") ?: base.isEdited,
+                visibility = getString("visibility") ?: base.visibility.ifBlank { "PUBLIC" },
+                approvalStatus = getString("approvalStatus") ?: base.approvalStatus.ifBlank { "APPROVED" },
+                createdAt = getTimestamp("createdAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: base.createdAt,
+                updatedAt = getTimestamp("updatedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: base.updatedAt
+            )
+        } catch (_: Exception) {
+            safeToObject(FeedPost::class.java)
+        }
+    }
+
+    private fun DocumentSnapshot.toFeedCommentOrNull(): FeedComment? {
+        if (!exists()) return null
+        return try {
+            val base = toObject(FeedComment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: FeedComment()
+            base.copy(
+                id = id,
+                postId = getString("postId") ?: base.postId,
+                authorId = getString("authorId") ?: base.authorId,
+                authorName = getString("authorName") ?: base.authorName,
+                authorPhotoUrl = getString("authorPhotoUrl") ?: base.authorPhotoUrl,
+                text = getString("text") ?: base.text,
+                parentCommentId = getString("parentCommentId") ?: base.parentCommentId,
+                replyToAuthorName = getString("replyToAuthorName") ?: base.replyToAuthorName,
+                isEdited = getBoolean("isEdited") ?: base.isEdited,
+                visibility = getString("visibility") ?: base.visibility.ifBlank { "PUBLIC" },
+                createdAt = getTimestamp("createdAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: base.createdAt,
+                updatedAt = getTimestamp("updatedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: base.updatedAt
+            )
+        } catch (_: Exception) {
+            safeToObject(FeedComment::class.java)
+        }
+    }
+
+    private fun DocumentSnapshot.toKhedmotSubmissionOrNull(): KhedmotSubmission? {
+        if (!exists()) return null
+        return try {
+            val base = toObject(KhedmotSubmission::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: KhedmotSubmission()
+            base.copy(
+                id = id,
+                postId = getString("postId") ?: base.postId,
+                postTitle = getString("postTitle") ?: base.postTitle,
+                postDesignation = getString("postDesignation") ?: base.postDesignation,
+                applicantId = getString("applicantId") ?: base.applicantId,
+                applicantName = getString("applicantName") ?: base.applicantName,
+                applicantQualification = getString("applicantQualification") ?: base.applicantQualification,
+                applicantExperience = getString("applicantExperience") ?: base.applicantExperience,
+                applicantPhone = getString("applicantPhone") ?: base.applicantPhone,
+                coverNote = getString("coverNote") ?: base.coverNote,
+                recipientId = getString("recipientId") ?: base.recipientId,
+                status = getString("status") ?: base.status.ifBlank { "PENDING" },
+                createdAt = getTimestamp("createdAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: base.createdAt,
+                updatedAt = getTimestamp("updatedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: base.updatedAt
+            )
+        } catch (_: Exception) {
+            safeToObject(KhedmotSubmission::class.java)
+        }
+    }
+
     fun observePublicFeedPosts(): Flow<List<FeedPost>> {
         val path = "feed_posts"
         return observeQueryWithFastInitialAndFallback(
@@ -674,7 +800,8 @@ class QawmiRepository(
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
-            snapshot.safeToObjects(FeedPost::class.java)
+            snapshot.documents
+                .mapNotNull { it.toFeedPostOrNull() }
                 .filter { post ->
                     post.visibility.isBlank() ||
                         post.visibility.equals("PUBLIC", ignoreCase = true) ||
@@ -731,7 +858,7 @@ class QawmiRepository(
             val cleanedCustomCategory = customCategory.trim().take(150)
             val rawMediaItems = imageUrls.map { it.trim() }.filter { it.isNotBlank() }.take(5)
 
-            // 1. Upload images/videos to Firebase Storage and extract compact metadata
+            // 1. Prepare media items & compact metadata
             val mediaUploadRes = ProfilePhotoHelper.uploadFeedMediaToFirebaseStorage(
                 mediaItems = rawMediaItems,
                 authorId = uid,
@@ -745,9 +872,10 @@ class QawmiRepository(
             }
             val uploadedMedia = mediaUploadRes.getOrThrow()
 
-            // 2. Store any large attachment or extended text (> 2000 chars) in separate /feed_post_attachments documents
-            var primaryAttachmentDocId = ""
+            // 2. Prepare attachment document IDs and validate attachment sizes BEFORE writing
+            var primaryAttachmentDocId = if (trimmedDesc.length > 2000) "${docRef.id}_ext_text" else ""
             val metadataMaps = mutableListOf<Map<String, String>>()
+            val deferredAttachmentWrites = mutableListOf<Pair<com.google.firebase.firestore.DocumentReference, Map<String, Any>>>()
 
             if (trimmedDesc.length > 2000) {
                 val extDocId = "${docRef.id}_ext_text"
@@ -766,8 +894,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                extRef.set(extPayload).awaitWithTimeout(10_000L)
-                primaryAttachmentDocId = extDocId
+                deferredAttachmentWrites.add(extRef to extPayload)
             }
 
             uploadedMedia.forEachIndexed { idx, mediaItem ->
@@ -799,8 +926,8 @@ class QawmiRepository(
                                 ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
                         )
                     }
-                    mediaRef.set(mediaPayload).awaitWithTimeout(10_000L)
                     ProfilePhotoHelper.cacheAttachmentDataUrl(mediaDocId, mediaItem.separateAttachmentDataUrl)
+                    deferredAttachmentWrites.add(mediaRef to mediaPayload)
                     itemAttachmentDocId = mediaDocId
                     if (primaryAttachmentDocId.isBlank()) {
                         primaryAttachmentDocId = mediaDocId
@@ -809,7 +936,7 @@ class QawmiRepository(
                 metadataMaps.add(mediaItem.toMetadataMap(itemAttachmentDocId))
             }
 
-            // 3. Ensure authorPhotoUrl on feed_posts is compact or a Storage URL
+            // 3. Ensure authorPhotoUrl on feed_posts is compact (<= 12 KB) without network stalls
             val safeAuthorPhotoUrl = ProfilePhotoHelper.uploadOrCompactAuthorPhotoForFeedPost(
                 authorPhotoUrl = authorPhotoUrl,
                 authorId = uid
@@ -822,7 +949,13 @@ class QawmiRepository(
                 selectedCategories = cleanedCategories,
                 customCategory = cleanedCustomCategory
             ).ifBlank {
-                if (postType == "GENERAL_POST") "দ্বীনি আলোচনা ও খেদমত" else designation.trim()
+                if (postType == "GENERAL_POST") "দ্বীনি আলোচনা ও খেদমত" else designation.trim().ifBlank { "দ্বীনি খেদমত" }
+            }
+            val resolvedDistrict = district.trim().ifBlank {
+                if (postType == "GENERAL_POST") "" else "সকল জেলা"
+            }
+            val resolvedQualification = qualification.trim().ifBlank {
+                if (postType == "GENERAL_POST") "" else "আলোচনা সাপেক্ষ"
             }
 
             val payload = mutableMapOf<String, Any>(
@@ -830,11 +963,11 @@ class QawmiRepository(
                 "authorName" to authorName.trim().ifBlank { title.trim() }.take(200),
                 "authorPhotoUrl" to safeAuthorPhotoUrl,
                 "postType" to postType,
-                "title" to title.trim().take(200),
-                "district" to district.trim().take(100),
+                "title" to title.trim().ifBlank { "দ্বীনি খেদমত ও আবেদন" }.take(200),
+                "district" to resolvedDistrict.take(100),
                 "upazilaOrLocation" to upazilaOrLocation.trim().take(200),
                 "designation" to resolvedDesignation.take(150),
-                "qualification" to qualification.trim().take(200),
+                "qualification" to resolvedQualification.take(200),
                 "salaryOrExperience" to salaryOrExperience.trim().take(150),
                 "deadlineOrPreferredDistricts" to deadlineOrPreferredDistricts.trim().take(250),
                 "description" to trimmedDesc.take(2000),
@@ -877,9 +1010,22 @@ class QawmiRepository(
                 )
             }
 
-            docRef.set(payload).awaitWithTimeout(10_000L)
+            // 5. Write the lightweight /feed_posts/{postId} document FIRST so it goes live online immediately
+            // without waiting behind large attachment documents in the gRPC write stream.
+            docRef.set(payload).awaitMessageWriteConfirmation(
+                docRef = docRef,
+                serverAckWaitMs = 4_500L
+            )
 
-            // Deliver community notification and Telegram Admin log concurrently with bounded timeout so post publishing returns fast
+            // 6. Write any offloaded attachment documents after the main post is queued/acknowledged
+            for ((attachRef, attachPayload) in deferredAttachmentWrites) {
+                attachRef.set(attachPayload).awaitMessageWriteConfirmation(
+                    docRef = attachRef,
+                    serverAckWaitMs = 4_500L
+                )
+            }
+
+            // 7. Deliver community notification and Telegram Admin log with fast bounded timeout
             val isCircular = postType == "JOB_CIRCULAR"
             val isGeneral = postType == "GENERAL_POST"
             val notifTitle = when {
@@ -888,12 +1034,12 @@ class QawmiRepository(
                 else -> "নতুন খেদমতপ্রার্থীর আবেদন"
             }
             val notifMsg = when {
-                isCircular -> "${title.trim()} (${district.trim()})-এ '${resolvedDesignation}' পদে নিয়োগ বিজ্ঞপ্তি প্রকাশিত হয়েছে।"
+                isCircular -> "${title.trim()} (${resolvedDistrict})-এ '${resolvedDesignation}' পদে নিয়োগ বিজ্ঞপ্তি প্রকাশিত হয়েছে।"
                 isGeneral -> "${authorName.trim().ifBlank { title.trim() }} ফিডে একটি নতুন পোস্ট শেয়ার করেছেন: ${title.trim()}"
-                else -> "${title.trim()} (${qualification.trim()}) '${resolvedDesignation}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
+                else -> "${title.trim()} (${resolvedQualification}) '${resolvedDesignation}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
             }
             val resolvedSender = authorName.trim().ifBlank { title.trim() }
-            kotlinx.coroutines.withTimeoutOrNull(2_500L) {
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
                 coroutineScope {
                     launch {
                         runCatching {
@@ -1233,31 +1379,50 @@ class QawmiRepository(
         val uid = requireUserId()
         val docRef = db.collection("feed_posts").document(post.id)
         return try {
-            val snap = docRef.getFastOrNull(3_500L)
-            val existingPost = if (snap != null && snap.exists()) {
-                snap.safeToObject(FeedPost::class.java) ?: post
-            } else {
-                post
-            }
-            val updatedReactions = existingPost.userReactions.toMutableMap()
-            val updatedNames = existingPost.userReactionNames.toMutableMap()
-            val currentReaction = updatedReactions[uid].orEmpty()
+            val cachedSnap = docRef.getCacheFirstOrNull(400L)
+            val existingPost = cachedSnap?.toFeedPostOrNull() ?: post
+            val currentReaction = existingPost.userReactions[uid].orEmpty()
+            val isRemoving = reactionCode.isBlank() || currentReaction == reactionCode
+            val cleanReactorName = reactorName.trim().ifBlank { "সম্মানিত সদস্য" }.take(120)
 
-            if (reactionCode.isBlank() || currentReaction == reactionCode) {
-                updatedReactions.remove(uid)
-                updatedNames.remove(uid)
-            } else {
-                updatedReactions[uid] = reactionCode
-                updatedNames[uid] = reactorName.trim().ifBlank { "সম্মানিত সদস্য" }.take(120)
+            try {
+                if (isRemoving) {
+                    docRef.update(
+                        com.google.firebase.firestore.FieldPath.of("userReactions", uid),
+                        FieldValue.delete(),
+                        com.google.firebase.firestore.FieldPath.of("userReactionNames", uid),
+                        FieldValue.delete(),
+                        com.google.firebase.firestore.FieldPath.of("updatedAt"),
+                        FieldValue.serverTimestamp()
+                    ).awaitMessageWriteConfirmation(docRef, 4_000L)
+                } else {
+                    docRef.update(
+                        com.google.firebase.firestore.FieldPath.of("userReactions", uid),
+                        reactionCode,
+                        com.google.firebase.firestore.FieldPath.of("userReactionNames", uid),
+                        cleanReactorName,
+                        com.google.firebase.firestore.FieldPath.of("updatedAt"),
+                        FieldValue.serverTimestamp()
+                    ).awaitMessageWriteConfirmation(docRef, 4_000L)
+                }
+            } catch (_: Exception) {
+                val updatedReactions = existingPost.userReactions.toMutableMap()
+                val updatedNames = existingPost.userReactionNames.toMutableMap()
+                if (isRemoving) {
+                    updatedReactions.remove(uid)
+                    updatedNames.remove(uid)
+                } else {
+                    updatedReactions[uid] = reactionCode
+                    updatedNames[uid] = cleanReactorName
+                }
+                docRef.update(
+                    mapOf(
+                        "userReactions" to updatedReactions,
+                        "userReactionNames" to updatedNames,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).awaitMessageWriteConfirmation(docRef, 4_000L)
             }
-
-            docRef.update(
-                mapOf(
-                    "userReactions" to updatedReactions,
-                    "userReactionNames" to updatedNames,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).awaitWithTimeout(8_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1272,11 +1437,12 @@ class QawmiRepository(
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
             path = path,
-            includeMetadataChanges = false,
+            includeMetadataChanges = true,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
-            snapshot.safeToObjects(FeedComment::class.java)
+            snapshot.documents
+                .mapNotNull { it.toFeedCommentOrNull() }
                 .filter { comment ->
                     comment.visibility.isBlank() ||
                         comment.visibility.equals("PUBLIC", ignoreCase = true) ||
@@ -1307,11 +1473,12 @@ class QawmiRepository(
         val postRef = db.collection("feed_posts").document(post.id)
         return try {
             val resolvedAuthor = authorName.trim().ifBlank { "সম্মানিত দ্বীনি ভাই" }.take(200)
+            val compactAvatar = ProfilePhotoHelper.compactSenderPhotoForMessage(authorPhotoUrl)
             val payload = mapOf(
                 "postId" to post.id,
                 "authorId" to uid,
                 "authorName" to resolvedAuthor,
-                "authorPhotoUrl" to authorPhotoUrl.trim(),
+                "authorPhotoUrl" to compactAvatar,
                 "text" to cleanText,
                 "parentCommentId" to parentCommentId.trim(),
                 "replyToAuthorName" to replyToAuthorName.trim().take(200),
@@ -1320,30 +1487,40 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            commentRef.set(payload).awaitWithTimeout(8_000L)
+            commentRef.set(payload).awaitMessageWriteConfirmation(
+                docRef = commentRef,
+                serverAckWaitMs = 4_000L
+            )
 
-            try {
-                val postSnap = postRef.getFastOrNull(3_000L)
-                val currentCount = (postSnap?.getLong("commentCount")?.toInt() ?: post.commentCount).coerceAtLeast(0)
-                postRef.update(
-                    mapOf(
-                        "commentCount" to (currentCount + 1),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).awaitWithTimeout(8_000L)
-            } catch (_: Exception) {
-                // Non-fatal if post counter update is skipped
-            }
-
-            if (post.authorId.isNotBlank() && post.authorId != uid) {
-                createNotification(
-                    recipientId = post.authorId,
-                    senderName = resolvedAuthor,
-                    title = if (parentCommentId.isNotBlank()) "আপনার পোস্টের কমেন্টে নতুন উত্তর" else "আপনার পোস্টে নতুন কমেন্ট",
-                    message = "$resolvedAuthor মন্তব্য করেছেন: \"${cleanText.take(120)}\"",
-                    type = "APPLICATION",
-                    referenceId = post.id
-                )
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                coroutineScope {
+                    launch {
+                        runCatching {
+                            val postSnap = postRef.getCacheFirstOrNull(500L)
+                            val currentCount = (postSnap?.getLong("commentCount")?.toInt() ?: post.commentCount).coerceAtLeast(0)
+                            postRef.update(
+                                mapOf(
+                                    "commentCount" to (currentCount + 1),
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).awaitMessageWriteConfirmation(postRef, 1_200L)
+                        }
+                    }
+                    if (post.authorId.isNotBlank() && post.authorId != uid) {
+                        launch {
+                            runCatching {
+                                createNotification(
+                                    recipientId = post.authorId,
+                                    senderName = resolvedAuthor,
+                                    title = if (parentCommentId.isNotBlank()) "আপনার পোস্টের কমেন্টে নতুন উত্তর" else "আপনার পোস্টে নতুন কমেন্ট",
+                                    message = "$resolvedAuthor মন্তব্য করেছেন: \"${cleanText.take(120)}\"",
+                                    type = "APPLICATION",
+                                    referenceId = post.id
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             Result.success(commentRef.id)
@@ -1372,7 +1549,7 @@ class QawmiRepository(
                     "isEdited" to true,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitWithTimeout(8_000L)
+            ).awaitMessageWriteConfirmation(commentRef, 4_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1390,19 +1567,20 @@ class QawmiRepository(
         requireUserId()
         val commentRef = db.collection("post_comments").document(commentId)
         return try {
-            commentRef.delete().awaitWithTimeout(8_000L)
+            commentRef.delete().awaitWithTimeout(4_000L)
             if (postId.isNotBlank()) {
-                try {
-                    val postRef = db.collection("feed_posts").document(postId)
-                    val snap = postRef.getFastOrNull(3_000L)
-                    val existingCount = (snap?.getLong("commentCount")?.toInt() ?: currentCommentCount).coerceAtLeast(1)
-                    postRef.update(
-                        mapOf(
-                            "commentCount" to (existingCount - 1).coerceAtLeast(0),
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).awaitWithTimeout(8_000L)
-                } catch (_: Exception) {
+                kotlinx.coroutines.withTimeoutOrNull(1_200L) {
+                    runCatching {
+                        val postRef = db.collection("feed_posts").document(postId)
+                        val snap = postRef.getCacheFirstOrNull(400L)
+                        val existingCount = (snap?.getLong("commentCount")?.toInt() ?: currentCommentCount).coerceAtLeast(1)
+                        postRef.update(
+                            mapOf(
+                                "commentCount" to (existingCount - 1).coerceAtLeast(0),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).awaitMessageWriteConfirmation(postRef, 1_000L)
+                    }
                 }
             }
             Result.success(Unit)
@@ -1421,7 +1599,7 @@ class QawmiRepository(
         sharerDistrict: String,
         shareCaption: String
     ): Result<String> {
-        val uid = requireUserId()
+        requireUserId()
         val targetOriginalId = originalPost.sharedPostId.ifBlank { originalPost.id }
         val targetOriginalAuthorId = originalPost.sharedAuthorId.ifBlank { originalPost.authorId }
         val targetOriginalAuthorName = originalPost.sharedAuthorName.ifBlank { originalPost.authorName.ifBlank { originalPost.title } }
@@ -1459,17 +1637,18 @@ class QawmiRepository(
         )
 
         createRes.onSuccess {
-            try {
-                val origRef = db.collection("feed_posts").document(originalPost.id)
-                val snap = origRef.getFastOrNull(3_000L)
-                val currentShares = (snap?.getLong("shareCount")?.toInt() ?: originalPost.shareCount).coerceAtLeast(0)
-                origRef.update(
-                    mapOf(
-                        "shareCount" to (currentShares + 1),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).awaitWithTimeout(8_000L)
-            } catch (_: Exception) {
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                runCatching {
+                    val origRef = db.collection("feed_posts").document(originalPost.id)
+                    val snap = origRef.getCacheFirstOrNull(500L)
+                    val currentShares = (snap?.getLong("shareCount")?.toInt() ?: originalPost.shareCount).coerceAtLeast(0)
+                    origRef.update(
+                        mapOf(
+                            "shareCount" to (currentShares + 1),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).awaitMessageWriteConfirmation(origRef, 1_200L)
+                }
             }
         }
         return createRes
@@ -1790,7 +1969,8 @@ class QawmiRepository(
             includeMetadataChanges = true,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
-            snapshot.safeToObjects(KhedmotSubmission::class.java)
+            snapshot.documents
+                .mapNotNull { it.toKhedmotSubmissionOrNull() }
                 .distinctBy { it.id }
                 .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
         }
@@ -1806,7 +1986,8 @@ class QawmiRepository(
             includeMetadataChanges = true,
             initialServerTimeoutMs = 3_500L
         ) { snapshot ->
-            snapshot.safeToObjects(KhedmotSubmission::class.java)
+            snapshot.documents
+                .mapNotNull { it.toKhedmotSubmissionOrNull() }
                 .distinctBy { it.id }
                 .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
         }
@@ -1838,33 +2019,39 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).awaitWithTimeout(10_000L)
+            docRef.set(payload).awaitMessageWriteConfirmation(
+                docRef = docRef,
+                serverAckWaitMs = 4_500L
+            )
 
-            // Deliver real-time notification ONLY to the Madrasa / circular author (not to self)
-            if (post.authorId.isNotBlank() && post.authorId != uid) {
-                kotlinx.coroutines.withTimeoutOrNull(3000L) {
-                    runCatching {
-                        createNotification(
-                            recipientId = post.authorId,
-                            senderName = applicantName.trim(),
-                            title = "নতুন খেদমতের আবেদন প্রাপ্তি",
-                            message = "${applicantName.trim()} আপনার '${post.title}'-এর '${post.designation}' খেদমতের জন্য আবেদন করেছেন।",
-                            type = "APPLICATION",
-                            referenceId = docRef.id
-                        )
+            // Deliver real-time notification to the Madrasa / circular author and Telegram Admin log concurrently with a fast timeout
+            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                coroutineScope {
+                    if (post.authorId.isNotBlank() && post.authorId != uid) {
+                        launch {
+                            runCatching {
+                                createNotification(
+                                    recipientId = post.authorId,
+                                    senderName = applicantName.trim(),
+                                    title = "নতুন খেদমতের আবেদন প্রাপ্তি",
+                                    message = "${applicantName.trim()} আপনার '${post.title}'-এর '${post.designation}' খেদমতের জন্য আবেদন করেছেন।",
+                                    type = "APPLICATION",
+                                    referenceId = docRef.id
+                                )
+                            }
+                        }
                     }
-                }
-            }
-
-            kotlinx.coroutines.withTimeoutOrNull(3500L) {
-                runCatching {
-                    enqueueAndDispatchTelegramNotification(
-                        eventType = "KHEDMOT_SUBMISSION",
-                        title = "বিজ্ঞপ্তিতে নতুন খেদমত আবেদন: ${post.title}",
-                        message = "প্রার্থী: ${applicantName.trim()} (${applicantQualification.trim()}) | পদ: ${post.designation} | ফোন: ${applicantPhone.trim()}",
-                        actorName = applicantName.trim(),
-                        referenceId = docRef.id
-                    )
+                    launch {
+                        runCatching {
+                            enqueueAndDispatchTelegramNotification(
+                                eventType = "KHEDMOT_SUBMISSION",
+                                title = "বিজ্ঞপ্তিতে নতুন খেদমত আবেদন: ${post.title}",
+                                message = "প্রার্থী: ${applicantName.trim()} (${applicantQualification.trim()}) | পদ: ${post.designation} | ফোন: ${applicantPhone.trim()}",
+                                actorName = applicantName.trim(),
+                                referenceId = docRef.id
+                            )
+                        }
+                    }
                 }
             }
 

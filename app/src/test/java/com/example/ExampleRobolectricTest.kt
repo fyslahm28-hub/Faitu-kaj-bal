@@ -2607,6 +2607,149 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("message_status_sent_msg_img_1", useUnmergedTree = true).assertExists()
         composeTestRule.onNodeWithTag("message_status_sent_msg_emoji_2", useUnmergedTree = true).assertExists()
     }
+
+    @Test
+    fun `FeedScreen updates likes comments and shares live online and publishes application without delay`() {
+        var postsList by mutableStateOf(
+            listOf(
+                com.example.data.model.FeedPost(
+                    id = "app_post_live_1",
+                    authorId = "seeker_1",
+                    authorName = "মাওলানা তানভীর আহমদ",
+                    postType = "SEEKER_APPLICATION",
+                    title = "মুহাদ্দিস ও ফিকহ বিভাগে খেদমতপ্রার্থী",
+                    district = "ঢাকা",
+                    upazilaOrLocation = "যাত্রাবাড়ী",
+                    designation = "মুহাদ্দিস",
+                    qualification = "দাওরায়ে হাদিস ও ইফতা",
+                    salaryOrExperience = "৫ বছর",
+                    deadlineOrPreferredDistricts = "ঢাকা, নারায়ণগঞ্জ",
+                    description = "সহীহ বুখারী ও ফিকহুল ইসলামীর দরস দানে অভিজ্ঞ।",
+                    contactNumber = "01711009988",
+                    visibility = "PUBLIC",
+                    createdAt = Timestamp.now()
+                )
+            )
+        )
+        var commentsList by mutableStateOf<List<com.example.data.model.FeedComment>>(emptyList())
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1100.dp)) {
+                    com.example.ui.screens.FeedScreen(
+                        feedPostsState = UiState.Success(postsList),
+                        bookmarksState = UiState.Success(emptyList()),
+                        selectedFilter = com.example.ui.viewmodel.FeedFilterTab.ALL,
+                        selectedDistrict = "সকল জেলা",
+                        searchQuery = "",
+                        currentUserId = "user_me",
+                        isAdmin = false,
+                        postCommentsState = UiState.Success(commentsList),
+                        onSelectFilter = {},
+                        onSelectDistrict = {},
+                        onSearchQueryChange = {},
+                        onApplyClick = {},
+                        onViewProfileOrDetailClick = {},
+                        onToggleBookmark = { _, _ -> },
+                        onDeletePost = {},
+                        onReactToPost = { post, code ->
+                            postsList = postsList.map { existing ->
+                                if (existing.id == post.id) {
+                                    val updatedReactions = existing.userReactions.toMutableMap()
+                                    val updatedNames = existing.userReactionNames.toMutableMap()
+                                    if (code.isBlank() || updatedReactions["user_me"] == code) {
+                                        updatedReactions.remove("user_me")
+                                        updatedNames.remove("user_me")
+                                    } else {
+                                        updatedReactions["user_me"] = code
+                                        updatedNames["user_me"] = "মুফতি আব্দুল্লাহ"
+                                    }
+                                    existing.copy(
+                                        userReactions = updatedReactions,
+                                        userReactionNames = updatedNames
+                                    )
+                                } else {
+                                    existing
+                                }
+                            }
+                        },
+                        onAddComment = { post, text, parentId, replyTo ->
+                            val newComment = com.example.data.model.FeedComment(
+                                id = "c_${commentsList.size + 1}",
+                                postId = post.id,
+                                authorId = "user_me",
+                                authorName = "মুফতি আব্দুল্লাহ",
+                                text = text,
+                                parentCommentId = parentId,
+                                replyToAuthorName = replyTo,
+                                visibility = "PUBLIC",
+                                createdAt = Timestamp.now()
+                            )
+                            commentsList = commentsList + newComment
+                            postsList = postsList.map { existing ->
+                                if (existing.id == post.id) {
+                                    existing.copy(commentCount = existing.commentCount + 1)
+                                } else {
+                                    existing
+                                }
+                            }
+                        },
+                        onSharePostInApp = { post, caption ->
+                            val shared = com.example.data.model.FeedPost(
+                                id = "shared_post_1",
+                                authorId = "user_me",
+                                authorName = "মুফতি আব্দুল্লাহ",
+                                postType = "GENERAL_POST",
+                                title = caption.ifBlank { "${post.authorName}-এর পোস্ট শেয়ার করেছেন" },
+                                district = "ঢাকা",
+                                designation = post.designation,
+                                description = caption,
+                                sharedPostId = post.id,
+                                sharedAuthorId = post.authorId,
+                                sharedAuthorName = post.authorName,
+                                sharedTitle = post.title,
+                                sharedDescription = post.description,
+                                sharedPostType = post.postType,
+                                visibility = "PUBLIC",
+                                createdAt = Timestamp.now()
+                            )
+                            postsList = listOf(shared) + postsList.map { existing ->
+                                if (existing.id == post.id) {
+                                    existing.copy(shareCount = existing.shareCount + 1)
+                                } else {
+                                    existing
+                                }
+                            }
+                        },
+                        onNavigate = {}
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("মুহাদ্দিস ও ফিকহ বিভাগে খেদমতপ্রার্থী").assertIsDisplayed()
+
+        // 1. Click Like button on post -> reaction count and label update live immediately
+        composeTestRule.onNodeWithTag("post_like_button_app_post_live_1").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("LIKE", postsList.first { it.id == "app_post_live_1" }.userReactions["user_me"])
+
+        // 2. Click Comment button -> comment input opens -> type & submit comment -> appears live immediately
+        composeTestRule.onNodeWithTag("post_comment_button_app_post_live_1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("post_comment_input_app_post_live_1").performTextInput("মাশাআল্লাহ, অত্যন্ত সুন্দর আবেদন।")
+        composeTestRule.onNodeWithTag("post_comment_send_app_post_live_1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("মাশাআল্লাহ, অত্যন্ত সুন্দর আবেদন।").assertIsDisplayed()
+        assertEquals(1, postsList.first { it.id == "app_post_live_1" }.commentCount)
+
+        // 3. Click Share button -> share dialog opens -> share in app -> new shared post appears at top of feed and shareCount increments
+        composeTestRule.onNodeWithTag("post_share_button_app_post_live_1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("share_in_app_confirm_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(1, postsList.first { it.id == "app_post_live_1" }.shareCount)
+        assertTrue(postsList.any { it.id == "shared_post_1" })
+    }
 }
-
-
