@@ -59,6 +59,7 @@ import com.example.ui.theme.QawmiSoftBg
 import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextSecondary
 import com.example.ui.util.AppUpdateManagerHelper
+import com.example.ui.util.PrayerAzanManager
 import com.example.ui.util.QawmiNotificationHelper
 import com.example.ui.viewmodel.MainDestination
 import com.example.ui.viewmodel.QawmiViewModel
@@ -80,6 +81,7 @@ import kotlinx.coroutines.flow.catch
 data class MainNotificationDeepLink(
     val openNotifications: Boolean = false,
     val openAjkerSmoron: Boolean = false,
+    val openPrayerSchedule: Boolean = false,
     val ajkerSmoronId: String = "",
     val chatPartnerId: String = "",
     val chatPartnerName: String = "",
@@ -135,6 +137,7 @@ class MainActivity : ComponentActivity() {
             Log.w("MainActivity", "enableEdgeToEdge skipped: ${t.message}")
         }
         ensureFirebaseInitialized(this)
+        runCatching { PrayerAzanManager.initWithContext(this) }
         parseIntentDeepLink(intent)
         val openNotifications = try {
             intent?.getBooleanExtra(QawmiNotificationHelper.EXTRA_OPEN_NOTIFICATIONS, false) == true
@@ -166,11 +169,13 @@ class MainActivity : ComponentActivity() {
             val partnerName = intent.getStringExtra(QawmiNotificationHelper.EXTRA_OPEN_CHAT_PARTNER_NAME).orEmpty().trim()
             val openNotifs = intent.getBooleanExtra(QawmiNotificationHelper.EXTRA_OPEN_NOTIFICATIONS, false)
             val openSmoron = intent.getBooleanExtra(QawmiNotificationHelper.EXTRA_OPEN_AJKER_SMORON, false)
+            val openPrayer = intent.getBooleanExtra(PrayerAzanManager.EXTRA_OPEN_PRAYER_SCREEN, false)
             val smoronId = intent.getStringExtra(QawmiNotificationHelper.EXTRA_AJKER_SMORON_ID).orEmpty().trim()
-            if (partnerId.isNotBlank() || openNotifs || openSmoron) {
+            if (partnerId.isNotBlank() || openNotifs || openSmoron || openPrayer) {
                 _deepLinkState.value = MainNotificationDeepLink(
                     openNotifications = openNotifs,
                     openAjkerSmoron = openSmoron,
+                    openPrayerSchedule = openPrayer,
                     ajkerSmoronId = smoronId,
                     chatPartnerId = partnerId,
                     chatPartnerName = partnerName.ifBlank { "সম্মানিত দ্বীনি ভাই" },
@@ -181,6 +186,7 @@ class MainActivity : ComponentActivity() {
                 intent.removeExtra(QawmiNotificationHelper.EXTRA_OPEN_NOTIFICATIONS)
                 intent.removeExtra(QawmiNotificationHelper.EXTRA_OPEN_AJKER_SMORON)
                 intent.removeExtra(QawmiNotificationHelper.EXTRA_AJKER_SMORON_ID)
+                intent.removeExtra(PrayerAzanManager.EXTRA_OPEN_PRAYER_SCREEN)
             }
         } catch (t: Throwable) {
             Log.w("MainActivity", "Error parsing notification deep link intent: ${t.message}")
@@ -396,7 +402,10 @@ fun AppNavigation(
 
         LaunchedEffect(deepLink, currentUserId) {
             val target = deepLink ?: return@LaunchedEffect
-            if (target.openAjkerSmoron) {
+            if (target.openPrayerSchedule) {
+                qawmiViewModel.navigateTo(MainDestination.PRAYER_SCHEDULE)
+                onDeepLinkConsumed()
+            } else if (target.openAjkerSmoron) {
                 qawmiViewModel.openAjkerSmoronFromNotification(target.ajkerSmoronId)
                 onDeepLinkConsumed()
             } else if (target.chatPartnerId.isNotBlank()) {

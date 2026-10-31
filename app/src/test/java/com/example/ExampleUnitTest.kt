@@ -486,7 +486,69 @@ class ExampleUnitTest {
         )
         assertTrue(unavailable.message.orEmpty().contains("সার্ভারের সাথে সংযোগ"))
     }
+
+    @Test
+    fun prayerAzanManager_calculatesMethodsMadhhabsGpsMatchingAndCountdown() {
+        val manager = com.example.ui.util.PrayerAzanManager
+
+        // 1. Hanafi vs Shafi'i Asr time difference on Oct 30, 2026 in Dhaka
+        val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("Asia/Dhaka")).apply {
+            set(2026, java.util.Calendar.OCTOBER, 30, 14, 30, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val hanafiPrefs = com.example.ui.util.PrayerSystemPreferences(
+            calculationMethod = com.example.ui.util.PrayerCalculationMethod.BANGLADESH_ISLAMIC_FOUNDATION,
+            asrMadhhab = com.example.ui.util.AsrMadhhab.HANAFI
+        )
+        val shafiiPrefs = com.example.ui.util.PrayerSystemPreferences(
+            calculationMethod = com.example.ui.util.PrayerCalculationMethod.BANGLADESH_ISLAMIC_FOUNDATION,
+            asrMadhhab = com.example.ui.util.AsrMadhhab.SHAFII
+        )
+        val hanafiSchedule = manager.computeDailyPrayerSchedule(
+            districtBangla = "ঢাকা",
+            preferences = hanafiPrefs,
+            calendar = cal
+        )
+        val shafiiSchedule = manager.computeDailyPrayerSchedule(
+            districtBangla = "ঢাকা",
+            preferences = shafiiPrefs,
+            calendar = cal
+        )
+
+        val hanafiAsr = hanafiSchedule.waqts.first { it.key == com.example.ui.util.PrayerWaqtKey.ASR }
+        val shafiiAsr = shafiiSchedule.waqts.first { it.key == com.example.ui.util.PrayerWaqtKey.ASR }
+        assertTrue(
+            "Hanafi Asr (${hanafiAsr.startMinutes}) must start significantly later than Shafi'i Asr (${shafiiAsr.startMinutes})",
+            hanafiAsr.startMinutes - shafiiAsr.startMinutes >= 40
+        )
+
+        // 2. Sehri end is 1 minute before Fajr start; Iftar is Maghrib start
+        val fajr = hanafiSchedule.waqts.first { it.key == com.example.ui.util.PrayerWaqtKey.FAJR }
+        val maghrib = hanafiSchedule.waqts.first { it.key == com.example.ui.util.PrayerWaqtKey.MAGHRIB }
+        assertEquals(fajr.startMinutes - 1, hanafiSchedule.sehriEndMinutes)
+        assertEquals(maghrib.startMinutes, hanafiSchedule.iftarStartMinutes)
+        assertTrue(hanafiSchedule.sunriseBangla.isNotBlank())
+        assertTrue(hanafiSchedule.sunsetBangla.isNotBlank())
+
+        // 3. Nearest Bangladesh district GPS matching
+        assertEquals("ঢাকা", manager.findNearestBangladeshDistrict(23.8103, 90.4125).nameBangla)
+        assertEquals("চট্টগ্রাম", manager.findNearestBangladeshDistrict(22.3569, 91.7832).nameBangla)
+        assertEquals("সিলেট", manager.findNearestBangladeshDistrict(24.8949, 91.8687).nameBangla)
+
+        // 4. Bangla Ponjika date formatting
+        val (banglaPonjikaBn, banglaPonjikaEn) = manager.getFormattedBanglaPonjikaDate(2026, 10, 30)
+        assertTrue("Expected বঙ্গাব্দ in Bangla Ponjika date, got $banglaPonjikaBn", banglaPonjikaBn.contains("বঙ্গাব্দ"))
+        assertTrue("Expected BS in English Ponjika date, got $banglaPonjikaEn", banglaPonjikaEn.contains("BS"))
+
+        // 5. Live countdown calculation (at 14:30, Dhuhr is active and Asr is next)
+        assertEquals(com.example.ui.util.PrayerWaqtKey.DHUHR, hanafiSchedule.currentWaqtKey)
+        assertEquals(com.example.ui.util.PrayerWaqtKey.ASR, hanafiSchedule.nextWaqtKey)
+        assertTrue(hanafiSchedule.totalRemainingSeconds > 0L)
+        assertTrue(hanafiSchedule.countdownBangla.contains("বাকি"))
+        assertTrue(hanafiSchedule.countdownEnglish.contains("remaining"))
+    }
 }
+
 
 
 

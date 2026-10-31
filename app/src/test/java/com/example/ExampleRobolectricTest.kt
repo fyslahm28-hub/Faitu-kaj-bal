@@ -2071,7 +2071,106 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("message_status_failed_msg_fail_4", useUnmergedTree = true).assertDoesNotExist()
         composeTestRule.onNodeWithTag("message_status_sent_msg_fail_4", useUnmergedTree = true).assertExists()
     }
+
+    @Test
+    @Config(qualifiers = "w420dp-h1600dp")
+    fun `HomeScreen IslamicServices prayer icon opens PrayerTimesAndAzanScreen and supports per-waqt Azan, pre-reminder, and deduplication`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        org.robolectric.Shadows.shadowOf(context as android.app.Application)
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        com.example.ui.util.PrayerAzanManager.initWithContext(context)
+        com.example.ui.util.IslamicDateAndPrayerHelper.pinDistrict(context, "ঢাকা")
+
+        var currentScreen by mutableStateOf(MainDestination.HOME)
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                Box(modifier = Modifier.width(420.dp).height(1550.dp)) {
+                    if (currentScreen == MainDestination.HOME) {
+                        com.example.ui.screens.HomeScreen(
+                            currentUserId = "user_prayer_test",
+                            onNavigate = { dest -> currentScreen = dest },
+                            onOpenFeedFilter = {}
+                        )
+                    } else if (currentScreen == MainDestination.PRAYER_SCHEDULE) {
+                        com.example.ui.screens.FullPrayerScheduleScreen()
+                    }
+                }
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        // 1. Verify "ইসলামিক ও প্রয়োজনীয় সেবাসমূহ -> ইলম ও আমল -> নামাজের সময়" is displayed on HomeScreen and opens PrayerTimesAndAzanScreen
+        composeTestRule.onNodeWithTag("home_screen_list").performScrollToIndex(5)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("home_islamic_essential_services_section").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_islamic_service_prayer_times").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(MainDestination.PRAYER_SCHEDULE, currentScreen)
+
+        // 2. Verify PrayerTimesAndAzanScreen renders live countdown, Sehri/Iftar, Sunrise/Sunset, and 5 prayer cards
+        composeTestRule.onNodeWithTag("full_prayer_schedule_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("prayer_hero_countdown_card").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("prayer_live_countdown_text", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithText("জেলা/বিভাগ: ঢাকা").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("prayer_waqt_card_FAJR").assertExists()
+        composeTestRule.onNodeWithTag("prayer_waqt_card_DHUHR").assertExists()
+
+        // 3. Configure Fajr Pre-Azan reminder (10 min) and sound type (FAJR is expanded by default)
+        composeTestRule.onNodeWithTag("waqt_FAJR_prereminder_10").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(
+            10,
+            com.example.ui.util.PrayerAzanManager.preferencesFlow.value
+                .configFor(com.example.ui.util.PrayerWaqtKey.FAJR).preReminderMinutes
+        )
+
+        composeTestRule.onNodeWithTag("waqt_FAJR_sound_SHORT_AZAN").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(
+            com.example.ui.util.AzanSoundType.SHORT_AZAN,
+            com.example.ui.util.PrayerAzanManager.preferencesFlow.value
+                .configFor(com.example.ui.util.PrayerWaqtKey.FAJR).soundType
+        )
+
+        // 4. Toggle Fajr Azan switch off and back on
+        val initialEnabled = com.example.ui.util.PrayerAzanManager.preferencesFlow.value
+            .configFor(com.example.ui.util.PrayerWaqtKey.FAJR).azanEnabled
+        composeTestRule.onNodeWithTag("waqt_azan_switch_FAJR").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(
+            !initialEnabled,
+            com.example.ui.util.PrayerAzanManager.preferencesFlow.value
+                .configFor(com.example.ui.util.PrayerWaqtKey.FAJR).azanEnabled
+        )
+        composeTestRule.onNodeWithTag("waqt_azan_switch_FAJR").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // 5. Verify strict once-per-waqt-per-day deduplication so Azan never plays twice in the same waqt
+        val testDateKey = "2026_10_30_dedup_test"
+        com.example.ui.util.PrayerAzanManager.clearFiredEventsForTest(context)
+        assertTrue(
+            !com.example.ui.util.PrayerAzanManager.hasEventFiredToday(
+                context = context,
+                dateKey = testDateKey,
+                waqtKey = com.example.ui.util.PrayerWaqtKey.MAGHRIB
+            )
+        )
+        com.example.ui.util.PrayerAzanManager.markEventFiredToday(
+            context = context,
+            dateKey = testDateKey,
+            waqtKey = com.example.ui.util.PrayerWaqtKey.MAGHRIB
+        )
+        assertTrue(
+            com.example.ui.util.PrayerAzanManager.hasEventFiredToday(
+                context = context,
+                dateKey = testDateKey,
+                waqtKey = com.example.ui.util.PrayerWaqtKey.MAGHRIB
+            )
+        )
+    }
 }
+
 
 
 

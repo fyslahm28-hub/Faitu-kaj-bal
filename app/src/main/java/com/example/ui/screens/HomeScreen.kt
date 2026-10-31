@@ -78,6 +78,7 @@ import com.example.ui.theme.QawmiTextDark
 import com.example.ui.theme.QawmiTextSecondary
 import com.example.ui.util.AjkerSmoronHelper
 import com.example.ui.util.IslamicDateAndPrayerHelper
+import com.example.ui.util.PrayerAzanManager
 import com.example.ui.viewmodel.FeedFilterTab
 import com.example.ui.viewmodel.MainDestination
 
@@ -90,6 +91,7 @@ fun HomeScreen(
     val context = LocalContext.current
     LaunchedEffect(Unit) {
         IslamicDateAndPrayerHelper.initWithContext(context)
+        PrayerAzanManager.initWithContext(context)
     }
     val selectedDistrict by IslamicDateAndPrayerHelper.selectedDistrictFlow.collectAsState()
     val pinnedDistrict by IslamicDateAndPrayerHelper.pinnedDistrictFlow.collectAsState()
@@ -284,6 +286,14 @@ fun HomeScreen(
                     )
                 }
             }
+        }
+
+        // 5B. নতুন ইসলামিক ও প্রয়োজনীয় সেবাসমূহ (ইলম ও আমল -> নামাজের সময়)
+        item {
+            IslamicAndEssentialServicesSection(
+                onOpenPrayerTimes = { onNavigate(MainDestination.PRAYER_SCHEDULE) },
+                onNavigate = onNavigate
+            )
         }
 
         // 6. Dark Emerald Prayer Times Card: নামাজের সময়সূচী (নির্বাচিত/পিন করা জেলা)

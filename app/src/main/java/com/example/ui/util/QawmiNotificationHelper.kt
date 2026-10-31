@@ -373,11 +373,14 @@ object QawmiNotificationHelper {
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
 
+            @Suppress("MissingPermission")
             NotificationManagerCompat.from(context).notify(notificationId, builder.build())
+        } catch (_: SecurityException) {
         } catch (_: Throwable) {
         }
     }
 
+    @Suppress("MissingPermission")
     private fun showSystemNotification(context: Context, notification: AppNotification) {
         if (!hasNotificationPermission(context)) return
         try {
@@ -417,6 +420,7 @@ object QawmiNotificationHelper {
                 .setContentIntent(pendingIntent)
 
             NotificationManagerCompat.from(context).notify(notification.id.hashCode(), builder.build())
+        } catch (_: SecurityException) {
         } catch (_: Throwable) {
             // Permission may have been revoked or icon rejected by OEM SystemUI
         }
@@ -426,6 +430,7 @@ object QawmiNotificationHelper {
      * Posts the daily automated "আজকের স্মরণ" OS Push Notification (max 1 per day per user).
      * Tapping the notification opens [MainActivity] directly to the "আজকের স্মরণ" screen.
      */
+    @Suppress("MissingPermission")
     fun deliverDailyAjkerSmoronPushNotification(
         context: Context,
         userId: String,
@@ -487,6 +492,8 @@ object QawmiNotificationHelper {
                 reminderId = reminder.id
             )
             true
+        } catch (_: SecurityException) {
+            false
         } catch (_: Throwable) {
             false
         }
