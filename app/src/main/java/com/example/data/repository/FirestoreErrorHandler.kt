@@ -274,22 +274,21 @@ fun isRetryableFirestoreMessageError(throwable: Throwable?): Boolean {
 }
 
 /**
- * Awaits a Firestore message write task within [timeoutMs].
+ * Awaits a Firestore write task within [timeoutMs] (minimum 15s for real server confirmation).
  *
- * - Immediately propagates any real server/security exception (`PERMISSION_DENIED`,
- *   `UNAUTHENTICATED`, `INVALID_ARGUMENT`, etc.) if the write is rejected.
- * - If the remote gRPC ACK takes longer than [timeoutMs] on a slow mobile connection
- *   (e.g., 25–30 KB/s), verifies that the document has been persisted in Firestore's local
- *   SQLite cache without error so Firestore's native background write stream can finish
- *   uploading it while the UI transitions out of the `SENDING` spinner to `SENT` (`✓`).
+ * - Strictly awaits real Firestore server acknowledgment so writes are never falsely marked
+ *   as succeeded solely from local RAM cache.
+ * - Immediately propagates any server/security exception (`PERMISSION_DENIED`,
+ *   `UNAUTHENTICATED`, `INVALID_ARGUMENT`, etc.) or timeout if the write is rejected or fails.
  */
 @Suppress("UNCHECKED_CAST")
 suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmation(
     docRef: DocumentReference,
-    timeoutMs: Long = 3_500L
+    timeoutMs: Long = 15_000L
 ): T {
+    val effectiveTimeoutMs = timeoutMs.coerceAtLeast(12_000L)
     return try {
-        kotlinx.coroutines.withTimeout(timeoutMs) {
+        kotlinx.coroutines.withTimeout(effectiveTimeoutMs) {
             this@awaitMessageWriteConfirmation.await()
         }
     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
@@ -300,41 +299,23 @@ suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitMessageWriteConfirmati
         if (this@awaitMessageWriteConfirmation.isSuccessful) {
             return this@awaitMessageWriteConfirmation.result as T
         }
-        val confirmedInCache = docRef.getFromCacheOnlyOrNull(100L)
-        val postCheckException = this@awaitMessageWriteConfirmation.exception
-        if (postCheckException != null) {
-            throw postCheckException
-        }
-        if (confirmedInCache != null && confirmedInCache.exists()) {
-            this@awaitMessageWriteConfirmation.addOnFailureListener { asyncErr ->
-                Log.w("FirestoreError", "Background-synced message write eventually failed: ${asyncErr.message}", asyncErr)
-            }
-            return null as T
-        }
         throw e
     }
 }
 
 /**
- * Awaits a Firestore Task (typically a write operation such as set/update/delete/batch.commit).
+ * Awaits a Firestore Task (such as set/update/delete/batch.commit) for real server confirmation.
  *
- * In the Firebase Firestore Android SDK, write operations are immediately staged into the local
- * persistent SQLite cache and emitted to active SnapshotListeners, while the returned Task<Void>
- * waits for the remote gRPC Write stream ACK after all prior queued mutations complete.
- *
- * - If the task completes or fails with a server error (e.g., PERMISSION_DENIED, INVALID_ARGUMENT)
- *   within [timeoutMs], the result or exception is propagated directly.
- * - If the gRPC stream takes longer than [timeoutMs] to ACK (e.g., due to gRPC stream reconnection
- *   or queued background mutations) and the task has NOT failed, we do not throw a false network
- *   disconnection error because Firestore has already persisted the write locally and will finish
- *   syncing it in the background.
+ * - Propagates server results and exceptions directly.
+ * - Never masks unconfirmed or timed-out writes behind local RAM cache.
  */
 @Suppress("UNCHECKED_CAST")
 suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitWithTimeout(
-    timeoutMs: Long = 8_000L
+    timeoutMs: Long = 15_000L
 ): T {
+    val effectiveTimeoutMs = timeoutMs.coerceAtLeast(12_000L)
     return try {
-        kotlinx.coroutines.withTimeout(timeoutMs) {
+        kotlinx.coroutines.withTimeout(effectiveTimeoutMs) {
             this@awaitWithTimeout.await()
         }
     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
@@ -345,9 +326,7 @@ suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitWithTimeout(
         if (this@awaitWithTimeout.isSuccessful) {
             return this@awaitWithTimeout.result as T
         }
-        this@awaitWithTimeout.addOnFailureListener { asyncErr ->
-            Log.w("FirestoreError", "Background-synced Firestore task eventually failed: ${asyncErr.message}", asyncErr)
-        }
-        null as T
+        throw e
     }
 }
+

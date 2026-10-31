@@ -189,6 +189,7 @@ fun ModernAdminPanelRoot(
         isMandatory: Boolean,
         releaseStatus: String
     ) -> Unit = { _, _, _, _, _, _, _, _ -> },
+    onSaveAdminMember: (memberId: String, name: String, role: String, isActive: Boolean) -> Unit = { _, _, _, _ -> },
     onRetryServerLoad: () -> Unit = {},
     onDeletePost: (String) -> Unit
 ) {
@@ -298,14 +299,15 @@ fun ModernAdminPanelRoot(
         val fromRegistry = realAdminEntries.mapIndexed { idx, entry ->
             val id = entry.adminId.ifBlank { entry.id.ifBlank { "reg_$idx" } }
             val matchedUser = realUsers.find { it.id == entry.adminId || it.userId == entry.adminId }
-            val safeName = matchedUser?.fullName?.takeIf { it.isNotBlank() && !it.contains("@") }
+            val safeName = entry.name.takeIf { it.isNotBlank() && !it.contains("@") }
+                ?: matchedUser?.fullName?.takeIf { it.isNotBlank() && !it.contains("@") }
                 ?: "অনুমোদিত অ্যাডমিন #${IslamicDateAndPrayerHelper.toBanglaDigits((idx + 1).toString())}"
-            val roleLabel = if (entry.role.contains("SUPER", ignoreCase = true) || entry.role.contains("নাজিমে", ignoreCase = true)) {
+            val roleLabel = if (entry.role.contains("SUPER", ignoreCase = true) || entry.role.contains("সুপার") || entry.role.contains("নাজিমে", ignoreCase = true)) {
                 "সুপার অ্যাডমিন"
             } else {
                 "অ্যাডমিন"
             }
-            val active = localAdminStatusOverrides.value[id] ?: entry.verifiedByAuthToken
+            val active = localAdminStatusOverrides.value[id] ?: (entry.isActive && entry.verifiedByAuthToken)
             AdminDisplayMember(
                 id = id,
                 name = safeName,
@@ -325,11 +327,14 @@ fun ModernAdminPanelRoot(
                     isActive = active
                 )
             }
-        val addedMapped = localAddedAdmins.map { item ->
-            val active = localAdminStatusOverrides.value[item.id] ?: item.isActive
-            item.copy(isActive = active)
-        }
-        (addedMapped + fromRegistry + fromUsers).distinctBy { it.id }
+        val remoteIds = (fromRegistry.map { it.id } + fromUsers.map { it.id }).toSet()
+        val addedMapped = localAddedAdmins
+            .filter { it.id !in remoteIds }
+            .map { item ->
+                val active = localAdminStatusOverrides.value[item.id] ?: item.isActive
+                item.copy(isActive = active)
+            }
+        (fromRegistry + addedMapped + fromUsers).distinctBy { it.id }
     }
 
     // App Settings toggles (Screen 9)
@@ -413,32 +418,23 @@ fun ModernAdminPanelRoot(
                         adminMembers = adminMembers,
                         onBack = { handleBack() },
                         onAddAdminMember = { name, role ->
+                            val newId = "adm_${System.currentTimeMillis()}"
                             localAddedAdmins.add(
                                 0,
                                 AdminDisplayMember(
-                                    id = "adm_${System.currentTimeMillis()}",
+                                    id = newId,
                                     name = name,
                                     role = role,
                                     isActive = true
                                 )
                             )
-                            onRecordLiveAdminAction(
-                                "ADMIN_SECURITY",
-                                "নতুন অ্যাডমিন যোগ করা হয়েছে",
-                                "অ্যাডমিন: $name ($role) যুক্ত করা হয়েছে।",
-                                "admin_member_add"
-                            )
+                            onSaveAdminMember(newId, name, role, true)
                         },
                         onToggleAdminMemberActive = { member ->
                             val nextState = !member.isActive
                             localAdminStatusOverrides.value =
                                 localAdminStatusOverrides.value + (member.id to nextState)
-                            onRecordLiveAdminAction(
-                                "ADMIN_SECURITY",
-                                "অ্যাডমিন স্ট্যাটাস পরিবর্তন",
-                                "${member.name} (${member.role}) - ${if (nextState) "সক্রিয়" else "নিষ্ক্রিয়"} করা হয়েছে।",
-                                member.id
-                            )
+                            onSaveAdminMember(member.id, member.name, member.role, nextState)
                         }
                     )
                 }

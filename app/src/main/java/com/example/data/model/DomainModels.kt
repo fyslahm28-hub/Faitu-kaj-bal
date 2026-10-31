@@ -11,9 +11,13 @@ import com.google.firebase.firestore.ServerTimestamp
 data class AdminRegistryEntry(
     @DocumentId val id: String = "",
     val adminId: String = "",
+    val name: String = "",
     val email: String = "",
     val adminPhone: String = "01300448147",
     val role: String = "SUPER_ADMIN",
+    @get:PropertyName("isActive")
+    @set:PropertyName("isActive")
+    var isActive: Boolean = true,
     @get:PropertyName("verifiedByAuthToken")
     @set:PropertyName("verifiedByAuthToken")
     var verifiedByAuthToken: Boolean = true,

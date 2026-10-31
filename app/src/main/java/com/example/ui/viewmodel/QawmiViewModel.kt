@@ -1604,7 +1604,7 @@ class QawmiViewModel(
             _errorBanner.value = null
             try {
                 val sendResult = try {
-                    withTimeout(10_000L) {
+                    withTimeout(20_000L) {
                         repository.sendDirectMessage(
                             senderName = senderName,
                             receiverId = receiverId,
@@ -2403,6 +2403,34 @@ class QawmiViewModel(
                 onComplete()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "নতুন আপডেট তথ্য সংরক্ষণ করা যায়নি।"
+            }
+        }
+    }
+
+    fun adminSaveAdminMember(
+        memberId: String,
+        name: String,
+        role: String,
+        isActive: Boolean
+    ) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
+            return
+        }
+        viewModelScope.launch {
+            clearBanners()
+            val actorName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+            val result = repository.adminSaveAdminMemberEntry(
+                memberId = memberId,
+                name = name,
+                role = role,
+                isActive = isActive,
+                actorAdminName = actorName
+            )
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, অ্যাডমিন সদস্যের তথ্য সার্ভারে সংরক্ষিত হয়েছে।"
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "অ্যাডমিন সদস্যের তথ্য সংরক্ষণে ত্রুটি হয়েছে।"
             }
         }
     }

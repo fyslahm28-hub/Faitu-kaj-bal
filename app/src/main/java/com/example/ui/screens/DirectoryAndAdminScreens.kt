@@ -4163,6 +4163,7 @@ fun AdminPanelScreen(
         isMandatory: Boolean,
         releaseStatus: String
     ) -> Unit = { _, _, _, _, _, _, _, _ -> },
+    onSaveAdminMember: (memberId: String, name: String, role: String, isActive: Boolean) -> Unit = { _, _, _, _ -> },
     onDeletePost: (String) -> Unit
 ) {
     ModernAdminPanelRoot(
@@ -4188,6 +4189,7 @@ fun AdminPanelScreen(
         onRecordLiveAdminAction = onRecordLiveAdminAction,
         onSendTestTelegramAlert = onSendTestTelegramAlert,
         onPublishAppRelease = onPublishAppRelease,
+        onSaveAdminMember = onSaveAdminMember,
         onDeletePost = onDeletePost
     )
 }

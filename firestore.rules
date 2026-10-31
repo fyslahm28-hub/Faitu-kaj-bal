@@ -31,10 +31,10 @@ service cloud.firestore {
 
     function hasUserBlocked(blockerUid, targetUid) {
       let path = /databases/$(database)/documents/users/$(blockerUid);
-      let blocked = exists(path) ? get(path).data.get('blockedUserIds', []) : [];
+      let rawBlocked = exists(path) ? get(path).data.get('blockedUserIds', []) : [];
+      let blocked = rawBlocked is list ? rawBlocked : [];
       return isValidId(blockerUid) &&
              isValidId(targetUid) &&
-             (blocked is list) &&
              (targetUid in blocked);
     }
 
@@ -44,10 +44,13 @@ service cloud.firestore {
 
     // Server-side Admin Role, Custom Claims & Authorized Admin Identity verification
     function isTokenVerifiedAdmin() {
+      let rawEmail = isSignedIn() ? request.auth.token.get('email', '') : '';
+      let email = rawEmail is string ? rawEmail.lower() : '';
       return isSignedIn() && (
         request.auth.token.get('admin', false) == true ||
         request.auth.token.get('role', '') == 'admin' ||
-        request.auth.token.get('email', '') in [
+        request.auth.token.get('role', '') == 'SUPER_ADMIN' ||
+        email in [
           'foysalahamad102@gmail.com',
           'foysalahamad204@gmail.com',
           'fyslahm28@gmail.com'
@@ -65,6 +68,8 @@ service cloud.firestore {
 
     // 3. Entity Validation Blueprints
     function isValidAdminRegistryEntry(data) {
+      let nameVal = data.get('name', '');
+      let isActiveVal = data.get('isActive', true);
       return data.adminId is string && data.adminId.size() >= 1 && data.adminId.size() <= 128 &&
              data.email is string && (
                data.email == 'foysalahamad102@gmail.com' ||
@@ -75,8 +80,10 @@ service cloud.firestore {
                data.adminPhone == '01300448147' ||
                data.adminPhone == '+8801300448147'
              ) &&
-             data.role is string && data.role == 'SUPER_ADMIN' &&
-             data.verifiedByAuthToken is bool && data.verifiedByAuthToken == true &&
+             data.role is string && data.role.size() >= 1 && data.role.size() <= 100 &&
+             (nameVal is string && nameVal.size() <= 150) &&
+             (isActiveVal is bool) &&
+             data.verifiedByAuthToken is bool &&
              isValidTimestamp(data.updatedAt);
     }
 
@@ -391,15 +398,14 @@ service cloud.firestore {
 
       allow create, update: if isTokenVerifiedAdmin() &&
                                isValidId(adminId) &&
-                               request.auth.uid == adminId &&
-                               incoming().adminId == request.auth.uid &&
+                               incoming().adminId == adminId &&
                                incoming().keys().hasAll([
                                  'adminId', 'email', 'adminPhone', 'role',
                                  'verifiedByAuthToken', 'updatedAt'
                                ]) &&
                                incoming().keys().hasOnly([
-                                 'adminId', 'email', 'adminPhone', 'role',
-                                 'verifiedByAuthToken', 'updatedAt'
+                                 'adminId', 'name', 'email', 'adminPhone', 'role',
+                                 'isActive', 'verifiedByAuthToken', 'updatedAt'
                                ]) &&
                                isValidAdminRegistryEntry(incoming());
 
@@ -409,7 +415,7 @@ service cloud.firestore {
     // Users Profile Collection
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn();
 
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
@@ -554,27 +560,30 @@ service cloud.firestore {
                        isValidFeedPost(incoming());
 
       function isValidFeedPostEngagementUpdate(inc) {
-        let userReactions = inc.get('userReactions', {});
-        let userReactionNames = inc.get('userReactionNames', {});
-        let commentCount = inc.get('commentCount', 0);
-        let shareCount = inc.get('shareCount', 0);
-        return (userReactions is map && userReactions.size() <= 500) &&
-               (userReactionNames is map && userReactionNames.size() <= 500) &&
-               (commentCount is int && commentCount >= 0 && commentCount <= 100000) &&
-               (shareCount is int && shareCount >= 0 && shareCount <= 100000) &&
+        let rawReactions = inc.get('userReactions', {});
+        let userReactions = rawReactions is map ? rawReactions : {};
+        let rawNames = inc.get('userReactionNames', {});
+        let userReactionNames = rawNames is map ? rawNames : {};
+        let rawComments = inc.get('commentCount', 0);
+        let commentCount = rawComments is int ? rawComments : 0;
+        let rawShares = inc.get('shareCount', 0);
+        let shareCount = rawShares is int ? rawShares : 0;
+        return userReactions.size() <= 500 &&
+               userReactionNames.size() <= 500 &&
+               commentCount >= 0 && commentCount <= 100000 &&
+               shareCount >= 0 && shareCount <= 100000 &&
                isValidTimestamp(inc.updatedAt);
       }
 
       function canUpdateFeedPost(inc, ext) {
         let diffKeys = inc.diff(ext).affectedKeys();
-        let boostUnchanged = inc.get('isBoosted', false) == ext.get('isBoosted', false);
-        let statusUnchanged = inc.get('approvalStatus', 'APPROVED') == ext.get('approvalStatus', 'APPROVED') &&
-                              inc.get('isVerifiedMadrasa', false) == ext.get('isVerifiedMadrasa', false) &&
-                              boostUnchanged;
-        let incReactions = inc.get('userReactions', {});
-        let extReactions = ext.get('userReactions', {});
-        let incReactionNames = inc.get('userReactionNames', {});
-        let extReactionNames = ext.get('userReactionNames', {});
+        let statusUnchanged = (inc.get('approvalStatus', 'APPROVED') == ext.get('approvalStatus', 'APPROVED')) &&
+                              (inc.get('isVerifiedMadrasa', false) == ext.get('isVerifiedMadrasa', false)) &&
+                              (inc.get('isBoosted', false) == ext.get('isBoosted', false));
+        let incReactions = inc.get('userReactions', {}) is map ? inc.get('userReactions', {}) : {};
+        let extReactions = ext.get('userReactions', {}) is map ? ext.get('userReactions', {}) : {};
+        let incReactionNames = inc.get('userReactionNames', {}) is map ? inc.get('userReactionNames', {}) : {};
+        let extReactionNames = ext.get('userReactionNames', {}) is map ? ext.get('userReactionNames', {}) : {};
         return inc.get('authorId', '') == ext.get('authorId', '') &&
                inc.get('postType', '') == ext.get('postType', '') &&
                inc.get('createdAt', request.time) == ext.get('createdAt', request.time) && (
@@ -967,7 +976,8 @@ service cloud.firestore {
                          'createdAt', 'updatedAt'
                        ]) &&
                        (incoming().eventType in [
-                         'NEW_CIRCULAR', 'NEW_APPLICATION', 'KHEDMOT_SUBMISSION', 'NEW_MADRASA'
+                         'NEW_CIRCULAR', 'NEW_APPLICATION', 'KHEDMOT_SUBMISSION',
+                         'NEW_MADRASA', 'CONTENT_MODERATION'
                        ] || isAdmin()) &&
                        isValidTelegramNotificationLog(incoming());
 

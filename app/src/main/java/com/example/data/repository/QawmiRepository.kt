@@ -1431,7 +1431,7 @@ class QawmiRepository(
                         FieldValue.delete(),
                         com.google.firebase.firestore.FieldPath.of("updatedAt"),
                         FieldValue.serverTimestamp()
-                    ).awaitMessageWriteConfirmation(docRef, 4_000L)
+                    ).awaitMessageWriteConfirmation(docRef, 12_000L)
                 } else {
                     docRef.update(
                         com.google.firebase.firestore.FieldPath.of("userReactions", uid),
@@ -1440,11 +1440,16 @@ class QawmiRepository(
                         cleanReactorName,
                         com.google.firebase.firestore.FieldPath.of("updatedAt"),
                         FieldValue.serverTimestamp()
-                    ).awaitMessageWriteConfirmation(docRef, 4_000L)
+                    ).awaitMessageWriteConfirmation(docRef, 12_000L)
                 }
             } catch (_: Exception) {
-                val updatedReactions = existingPost.userReactions.toMutableMap()
-                val updatedNames = existingPost.userReactionNames.toMutableMap()
+                val freshServerPost = runCatching {
+                    kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                        docRef.get().await().toFeedPostOrNull()
+                    }
+                }.getOrNull() ?: existingPost
+                val updatedReactions = freshServerPost.userReactions.toMutableMap()
+                val updatedNames = freshServerPost.userReactionNames.toMutableMap()
                 if (isRemoving) {
                     updatedReactions.remove(uid)
                     updatedNames.remove(uid)
@@ -1458,7 +1463,7 @@ class QawmiRepository(
                         "userReactionNames" to updatedNames,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                ).awaitMessageWriteConfirmation(docRef, 4_000L)
+                ).awaitMessageWriteConfirmation(docRef, 12_000L)
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -1526,36 +1531,40 @@ class QawmiRepository(
             )
             commentRef.set(payload).awaitMessageWriteConfirmation(
                 commentRef,
-                4_000L
+                12_000L
             )
 
-            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
-                coroutineScope {
-                    launch {
-                        runCatching {
-                            val postSnap = postRef.getCacheFirstOrNull(500L)
-                            val currentCount = (postSnap?.getLong("commentCount")?.toInt() ?: post.commentCount).coerceAtLeast(0)
-                            postRef.update(
-                                mapOf(
-                                    "commentCount" to (currentCount + 1),
-                                    "updatedAt" to FieldValue.serverTimestamp()
-                                )
-                            ).awaitMessageWriteConfirmation(postRef, 1_200L)
-                        }
-                    }
-                    if (post.authorId.isNotBlank() && post.authorId != uid) {
-                        launch {
-                            runCatching {
-                                createNotification(
-                                    recipientId = post.authorId,
-                                    senderName = resolvedAuthor,
-                                    title = if (parentCommentId.isNotBlank()) "আপনার পোস্টের কমেন্টে নতুন উত্তর" else "আপনার পোস্টে নতুন কমেন্ট",
-                                    message = "$resolvedAuthor মন্তব্য করেছেন: \"${cleanText.take(120)}\"",
-                                    type = "APPLICATION",
-                                    referenceId = post.id
-                                )
-                            }
-                        }
+            runCatching {
+                try {
+                    postRef.update(
+                        mapOf(
+                            "commentCount" to FieldValue.increment(1L),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).awaitMessageWriteConfirmation(postRef, 12_000L)
+                } catch (_: Exception) {
+                    val postSnap = postRef.getFastOrNull(2_000L)
+                    val currentCount = (postSnap?.getLong("commentCount")?.toInt() ?: post.commentCount).coerceAtLeast(0)
+                    postRef.update(
+                        mapOf(
+                            "commentCount" to (currentCount + 1),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).awaitMessageWriteConfirmation(postRef, 12_000L)
+                }
+            }
+
+            if (post.authorId.isNotBlank() && post.authorId != uid) {
+                kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+                    runCatching {
+                        createNotification(
+                            recipientId = post.authorId,
+                            senderName = resolvedAuthor,
+                            title = if (parentCommentId.isNotBlank()) "আপনার পোস্টের কমেন্টে নতুন উত্তর" else "আপনার পোস্টে নতুন কমেন্ট",
+                            message = "$resolvedAuthor মন্তব্য করেছেন: \"${cleanText.take(120)}\"",
+                            type = "APPLICATION",
+                            referenceId = post.id
+                        )
                     }
                 }
             }
@@ -1586,7 +1595,7 @@ class QawmiRepository(
                     "isEdited" to true,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).awaitMessageWriteConfirmation(commentRef, 4_000L)
+            ).awaitMessageWriteConfirmation(commentRef, 12_000L)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1604,20 +1613,18 @@ class QawmiRepository(
         requireUserId()
         val commentRef = db.collection("post_comments").document(commentId)
         return try {
-            commentRef.delete().awaitWithTimeout(4_000L)
+            commentRef.delete().awaitWithTimeout(12_000L)
             if (postId.isNotBlank()) {
-                kotlinx.coroutines.withTimeoutOrNull(1_200L) {
-                    runCatching {
-                        val postRef = db.collection("feed_posts").document(postId)
-                        val snap = postRef.getCacheFirstOrNull(400L)
-                        val existingCount = (snap?.getLong("commentCount")?.toInt() ?: currentCommentCount).coerceAtLeast(1)
-                        postRef.update(
-                            mapOf(
-                                "commentCount" to (existingCount - 1).coerceAtLeast(0),
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        ).awaitMessageWriteConfirmation(postRef, 1_000L)
-                    }
+                runCatching {
+                    val postRef = db.collection("feed_posts").document(postId)
+                    val snap = postRef.getFastOrNull(2_000L)
+                    val existingCount = (snap?.getLong("commentCount")?.toInt() ?: currentCommentCount).coerceAtLeast(1)
+                    postRef.update(
+                        mapOf(
+                            "commentCount" to (existingCount - 1).coerceAtLeast(0),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).awaitMessageWriteConfirmation(postRef, 12_000L)
                 }
             }
             Result.success(Unit)
@@ -1674,17 +1681,24 @@ class QawmiRepository(
         )
 
         createRes.onSuccess {
-            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
-                runCatching {
-                    val origRef = db.collection("feed_posts").document(originalPost.id)
-                    val snap = origRef.getCacheFirstOrNull(500L)
+            runCatching {
+                val origRef = db.collection("feed_posts").document(originalPost.id)
+                try {
+                    origRef.update(
+                        mapOf(
+                            "shareCount" to FieldValue.increment(1L),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).awaitMessageWriteConfirmation(origRef, 12_000L)
+                } catch (_: Exception) {
+                    val snap = origRef.getFastOrNull(2_000L)
                     val currentShares = (snap?.getLong("shareCount")?.toInt() ?: originalPost.shareCount).coerceAtLeast(0)
                     origRef.update(
                         mapOf(
                             "shareCount" to (currentShares + 1),
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                    ).awaitMessageWriteConfirmation(origRef, 1_200L)
+                    ).awaitMessageWriteConfirmation(origRef, 12_000L)
                 }
             }
         }
@@ -2473,11 +2487,14 @@ class QawmiRepository(
             db.collection("messages").document()
         }
         return try {
-            // Fast local cache idempotency check (0 network round-trips):
-            // Avoid queueing duplicate FIFO mutations for the same message ID.
+            // Only skip set() if the message was ALREADY acknowledged by the remote server (!hasPendingWrites):
             if (preallocatedMessageId.isNotBlank()) {
                 val existingDoc = docRef.getFromCacheOnlyOrNull(50L)
-                if (existingDoc != null && existingDoc.exists() && existingDoc.getString("senderId") == uid) {
+                if (existingDoc != null &&
+                    existingDoc.exists() &&
+                    existingDoc.getString("senderId") == uid &&
+                    !existingDoc.metadata.hasPendingWrites()
+                ) {
                     return Result.success(docRef.id)
                 }
             }
@@ -3533,6 +3550,56 @@ class QawmiRepository(
             }
         }
         return res
+    }
+
+    suspend fun adminSaveAdminMemberEntry(
+        memberId: String,
+        name: String,
+        role: String,
+        isActive: Boolean,
+        actorAdminName: String
+    ): Result<String> {
+        requireUserId()
+        val currentUser = runCatching { auth.currentUser }.getOrNull()
+        val resolvedEmail = AdminSecurityHelper.resolveEffectiveUserEmail(currentUser)
+            .takeIf { AdminSecurityHelper.isAuthorizedAdminEmail(it) }
+            ?: "fyslahm28@gmail.com"
+        val cleanId = memberId.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(120).ifBlank {
+            "adm_${System.currentTimeMillis()}"
+        }
+        val cleanName = name.trim().ifBlank { "অ্যাডমিন সদস্য" }.take(140)
+        val cleanRole = role.trim().ifBlank { "অ্যাডমিন" }.take(90)
+        val docRef = db.collection("admins").document(cleanId)
+        return try {
+            val payload = mapOf(
+                "adminId" to cleanId,
+                "name" to cleanName,
+                "email" to resolvedEmail,
+                "adminPhone" to AdminSecurityHelper.ADMIN_MOBILE_NUMBER,
+                "role" to cleanRole,
+                "isActive" to isActive,
+                "verifiedByAuthToken" to isActive,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).awaitMessageWriteConfirmation(docRef, 12_000L)
+            kotlinx.coroutines.withTimeoutOrNull(2_000L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = "ADMIN_SECURITY",
+                        title = "অ্যাডমিন সদস্য তথ্য হালনাগাদ",
+                        message = "অ্যাডমিন: $cleanName ($cleanRole) - অবস্থা: ${if (isActive) "সক্রিয়" else "নিষ্ক্রিয়"}",
+                        actorName = actorAdminName.ifBlank { "নাজিমে আলা (অ্যাডমিন)" },
+                        referenceId = cleanId
+                    )
+                }
+            }
+            Result.success(cleanId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(translateFirestoreExceptionToBangla(e))
+        }
     }
 
     suspend fun adminRecordLiveChangeNotification(

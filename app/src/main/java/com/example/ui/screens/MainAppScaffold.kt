@@ -1203,6 +1203,9 @@ fun MainAppScaffold(
                                         releaseStatus = status
                                     )
                                 },
+                                onSaveAdminMember = { memberId, name, role, isActive ->
+                                    viewModel.adminSaveAdminMember(memberId, name, role, isActive)
+                                },
                                 onDeletePost = { id -> viewModel.deletePost(id) }
                             )
                         }
