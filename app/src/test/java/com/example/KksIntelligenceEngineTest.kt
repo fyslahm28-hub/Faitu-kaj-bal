@@ -265,6 +265,17 @@ class KksIntelligenceEngineTest {
         assertEquals("CELLULAR", monitor.activeNetworkType.value)
         assertTrue(monitor.recoveryGeneration.value > genBeforeSwitch)
 
+        // 7. Startup & foreground full sync indicator and per-path server confirmation deduplication
+        assertFalse(monitor.isSyncing.value)
+        monitor.onFullSyncStarted("APP_STARTUP")
+        assertTrue(monitor.isSyncing.value)
+        assertFalse(monitor.hasRecentServerConfirmation("notifications/direct/u_101", withinMs = 1_800L))
+        monitor.onSnapshotReceived(path = "notifications/direct/u_101", isFromCache = false, hasPendingWrites = false)
+        assertTrue(monitor.hasRecentServerConfirmation("notifications/direct/u_101", withinMs = 1_800L))
+        monitor.onFullSyncFinished()
+        assertFalse(monitor.isSyncing.value)
+
         monitor.resetForTesting()
     }
 }
+

@@ -44,6 +44,9 @@ object FirestoreConnectionMonitor {
     private val _isReconnecting = MutableStateFlow(false)
     val isReconnecting: StateFlow<Boolean> = _isReconnecting.asStateFlow()
 
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
     private val _hasPendingWrites = MutableStateFlow(false)
     val hasPendingWrites: StateFlow<Boolean> = _hasPendingWrites.asStateFlow()
 
@@ -66,10 +69,35 @@ object FirestoreConnectionMonitor {
     val recoveryGeneration: StateFlow<Long> = _recoveryGeneration.asStateFlow()
 
     private val listenerCountsByPath = ConcurrentHashMap<String, AtomicInteger>()
+    private val lastServerConfirmedByPath = ConcurrentHashMap<String, Long>()
     private val lastServerConfirmedEpochMs = AtomicLong(0L)
 
     val lastServerConfirmedAtMs: Long
         get() = lastServerConfirmedEpochMs.get()
+
+    fun hasRecentServerConfirmation(path: String, withinMs: Long = 1_500L): Boolean {
+        if (!_isNetworkAvailable.value || !_isServerConnected.value) return false
+        val cleanPath = path.ifBlank { "unknown" }
+        val lastMs = lastServerConfirmedByPath[cleanPath] ?: return false
+        val elapsed = System.currentTimeMillis() - lastMs
+        return elapsed in 0L..withinMs
+    }
+
+    fun onFullSyncStarted(reason: String = "FULL_SYNC") {
+        if (_isNetworkAvailable.value) {
+            _isSyncing.value = true
+            if (!_isServerConnected.value) {
+                _isReconnecting.value = true
+            }
+        }
+    }
+
+    fun onFullSyncFinished() {
+        _isSyncing.value = false
+        if (_isServerConnected.value || !_isNetworkAvailable.value) {
+            _isReconnecting.value = false
+        }
+    }
 
     fun isServerStreamStalled(thresholdMs: Long = DEFAULT_STALL_THRESHOLD_MS): Boolean {
         if (!_isServerConnected.value || _isServingFromCache.value) return true
@@ -112,7 +140,10 @@ object FirestoreConnectionMonitor {
     ) {
         _hasPendingWrites.value = hasPendingWrites
         if (!isFromCache) {
-            lastServerConfirmedEpochMs.set(System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            lastServerConfirmedEpochMs.set(now)
+            val cleanPath = path.ifBlank { "unknown" }
+            lastServerConfirmedByPath[cleanPath] = now
             _isServerConnected.value = _isNetworkAvailable.value
             _isServingFromCache.value = false
             _isReconnecting.value = false
@@ -174,7 +205,9 @@ object FirestoreConnectionMonitor {
             _isServerConnected.value = false
             _isServingFromCache.value = true
             _isReconnecting.value = false
+            _isSyncing.value = false
             _activeNetworkType.value = "NONE"
+            lastServerConfirmedByPath.clear()
         } else if (changed) {
             _isReconnecting.value = true
             triggerGlobalReconnect("NETWORK_AVAILABLE")
@@ -192,6 +225,8 @@ object FirestoreConnectionMonitor {
             _isServerConnected.value = false
             _isServingFromCache.value = true
             _isReconnecting.value = false
+            _isSyncing.value = false
+            lastServerConfirmedByPath.clear()
             return
         }
 
@@ -225,12 +260,14 @@ object FirestoreConnectionMonitor {
 
     fun resetForTesting() {
         listenerCountsByPath.clear()
+        lastServerConfirmedByPath.clear()
         _activeListenerCount.value = 0
         _listenerReattachCount.value = 0
         _isNetworkAvailable.value = true
         _isServerConnected.value = true
         _isServingFromCache.value = false
         _isReconnecting.value = false
+        _isSyncing.value = false
         _hasPendingWrites.value = false
         _activeNetworkType.value = "UNKNOWN"
         _lastConnectionError.value = null

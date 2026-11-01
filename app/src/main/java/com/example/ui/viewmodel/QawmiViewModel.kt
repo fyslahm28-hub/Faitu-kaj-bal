@@ -246,6 +246,7 @@ class QawmiViewModel(
     val isServerConnected: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isServerConnected
     val isServingFromCache: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isServingFromCache
     val isReconnecting: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isReconnecting
+    val isSyncing: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isSyncing
     val hasPendingWrites: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.hasPendingWrites
     val lastConnectionError: StateFlow<String?> = com.example.data.repository.FirestoreConnectionMonitor.lastConnectionError
     val connectionErrorLogs: StateFlow<List<String>> = com.example.data.repository.FirestoreConnectionMonitor.connectionErrorLogs
@@ -568,13 +569,28 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
+    // Shared single listener for admin-wide submissions so receivedSubmissionsState and adminSubmissionsState never duplicate the query
+    private val sharedAdminSubmissionsFlow: StateFlow<List<KhedmotSubmission>> = combine(
+        isAdminState,
+        _adminDataRefreshToken
+    ) { isAdmin, token -> isAdmin to token }
+        .flatMapLatest { (isAdmin, _) ->
+            if (!isAdmin) {
+                flowOf(emptyList())
+            } else {
+                repository.observeAllSubmissionsForAdmin()
+                    .catch { emit(emptyList()) }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     val receivedSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
         combine(isAdminState, _adminDataRefreshToken) { isAdmin, token -> isAdmin to token }
             .flatMapLatest { (isAdmin, _) ->
                 if (isAdmin) {
                     combine(
                         repository.observeReceivedSubmissions(currentUserId),
-                        repository.observeAllSubmissionsForAdmin()
+                        sharedAdminSubmissionsFlow
                     ) { ownReceived, allSubs ->
                         (ownReceived + allSubs)
                             .distinctBy { it.id }
@@ -794,32 +810,28 @@ class QawmiViewModel(
 
     val adminSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
         isAdminState,
-        _adminDataRefreshToken
-    ) { isAdmin, token -> isAdmin to token }
-        .flatMapLatest { (isAdmin, _) ->
-            if (!isAdmin) {
-                flowOf(UiState.Success(emptyList()))
-            } else {
-                combine(
-                    repository.observeAllSubmissionsForAdmin(),
-                    _localOptimisticSubmissions,
-                    _localAdminSubmissionStatusOverrides
-                ) { remoteSubs, optimisticSubs, statusOverrides ->
-                    val remoteIds = remoteSubs.map { it.id }.toSet()
-                    val pending = optimisticSubs.filter { it.id.isNotBlank() && it.id !in remoteIds }
-                    val merged = (pending + remoteSubs)
-                        .distinctBy { it.id }
-                        .map { sub ->
-                            val overrideStatus = statusOverrides[sub.id]
-                            if (overrideStatus == null) sub else sub.copy(status = overrideStatus)
-                        }
-                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-                    UiState.Success(merged) as UiState<List<KhedmotSubmission>>
-                }.catch { e ->
-                    Log.w(TAG, "Error observing admin submissions", e)
-                    emit(UiState.Error(formatFirestoreErrorBangla(e, "আবেদনের তালিকা লোড করা যায়নি")))
+        sharedAdminSubmissionsFlow,
+        _localOptimisticSubmissions,
+        _localAdminSubmissionStatusOverrides
+    ) { isAdmin, remoteSubs, optimisticSubs, statusOverrides ->
+        if (!isAdmin) {
+            UiState.Success(emptyList<KhedmotSubmission>()) as UiState<List<KhedmotSubmission>>
+        } else {
+            val remoteIds = remoteSubs.map { it.id }.toSet()
+            val pending = optimisticSubs.filter { it.id.isNotBlank() && it.id !in remoteIds }
+            val merged = (pending + remoteSubs)
+                .distinctBy { it.id }
+                .map { sub ->
+                    val overrideStatus = statusOverrides[sub.id]
+                    if (overrideStatus == null) sub else sub.copy(status = overrideStatus)
                 }
-            }
+                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+            UiState.Success(merged) as UiState<List<KhedmotSubmission>>
+        }
+    }
+        .catch { e ->
+            Log.w(TAG, "Error observing admin submissions", e)
+            emit(UiState.Error(formatFirestoreErrorBangla(e, "আবেদনের তালিকা লোড করা যায়নি")))
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
@@ -866,14 +878,19 @@ class QawmiViewModel(
     private val pendingOutgoingQueue = java.util.concurrent.ConcurrentHashMap<String, FailedMessageDraft>()
 
     private val lastForegroundSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val lastNetworkSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
 
     init {
+        val startupEpoch = System.currentTimeMillis()
+        lastForegroundSyncEpochMs.set(startupEpoch)
+        lastNetworkSyncEpochMs.set(startupEpoch)
+        viewModelScope.launch {
+            repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "APP_STARTUP")
+            repository.refreshCriticalDataInParallel(currentUserId)
+        }
         setUserOnlineStatus(true)
         verifyAndSyncAdminIdentity()
         observeAndAcknowledgeDeliveredMessages()
-        viewModelScope.launch {
-            repository.refreshCriticalDataInParallel(currentUserId)
-        }
     }
 
     private fun observeAndAcknowledgeDeliveredMessages() {
@@ -1016,7 +1033,7 @@ class QawmiViewModel(
     /**
      * Triggered when the app returns to the foreground (`ON_START` / `ON_RESUME`).
      * Immediately wakes up the Firebase connection and refreshes Feed, Profile, Notifications,
-     * and Applications in parallel without duplicating active listeners.
+     * Applications, and all existing app data in parallel without duplicating active listeners.
      */
     fun onAppForegrounded() {
         val now = System.currentTimeMillis()
@@ -1044,7 +1061,11 @@ class QawmiViewModel(
      * (e.g., Wi-Fi <-> Mobile Data), without tearing down or duplicating already-healthy listeners.
      */
     fun onNetworkRestored() {
-        _adminDataRefreshToken.value = _adminDataRefreshToken.value + 1
+        val now = System.currentTimeMillis()
+        val prev = lastNetworkSyncEpochMs.get()
+        if ((now - prev) < 1_200L) return
+        lastNetworkSyncEpochMs.set(now)
+
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "NETWORK_RESTORED")
             repository.refreshCriticalDataInParallel(currentUserId)
@@ -1054,10 +1075,18 @@ class QawmiViewModel(
     }
 
     /**
-     * Refreshes live connection state when the Firebase Auth ID token is refreshed.
+     * Refreshes live connection state when the Firebase Auth ID token is refreshed,
+     * without tearing down active snapshot listeners.
      */
     fun onAuthSessionRefreshed() {
-        _adminDataRefreshToken.value = _adminDataRefreshToken.value + 1
+        val now = System.currentTimeMillis()
+        val prev = lastNetworkSyncEpochMs.get()
+        if ((now - prev) < 1_500L) {
+            verifyAndSyncAdminIdentity()
+            return
+        }
+        lastNetworkSyncEpochMs.set(now)
+
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "AUTH_TOKEN_REFRESHED")
             repository.refreshCriticalDataInParallel(currentUserId)

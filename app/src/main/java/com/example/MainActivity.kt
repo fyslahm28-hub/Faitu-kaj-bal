@@ -517,20 +517,33 @@ fun AppNavigation(
                 connectivityManager?.registerDefaultNetworkCallback(networkCallback)
             }
 
+            var wasInBackground = false
             val lifecycleObserver = LifecycleEventObserver { _, event ->
                 when (event) {
-                    Lifecycle.Event.ON_START,
+                    Lifecycle.Event.ON_START -> {
+                        val (onlineNow, transportNow) = resolveNetworkStatus(connectivityManager)
+                        com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(
+                            transportNow,
+                            onlineNow
+                        )
+                        if (wasInBackground && onlineNow) {
+                            wasInBackground = false
+                            qawmiViewModel.onAppForegrounded()
+                        }
+                    }
                     Lifecycle.Event.ON_RESUME -> {
                         val (onlineNow, transportNow) = resolveNetworkStatus(connectivityManager)
                         com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(
                             transportNow,
                             onlineNow
                         )
-                        if (onlineNow) {
+                        if (wasInBackground && onlineNow) {
+                            wasInBackground = false
                             qawmiViewModel.onAppForegrounded()
                         }
                     }
                     Lifecycle.Event.ON_STOP -> {
+                        wasInBackground = true
                         qawmiViewModel.onAppBackgrounded()
                     }
                     else -> Unit
@@ -538,7 +551,12 @@ fun AppNavigation(
             }
             lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
+            var isInitialTokenEmission = true
             val idTokenListener = FirebaseAuth.IdTokenListener { authInstance ->
+                if (isInitialTokenEmission) {
+                    isInitialTokenEmission = false
+                    return@IdTokenListener
+                }
                 if (authInstance.currentUser?.uid == currentUserId) {
                     qawmiViewModel.onAuthSessionRefreshed()
                 }

@@ -147,14 +147,19 @@ fun MainAppScaffold(
         }
     }
 
-    // Track real-time Online / Offline & Last Seen presence across app lifecycle
+    // Track real-time Online / Offline & Last Seen presence across app lifecycle without duplicating startup sync
     DisposableEffect(lifecycleOwner, viewModel.currentUserId) {
+        var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> {
-                    viewModel.onNetworkRestored()
+                Lifecycle.Event.ON_START -> {
+                    if (wasStopped) {
+                        wasStopped = false
+                        viewModel.onAppForegrounded()
+                    }
                 }
                 Lifecycle.Event.ON_STOP -> {
+                    wasStopped = true
                     viewModel.setUserOnlineStatus(false)
                 }
                 else -> Unit
@@ -197,6 +202,7 @@ fun MainAppScaffold(
     val isServerConnected by viewModel.isServerConnected.collectAsStateWithLifecycle()
     val isServingFromCache by viewModel.isServingFromCache.collectAsStateWithLifecycle()
     val isReconnecting by viewModel.isReconnecting.collectAsStateWithLifecycle()
+    val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
     val hasPendingWrites by viewModel.hasPendingWrites.collectAsStateWithLifecycle()
     val userProfileState by viewModel.userProfileState.collectAsStateWithLifecycle()
     val feedPostsState by viewModel.feedPostsState.collectAsStateWithLifecycle()
@@ -634,7 +640,7 @@ fun MainAppScaffold(
                             }
                         }
                     }
-                } else if (isReconnecting || (isServingFromCache && !isServerConnected)) {
+                } else if (isSyncing || isReconnecting || (isServingFromCache && !isServerConnected)) {
                     Surface(
                         color = Color(0xFFE8F5E9),
                         modifier = Modifier

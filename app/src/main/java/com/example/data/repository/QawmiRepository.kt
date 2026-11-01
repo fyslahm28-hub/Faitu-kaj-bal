@@ -94,159 +94,285 @@ class QawmiRepository(
     private val lastGrpcCycleEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
 
     /**
-     * Ensures the Firebase Firestore network connection and Auth token are active, resets stalled
-     * gRPC backoff states when recovering from long disconnects, flushes pending offline writes,
-     * and triggers immediate recovery for any detached or cache-bound listeners without duplicating
-     * already-healthy listeners.
+     * Ensures the Firebase Firestore network connection is active without unnecessarily
+     * re-initializing or reconnecting Firebase Auth. Only refreshes the Auth ID token when
+     * explicitly requested (`forceTokenRefresh = true`) or recovering from an authentication error,
+     * and only cycles the Firestore network when recovering from a verified long gRPC stall.
      */
-    suspend fun ensureLiveConnectionActive(forceTokenRefresh: Boolean = false, reason: String = "ENSURE_LIVE") {
-        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+    suspend fun ensureLiveConnectionActive(forceTokenRefresh: Boolean = false, reason: String = "ENSURE_LIVE") =
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            if (!FirestoreConnectionMonitor.isNetworkAvailable.value && reason != "NETWORK_RESTORED") {
+                return@withContext
+            }
+            FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
 
-        val currentUser = runCatching { auth.currentUser }.getOrNull()
-        if (currentUser != null && forceTokenRefresh) {
-            runCatching {
-                withTimeoutOrNull(2_000L) {
-                    currentUser.getIdToken(true).await()
+            val currentUser = runCatching { auth.currentUser }.getOrNull()
+            if (currentUser != null && forceTokenRefresh) {
+                runCatching {
+                    withTimeoutOrNull(1_500L) {
+                        currentUser.getIdToken(true).await()
+                    }
                 }
             }
-        } else if (currentUser != null) {
-            // Warm cached token non-blockingly with a tight bound
+
+            val nowMs = System.currentTimeMillis()
+            val lastConfirmedMs = FirestoreConnectionMonitor.lastServerConfirmedAtMs
+            val isLongStall = !FirestoreConnectionMonitor.isServerConnected.value &&
+                lastConfirmedMs > 0L &&
+                (nowMs - lastConfirmedMs) > 20_000L
+            val prevCycleMs = lastGrpcCycleEpochMs.get()
+
+            if (isLongStall && (nowMs - prevCycleMs) > 6_000L && lastGrpcCycleEpochMs.compareAndSet(prevCycleMs, nowMs)) {
+                // Reset Firestore's internal gRPC exponential backoff timer when recovering from a long stall
+                runCatching {
+                    withTimeoutOrNull(600L) {
+                        db.disableNetwork().await()
+                    }
+                }
+            }
+
             runCatching {
-                withTimeoutOrNull(400L) {
-                    currentUser.getIdToken(false).await()
+                withTimeoutOrNull(1_200L) {
+                    db.enableNetwork().await()
+                }
+            }
+
+            if (reason != "APP_STARTUP") {
+                FirestoreConnectionMonitor.triggerGlobalReconnect(reason)
+            }
+
+            // Flush any pending offline writes non-blockingly in a bounded window
+            if (FirestoreConnectionMonitor.hasPendingWrites.value) {
+                runCatching {
+                    val flushed = withTimeoutOrNull(1_500L) {
+                        db.waitForPendingWrites().await()
+                        true
+                    } ?: false
+                    if (flushed) {
+                        FirestoreConnectionMonitor.onPendingWritesFlushed()
+                    }
                 }
             }
         }
 
-        val nowMs = System.currentTimeMillis()
-        val lastConfirmedMs = FirestoreConnectionMonitor.lastServerConfirmedAtMs
-        val isLongStall = !FirestoreConnectionMonitor.isServerConnected.value &&
-            lastConfirmedMs > 0L &&
-            (nowMs - lastConfirmedMs) > 20_000L
-        val prevCycleMs = lastGrpcCycleEpochMs.get()
+    private suspend fun syncQueryFromServerIfNeeded(
+        query: com.google.firebase.firestore.Query,
+        path: String
+    ) {
+        if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return
+        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_800L)) return
 
-        if (isLongStall && (nowMs - prevCycleMs) > 6_000L && lastGrpcCycleEpochMs.compareAndSet(prevCycleMs, nowMs)) {
-            // Reset Firestore's internal gRPC exponential backoff timer when recovering from a long stall
-            runCatching {
-                withTimeoutOrNull(800L) {
-                    db.disableNetwork().await()
+        // If an active snapshot listener is already attached for this path, give it a brief window
+        // (up to 300ms) to deliver its server snapshot over the shared gRPC stream so we avoid duplicate reads.
+        if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0) {
+            repeat(6) {
+                delay(50L)
+                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_800L) ||
+                    !FirestoreConnectionMonitor.isNetworkAvailable.value
+                ) {
+                    return
                 }
             }
         }
 
-        runCatching {
-            withTimeoutOrNull(2_000L) {
-                db.enableNetwork().await()
+        val snap = withTimeoutOrNull(1_400L) {
+            runCatching { query.get(Source.SERVER).await() }.getOrNull()
+        } ?: withTimeoutOrNull(800L) {
+            // Single fast retry on transient failure
+            runCatching { query.get(Source.SERVER).await() }.getOrNull()
+        }
+
+        if (snap != null) {
+            FirestoreConnectionMonitor.onSnapshotReceived(
+                path = path,
+                isFromCache = snap.metadata.isFromCache,
+                hasPendingWrites = snap.metadata.hasPendingWrites()
+            )
+        }
+    }
+
+    private suspend fun syncDocFromServerIfNeeded(
+        docRef: DocumentReference,
+        path: String
+    ) {
+        if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return
+        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_800L)) return
+
+        if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0) {
+            repeat(6) {
+                delay(50L)
+                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_800L) ||
+                    !FirestoreConnectionMonitor.isNetworkAvailable.value
+                ) {
+                    return
+                }
             }
         }
 
-        FirestoreConnectionMonitor.triggerGlobalReconnect(reason)
+        val snap = withTimeoutOrNull(1_400L) {
+            runCatching { docRef.get(Source.SERVER).await() }.getOrNull()
+        } ?: withTimeoutOrNull(800L) {
+            runCatching { docRef.get(Source.SERVER).await() }.getOrNull()
+        }
 
-        // Flush any pending offline writes safely in a bounded window
-        if (FirestoreConnectionMonitor.hasPendingWrites.value) {
-            runCatching {
-                val flushed = withTimeoutOrNull(2_500L) {
-                    db.waitForPendingWrites().await()
-                    true
-                } ?: false
-                if (flushed) {
-                    FirestoreConnectionMonitor.onPendingWritesFlushed()
-                }
-            }
+        if (snap != null) {
+            FirestoreConnectionMonitor.onSnapshotReceived(
+                path = path,
+                isFromCache = snap.metadata.isFromCache,
+                hasPendingWrites = snap.metadata.hasPendingWrites()
+            )
         }
     }
 
     /**
-     * Refreshes critical user-facing collections (Feed, Profile, Notifications, Applications) in
-     * parallel on [Dispatchers.IO] with a strict 2-second timeout budget so returning to the
-     * foreground or reconnecting to the internet updates live snapshots within ~2 seconds without
-     * blocking the main thread or creating duplicate listeners.
+     * Refreshes all required app datasets (Feed, Profile, Notifications, Sent & Received Applications,
+     * Messages, Chat Groups, Bookmarks, Madrasas, Post Comments, Intelligence Config & Metrics, and App
+     * Release info) in parallel on [Dispatchers.IO] within a strict < 2-second timeout budget.
+     * Skips any collection whose active snapshot listener has already confirmed fresh server data
+     * within the last 1.8s so Firebase read costs are never inflated by duplicate queries.
      */
     suspend fun refreshCriticalDataInParallel(userId: String) = kotlinx.coroutines.withContext(Dispatchers.IO) {
         val effectiveUid = resolveEffectiveUserId(userId)
         if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return@withContext
-        coroutineScope {
-            val feedJob = async {
-                withTimeoutOrNull(2_000L) {
-                    runCatching {
-                        val snap = db.collection("feed_posts").get(Source.SERVER).await()
-                        FirestoreConnectionMonitor.onSnapshotReceived(
-                            path = "feed_posts",
-                            isFromCache = snap.metadata.isFromCache,
-                            hasPendingWrites = snap.metadata.hasPendingWrites()
+        FirestoreConnectionMonitor.onFullSyncStarted("PARALLEL_FULL_SYNC")
+        try {
+            withTimeoutOrNull(1_950L) {
+                coroutineScope {
+                    val jobs = mutableListOf<kotlinx.coroutines.Deferred<Unit>>()
+
+                    // 1. Feed Posts
+                    jobs += async {
+                        syncQueryFromServerIfNeeded(db.collection("feed_posts"), "feed_posts")
+                    }
+                    // 2. Public Madrasas
+                    jobs += async {
+                        syncQueryFromServerIfNeeded(db.collection("madrasas"), "madrasas")
+                    }
+                    // 3. Public Post Comments
+                    jobs += async {
+                        syncQueryFromServerIfNeeded(db.collection("post_comments"), "post_comments")
+                    }
+                    // 4. Broadcast Notifications
+                    jobs += async {
+                        syncQueryFromServerIfNeeded(
+                            db.collection("notifications").whereEqualTo("recipientId", "ALL_USERS"),
+                            "notifications/broadcast"
                         )
                     }
-                }
-            }
-            val profileJob = async {
-                if (effectiveUid.isNotBlank()) {
-                    withTimeoutOrNull(2_000L) {
-                        runCatching {
-                            val snap = db.collection("users").document(effectiveUid).get(Source.SERVER).await()
-                            FirestoreConnectionMonitor.onSnapshotReceived(
-                                path = "users/$effectiveUid",
-                                isFromCache = snap.metadata.isFromCache,
-                                hasPendingWrites = snap.metadata.hasPendingWrites()
+                    // 5. KKS Intelligence Global Config & Metrics
+                    jobs += async {
+                        val configRef = db.collection("intelligence_config")
+                            .document(IntelligenceConfig.GLOBAL_CONFIG_DOC_ID)
+                        syncDocFromServerIfNeeded(configRef, configRef.path)
+                    }
+                    jobs += async {
+                        syncQueryFromServerIfNeeded(
+                            db.collection("post_intelligence_metrics"),
+                            "post_intelligence_metrics"
+                        )
+                    }
+                    // 6. Latest App Release
+                    jobs += async {
+                        syncDocFromServerIfNeeded(
+                            db.collection("app_releases").document("latest"),
+                            "app_releases/latest"
+                        )
+                    }
+
+                    if (effectiveUid.isNotBlank()) {
+                        // 7. Current User Profile
+                        jobs += async {
+                            syncDocFromServerIfNeeded(
+                                db.collection("users").document(effectiveUid),
+                                "users/$effectiveUid"
                             )
                         }
-                    }
-                }
-            }
-            val notifJob = async {
-                if (effectiveUid.isNotBlank()) {
-                    withTimeoutOrNull(2_000L) {
-                        runCatching {
-                            val snap = db.collection("notifications").get(Source.SERVER).await()
-                            FirestoreConnectionMonitor.onSnapshotReceived(
-                                path = "notifications",
-                                isFromCache = snap.metadata.isFromCache,
-                                hasPendingWrites = snap.metadata.hasPendingWrites()
+                        // 8. Direct Notifications & Read Receipts (also backs Ajker Smoron)
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("notifications").whereEqualTo("recipientId", effectiveUid),
+                                "notifications/direct/$effectiveUid"
                             )
                         }
-                    }
-                }
-            }
-            val submissionsJob = async {
-                if (effectiveUid.isNotBlank()) {
-                    withTimeoutOrNull(2_000L) {
-                        runCatching {
-                            val snap = db.collection("khedmot_submissions")
-                                .whereEqualTo("applicantId", effectiveUid)
-                                .get(Source.SERVER)
-                                .await()
-                            FirestoreConnectionMonitor.onSnapshotReceived(
-                                path = "khedmot_submissions/sent/$effectiveUid",
-                                isFromCache = snap.metadata.isFromCache,
-                                hasPendingWrites = snap.metadata.hasPendingWrites()
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("users").document(effectiveUid).collection("notification_reads"),
+                                "users/$effectiveUid/notification_reads"
                             )
                         }
+                        // 9. Sent & Received Khedmot Applications
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("khedmot_submissions").whereEqualTo("applicantId", effectiveUid),
+                                "khedmot_submissions/sent/$effectiveUid"
+                            )
+                        }
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("khedmot_submissions").whereEqualTo("recipientId", effectiveUid),
+                                "khedmot_submissions/received/$effectiveUid"
+                            )
+                        }
+                        // 10. Direct & Group Messages + Chat Groups
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("messages").whereEqualTo("receiverId", effectiveUid),
+                                "messages/received/$effectiveUid"
+                            )
+                        }
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("messages").whereEqualTo("senderId", effectiveUid),
+                                "messages/sent/$effectiveUid"
+                            )
+                        }
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("chat_groups").whereArrayContains("memberIds", effectiveUid),
+                                "chat_groups/$effectiveUid"
+                            )
+                        }
+                        // 11. Bookmarks & User Affinity
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
+                                db.collection("users").document(effectiveUid).collection("bookmarks"),
+                                "users/$effectiveUid/bookmarks"
+                            )
+                        }
+                        jobs += async {
+                            val affinityRef = db.collection("users")
+                                .document(effectiveUid)
+                                .collection("intelligence_state")
+                                .document(UserAffinityState.AFFINITY_DOC_ID)
+                            syncDocFromServerIfNeeded(affinityRef, affinityRef.path)
+                        }
                     }
+
+                    jobs.forEach { it.await() }
                 }
             }
-            feedJob.await()
-            profileJob.await()
-            notifJob.await()
-            submissionsJob.await()
+        } finally {
+            FirestoreConnectionMonitor.onFullSyncFinished()
         }
     }
 
     /**
      * Self-healing Firestore [com.google.firebase.firestore.Query] observer:
-     * 1. Emits local cached data (`Source.CACHE`) immediately on [Dispatchers.IO] (target < 1s,
-     *    typically < 50ms) so the UI renders stored data right away on cold start or offline mode.
+     * 1. Emits local cached data (`Source.CACHE`) immediately on [Dispatchers.IO] (target < 100ms)
+     *    so the UI renders stored data right away on cold start or offline mode without clearing existing state.
      * 2. Attaches a single authoritative `addSnapshotListener` per flow (strictly deduplicated via
      *    `activeRegistration`) using [MetadataChanges.INCLUDE] so server confirmation (`!isFromCache`)
      *    is always detected even when cached documents match server documents.
      * 3. Automatically re-subscribes `addSnapshotListener` with bounded exponential backoff whenever
      *    a transient gRPC idle reset, network drop, or token refresh causes `error != null`.
-     * 4. Performs an automatic background server refresh when a global reconnect signal arrives while
-     *    serving cached data or when the initial stream takes longer than `initialServerTimeoutMs`.
+     * 4. Performs an automatic parallel server refresh (< 2s) when a foreground/network reconnect
+     *    signal arrives or when the initial stream has not confirmed from server within `initialServerTimeoutMs`.
      */
     private fun <T> observeQueryWithFastInitialAndFallback(
         query: com.google.firebase.firestore.Query,
         path: String,
         includeMetadataChanges: Boolean = false,
-        initialServerTimeoutMs: Long = 1_800L,
+        initialServerTimeoutMs: Long = 700L,
         mapper: (QuerySnapshot) -> List<T>
     ): Flow<List<T>> = channelFlow {
         val hasEmittedAny = AtomicBoolean(false)
@@ -298,7 +424,7 @@ class QawmiRepository(
                             val attempt = retryAttempt.incrementAndGet()
                             // Serve local cache fallback if nothing emitted yet, explicitly marked as cache
                             if (!hasEmittedAny.get() && runCatching { auth.currentUser }.getOrNull() != null) {
-                                val cachedFallback = withTimeoutOrNull(250L) {
+                                val cachedFallback = withTimeoutOrNull(200L) {
                                     runCatching { query.get(Source.CACHE).await() }.getOrNull()
                                 }
                                 if (cachedFallback != null) {
@@ -316,7 +442,7 @@ class QawmiRepository(
                                 }
                             }
 
-                            val backoffMs = minOf(600L * (1L shl (attempt - 1).coerceAtMost(3)), 5_000L)
+                            val backoffMs = minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
 
@@ -324,7 +450,7 @@ class QawmiRepository(
                                 error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
                             ) {
                                 runCatching {
-                                    withTimeoutOrNull(2_500L) {
+                                    withTimeoutOrNull(2_000L) {
                                         auth.currentUser?.getIdToken(true)?.await()
                                     }
                                 }
@@ -378,10 +504,13 @@ class QawmiRepository(
         launch(Dispatchers.IO) {
             if (listenerHasEmitted.get() || hasEmittedAny.get()) return@launch
             if (runCatching { auth.currentUser }.getOrNull() == null) return@launch
-            val cachedSnap = withTimeoutOrNull(250L) {
+            val cachedSnap = withTimeoutOrNull(200L) {
                 runCatching { query.get(Source.CACHE).await() }.getOrNull()
             }
-            if (cachedSnap != null && !cachedSnap.isEmpty && !listenerHasEmitted.get()) {
+            if (cachedSnap != null &&
+                (!cachedSnap.isEmpty || !FirestoreConnectionMonitor.isNetworkAvailable.value) &&
+                !listenerHasEmitted.get()
+            ) {
                 FirestoreConnectionMonitor.onSnapshotReceived(
                     path = path,
                     isFromCache = true,
@@ -394,7 +523,7 @@ class QawmiRepository(
             }
         }
 
-        // 3. Re-attach or refresh immediately if a global network/auth/foreground reconnect signal arrives
+        // 3. Re-attach or refresh in parallel when a foreground/network reconnect signal arrives
         launch(Dispatchers.IO) {
             FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
                 if (!isActive) return@collect
@@ -404,9 +533,15 @@ class QawmiRepository(
                     runCatching { db.enableNetwork() }
                     FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
                     attachSnapshotListener()
-                } else if (!hasReceivedServerSnapshot.get() || FirestoreConnectionMonitor.isServingFromCache.value) {
-                    // Active listener exists but is currently serving cached data; fetch fresh server snapshot in background
-                    val freshSnap = withTimeoutOrNull(2_000L) {
+                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value &&
+                    !FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)
+                ) {
+                    // Wait briefly in case the active listener already received a server push
+                    delay(200L)
+                    if (!isActive || FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)) {
+                        return@collect
+                    }
+                    val freshSnap = withTimeoutOrNull(1_500L) {
                         runCatching { query.get(Source.SERVER).await() }.getOrNull()
                     }
                     if (freshSnap != null && isActive) {
@@ -424,15 +559,24 @@ class QawmiRepository(
             }
         }
 
-        // 4. Bounded fallback if no server-confirmed snapshot has arrived within initialServerTimeoutMs
+        // 4. Bounded fast server sync (< 2s total startup budget) if the watch stream hasn't confirmed yet
         launch(Dispatchers.IO) {
             delay(initialServerTimeoutMs)
-            if (hasReceivedServerSnapshot.get()) return@launch
+            if (hasReceivedServerSnapshot.get() ||
+                FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 2_000L)
+            ) {
+                return@launch
+            }
             var serverErr: Throwable? = null
-            val serverSnap = withTimeoutOrNull(2_000L) {
-                runCatching { query.get().await() }
-                    .onFailure { serverErr = it }
-                    .getOrNull()
+            val serverSnap = if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                withTimeoutOrNull(1_200L) {
+                    runCatching { query.get(Source.SERVER).await() }
+                        .recoverCatching { query.get().await() }
+                        .onFailure { serverErr = it }
+                        .getOrNull()
+                }
+            } else {
+                null
             }
             if (serverSnap != null && !hasReceivedServerSnapshot.get()) {
                 FirestoreConnectionMonitor.onSnapshotReceived(
@@ -455,7 +599,7 @@ class QawmiRepository(
                     return@launch
                 }
                 val fallbackCache = if (runCatching { auth.currentUser }.getOrNull() != null) {
-                    withTimeoutOrNull(250L) {
+                    withTimeoutOrNull(200L) {
                         runCatching { query.get(Source.CACHE).await() }.getOrNull()
                     }
                 } else null
@@ -483,7 +627,7 @@ class QawmiRepository(
 
     /**
      * Self-healing single-document observer (`addSnapshotListener` with automatic re-subscription
-     * on stream/token errors, instant zero-delay local cache emission, and accurate Server vs Cache tracking).
+     * on stream/token errors, instant zero-delay local cache emission, and < 2s Server sync).
      */
     private fun <T> observeDocumentWithAutoRecovery(
         docRef: DocumentReference,
@@ -526,7 +670,7 @@ class QawmiRepository(
                         recoveryJob = launch(Dispatchers.IO) {
                             val attempt = retryAttempt.incrementAndGet()
                             if (!hasEmittedAny.get()) {
-                                val cachedDoc = withTimeoutOrNull(250L) {
+                                val cachedDoc = withTimeoutOrNull(200L) {
                                     runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
                                 }
                                 if (cachedDoc != null && cachedDoc.exists()) {
@@ -542,14 +686,14 @@ class QawmiRepository(
                                     trySend(defaultValueOnError)
                                 }
                             }
-                            val backoffMs = minOf(600L * (1L shl (attempt - 1).coerceAtMost(3)), 5_000L)
+                            val backoffMs = minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
                             if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                 error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
                             ) {
                                 runCatching {
-                                    withTimeoutOrNull(2_500L) {
+                                    withTimeoutOrNull(2_000L) {
                                         auth.currentUser?.getIdToken(true)?.await()
                                     }
                                 }
@@ -597,31 +741,38 @@ class QawmiRepository(
 
         attachDocListener()
 
-        // Fast zero-delay initial document fetch from local cache on Dispatchers.IO (< 100ms), then server fallback
+        // Fast zero-delay initial document fetch from local cache on Dispatchers.IO (< 100ms), then < 2s server fallback
         launch(Dispatchers.IO) {
-            if (hasEmittedAny.get()) return@launch
-            val cached = withTimeoutOrNull(200L) {
-                runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
-            }
-            if (cached != null && cached.exists() && !hasEmittedAny.get()) {
-                FirestoreConnectionMonitor.onSnapshotReceived(
-                    path = path,
-                    isFromCache = true,
-                    hasPendingWrites = cached.metadata.hasPendingWrites()
-                )
-                val mapped = runCatching { mapper(cached) }.getOrDefault(defaultValueOnError)
-                if (!hasEmittedAny.get()) {
-                    hasEmittedAny.set(true)
-                    trySend(mapped)
+            if (!hasEmittedAny.get()) {
+                val cached = withTimeoutOrNull(180L) {
+                    runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
+                }
+                if (cached != null && cached.exists() && !hasEmittedAny.get()) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = path,
+                        isFromCache = true,
+                        hasPendingWrites = cached.metadata.hasPendingWrites()
+                    )
+                    val mapped = runCatching { mapper(cached) }.getOrDefault(defaultValueOnError)
+                    if (!hasEmittedAny.get()) {
+                        hasEmittedAny.set(true)
+                        trySend(mapped)
+                    }
                 }
             }
             if (!hasReceivedServerSnapshot.get()) {
-                delay(1_200L)
-                if (!hasReceivedServerSnapshot.get() && isActive) {
-                    val serverSnap = withTimeoutOrNull(2_000L) {
-                        runCatching { docRef.get().await() }.getOrNull()
+                delay(650L)
+                if (!hasReceivedServerSnapshot.get() &&
+                    !FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 2_000L) &&
+                    FirestoreConnectionMonitor.isNetworkAvailable.value &&
+                    isActive
+                ) {
+                    val serverSnap = withTimeoutOrNull(1_200L) {
+                        runCatching { docRef.get(Source.SERVER).await() }
+                            .recoverCatching { docRef.get().await() }
+                            .getOrNull()
                     }
-                    if (serverSnap != null && serverSnap.exists() && !hasReceivedServerSnapshot.get()) {
+                    if (serverSnap != null && !hasReceivedServerSnapshot.get()) {
                         FirestoreConnectionMonitor.onSnapshotReceived(
                             path = path,
                             isFromCache = serverSnap.metadata.isFromCache,
@@ -630,7 +781,11 @@ class QawmiRepository(
                         if (!serverSnap.metadata.isFromCache) {
                             hasReceivedServerSnapshot.set(true)
                         }
-                        val mapped = runCatching { mapper(serverSnap) }.getOrDefault(defaultValueOnError)
+                        val mapped = if (serverSnap.exists()) {
+                            runCatching { mapper(serverSnap) }.getOrDefault(defaultValueOnError)
+                        } else {
+                            defaultValueOnError
+                        }
                         hasEmittedAny.set(true)
                         trySend(mapped)
                     }
@@ -638,7 +793,7 @@ class QawmiRepository(
             }
         }
 
-        // Re-attach or refresh immediately if a global network/auth/foreground reconnect signal arrives
+        // Re-attach or refresh in parallel when a foreground/network reconnect signal arrives
         launch(Dispatchers.IO) {
             FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
                 if (!isActive) return@collect
@@ -648,8 +803,14 @@ class QawmiRepository(
                     runCatching { db.enableNetwork() }
                     FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
                     attachDocListener()
-                } else if (!hasReceivedServerSnapshot.get() || FirestoreConnectionMonitor.isServingFromCache.value) {
-                    val freshDoc = withTimeoutOrNull(2_000L) {
+                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value &&
+                    !FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)
+                ) {
+                    delay(200L)
+                    if (!isActive || FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)) {
+                        return@collect
+                    }
+                    val freshDoc = withTimeoutOrNull(1_500L) {
                         runCatching { docRef.get(Source.SERVER).await() }.getOrNull()
                     }
                     if (freshDoc != null && isActive) {
@@ -1314,7 +1475,7 @@ class QawmiRepository(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
             snapshot.documents
@@ -1989,7 +2150,7 @@ class QawmiRepository(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
             snapshot.documents
@@ -2379,7 +2540,7 @@ class QawmiRepository(
             query = db.collection("users").document(effectiveUid).collection("bookmarks"),
             path = path,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.safeToObjects(BookmarkItem::class.java)
                 .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
@@ -2426,7 +2587,7 @@ class QawmiRepository(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
             snapshot.safeToObjects(MadrasaProfile::class.java)
@@ -2547,12 +2708,12 @@ class QawmiRepository(
     fun observeMySentSubmissions(userId: String): Flow<List<KhedmotSubmission>> {
         val effectiveUid = resolveEffectiveUserId(userId)
         if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
-        val path = "khedmot_submissions"
+        val collectionName = "khedmot_submissions"
         return observeQueryWithFastInitialAndFallback(
-            query = db.collection(path).whereEqualTo("applicantId", effectiveUid),
-            path = path,
+            query = db.collection(collectionName).whereEqualTo("applicantId", effectiveUid),
+            path = "khedmot_submissions/sent/$effectiveUid",
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents
                 .mapNotNull { it.toKhedmotSubmissionOrNull() }
@@ -2564,12 +2725,12 @@ class QawmiRepository(
     fun observeReceivedSubmissions(userId: String): Flow<List<KhedmotSubmission>> {
         val effectiveUid = resolveEffectiveUserId(userId)
         if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
-        val path = "khedmot_submissions"
+        val collectionName = "khedmot_submissions"
         return observeQueryWithFastInitialAndFallback(
-            query = db.collection(path).whereEqualTo("recipientId", effectiveUid),
-            path = path,
+            query = db.collection(collectionName).whereEqualTo("recipientId", effectiveUid),
+            path = "khedmot_submissions/received/$effectiveUid",
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents
                 .mapNotNull { it.toKhedmotSubmissionOrNull() }
@@ -2861,12 +3022,12 @@ class QawmiRepository(
     fun observeUserGroups(userId: String): Flow<List<ChatGroup>> {
         val effectiveUid = resolveEffectiveUserId(userId)
         if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
-        val path = "chat_groups"
+        val collectionName = "chat_groups"
         return observeQueryWithFastInitialAndFallback(
-            query = db.collection(path).whereArrayContains("memberIds", effectiveUid),
-            path = path,
+            query = db.collection(collectionName).whereArrayContains("memberIds", effectiveUid),
+            path = "chat_groups/$effectiveUid",
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toChatGroupOrNull() }
                 .distinctBy { it.id }
@@ -3063,31 +3224,31 @@ class QawmiRepository(
     fun observeUserMessages(userId: String): Flow<List<DirectMessage>> {
         val effectiveUid = resolveEffectiveUserId(userId)
         if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
-        val path = "messages"
+        val collectionName = "messages"
 
         val sentFlow = observeQueryWithFastInitialAndFallback(
-            query = db.collection(path).whereEqualTo("senderId", effectiveUid),
-            path = path,
+            query = db.collection(collectionName).whereEqualTo("senderId", effectiveUid),
+            path = "messages/sent/$effectiveUid",
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
         }
 
         val receivedFlow = observeQueryWithFastInitialAndFallback(
-            query = db.collection(path).whereEqualTo("receiverId", effectiveUid),
-            path = path,
+            query = db.collection(collectionName).whereEqualTo("receiverId", effectiveUid),
+            path = "messages/received/$effectiveUid",
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
         }
 
         val groupMessagesFlow = observeQueryWithFastInitialAndFallback(
-            query = db.collection(path).whereArrayContains("groupMemberIds", effectiveUid),
-            path = path,
+            query = db.collection(collectionName).whereArrayContains("groupMemberIds", effectiveUid),
+            path = "messages/group/$effectiveUid",
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
         }
@@ -3694,23 +3855,23 @@ class QawmiRepository(
     fun observeNotifications(userId: String): Flow<List<AppNotification>> {
         val effectiveUid = resolveEffectiveUserId(userId)
         if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(emptyList())
-        val notifPath = "notifications"
+        val notifCollection = "notifications"
         val readsPath = "users/$effectiveUid/notification_reads"
 
         val directFlow = observeQueryWithFastInitialAndFallback(
-            query = db.collection(notifPath).whereEqualTo("recipientId", effectiveUid),
-            path = notifPath,
+            query = db.collection(notifCollection).whereEqualTo("recipientId", effectiveUid),
+            path = "notifications/direct/$effectiveUid",
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.safeToObjects(AppNotification::class.java)
         }
 
         val broadcastFlow = observeQueryWithFastInitialAndFallback(
-            query = db.collection(notifPath).whereEqualTo("recipientId", "ALL_USERS"),
-            path = notifPath,
+            query = db.collection(notifCollection).whereEqualTo("recipientId", "ALL_USERS"),
+            path = "notifications/broadcast",
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.safeToObjects(AppNotification::class.java)
         }
@@ -3719,7 +3880,7 @@ class QawmiRepository(
             query = db.collection("users").document(effectiveUid).collection("notification_reads"),
             path = readsPath,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.safeToObjects(NotificationReadReceipt::class.java)
                 .map { it.notificationId.ifBlank { it.id } }
@@ -3875,7 +4036,7 @@ class QawmiRepository(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.safeToObjects(TelegramNotificationLog::class.java)
                 .distinctBy { it.id }
@@ -4085,9 +4246,9 @@ class QawmiRepository(
         val path = "users"
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
-            path = path,
+            path = "users/admin_all",
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toUserProfileOrNull() }
                 .distinctBy { it.id.ifBlank { it.userId } }
@@ -4099,9 +4260,9 @@ class QawmiRepository(
         val path = "khedmot_submissions"
         return observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
-            path = path,
+            path = "khedmot_submissions/admin_all",
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toKhedmotSubmissionOrNull() }
                 .distinctBy { it.id }
@@ -4115,7 +4276,7 @@ class QawmiRepository(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.safeToObjects(AdminRegistryEntry::class.java)
                 .distinctBy { it.id.ifBlank { it.adminId } }
@@ -4282,7 +4443,7 @@ class QawmiRepository(
         if (trimmed.isBlank() || (currentUid.isNotBlank() && trimmed != currentUid)) {
             return kotlinx.coroutines.flow.flowOf(emptyMap())
         }
-        val readsPath = "users/$trimmed/notification_reads"
+        val readsPath = "users/$trimmed/smoron_receipts"
         return observeQueryWithFastInitialAndFallback(
             query = db.collection("users")
                 .document(trimmed)
@@ -4290,7 +4451,7 @@ class QawmiRepository(
                 .whereEqualTo("userId", trimmed),
             path = readsPath,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 3_500L
+            initialServerTimeoutMs = 700L
         ) { snapshot ->
             snapshot.safeToObjects(NotificationReadReceipt::class.java)
                 .mapNotNull { receipt ->
@@ -4579,7 +4740,7 @@ class QawmiRepository(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = false,
-            initialServerTimeoutMs = 2_500L
+            initialServerTimeoutMs = 700L
         ) { snap ->
             snap.safeToObjects(PostIntelligenceMetrics::class.java)
                 .filter { it.id.isNotBlank() || it.postId.isNotBlank() }
