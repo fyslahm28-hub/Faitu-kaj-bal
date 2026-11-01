@@ -363,8 +363,19 @@ class QawmiViewModel(
         _localAdminPostOverrides
     ) { remotePosts, optimisticPosts, engagementOverrides, adminOverrides ->
         val remoteIds = remotePosts.map { it.id }.toSet()
+        val optimisticById = optimisticPosts.associateBy { it.id }
         val pendingOptimistic = optimisticPosts.filter { it.id.isNotBlank() && it.id !in remoteIds }
-        val merged = (pendingOptimistic + remotePosts)
+        val mergedRemote = remotePosts.map { remote ->
+            val opt = optimisticById[remote.id]
+            val optUpdatedMs = opt?.updatedAt?.toDate()?.time ?: 0L
+            val remoteUpdatedMs = remote.updatedAt?.toDate()?.time ?: 0L
+            if (opt != null && ((opt.isEdited && !remote.isEdited) || optUpdatedMs > remoteUpdatedMs)) {
+                opt
+            } else {
+                remote
+            }
+        }
+        val merged = (pendingOptimistic + mergedRemote)
             .distinctBy { it.id }
             .map { rawPost ->
                 val adminOverride = adminOverrides[rawPost.id]
@@ -466,14 +477,24 @@ class QawmiViewModel(
     val feedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
         rawMergedFeedPostsState,
         scoredFeedPostsState,
-        intelligenceConfigState
-    ) { rawUiState, scoredList, config ->
+        intelligenceConfigState,
+        _localOptimisticPosts
+    ) { rawUiState, scoredList, config, optimisticPosts ->
         when (rawUiState) {
             is UiState.Loading -> UiState.Loading
             is UiState.Error -> rawUiState
             is UiState.Success -> {
                 if (config.isSmartRankingEnabled && scoredList.isNotEmpty()) {
-                    UiState.Success(scoredList.map { it.post })
+                    val nowMs = System.currentTimeMillis()
+                    val optimisticIds = optimisticPosts.map { it.id }.toSet()
+                    val rankedPosts = scoredList.map { it.post }
+                    val (freshOwnPosts, remainingRankedPosts) = rankedPosts.partition { post ->
+                        val createdMs = post.createdAt?.toDate()?.time ?: 0L
+                        post.id in optimisticIds ||
+                            (currentUserId.isNotBlank() && post.authorId == currentUserId && nowMs - createdMs in 0L..600_000L)
+                    }
+                    val sortedFreshOwn = freshOwnPosts.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    UiState.Success((sortedFreshOwn + remainingRankedPosts).distinctBy { it.id })
                 } else {
                     rawUiState
                 }
@@ -1314,23 +1335,92 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে পোস্টের শিরোনাম বা বিবরণ লিখুন।"
             return
         }
-        runSubmittingAction(timeoutMs = 35_000L) {
-            val resolvedTitle = title.trim().ifBlank {
-                description.trim().lineSequence().firstOrNull()?.take(80)?.ifBlank { "দ্বীনি খেদমত ও আলোচনা" }
-                    ?: "দ্বীনি খেদমত ও আলোচনা"
-            }
-            val resolvedAuthorName = authorName.ifBlank { resolveActorDisplayName(resolvedTitle) }
-            val resolvedDistrict = district.trim().ifBlank {
-                (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
-            }
-            val resolvedUpazila = upazilaOrLocation.ifBlank { resolvedDistrict }
-            val resolvedDesignation = effectiveDesignation.ifBlank {
-                if (postType == "GENERAL_POST") "দ্বীনি আলোচনা" else designation
-            }
-            val resolvedSalary = salaryOrExperience.ifBlank { if (postType == "GENERAL_POST") "" else "আলোচনা সাপেক্ষ" }
-            val resolvedDeadline = deadlineOrPreferredDistricts.ifBlank { if (postType == "GENERAL_POST") "" else "চলমান" }
-            val resolvedPhoto = resolveActorPhotoUrl()
+        if (description.trim().toByteArray(Charsets.UTF_8).size > 140_000) {
+            _errorBanner.value = "পোস্টের ছবি বা বিবরণের আকার অনেক বড়। অনুগ্রহ করে ছোট আকারের ছবি নির্বাচন করুন।"
+            return
+        }
+        val cleanImageUrls = imageUrls.map { it.trim() }.filter { it.isNotBlank() }
+        if (cleanImageUrls.size > 5) {
+            _errorBanner.value = "একটি পোস্টে সর্বোচ্চ ৫টি ছবি যুক্ত করা যাবে।"
+            return
+        }
 
+        val resolvedTitle = title.trim().ifBlank {
+            description.trim().lineSequence().firstOrNull()?.take(80)?.ifBlank { "দ্বীনি খেদমত ও আলোচনা" }
+                ?: "দ্বীনি খেদমত ও আলোচনা"
+        }
+        val resolvedAuthorName = authorName.ifBlank { resolveActorDisplayName(resolvedTitle) }
+        val resolvedDistrict = district.trim().ifBlank {
+            (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
+        }
+        val resolvedUpazila = upazilaOrLocation.ifBlank { resolvedDistrict }
+        val resolvedDesignation = effectiveDesignation.ifBlank {
+            if (postType == "GENERAL_POST") "দ্বীনি আলোচনা" else designation
+        }
+        val resolvedSalary = salaryOrExperience.ifBlank { if (postType == "GENERAL_POST") "" else "আলোচনা সাপেক্ষ" }
+        val resolvedDeadline = deadlineOrPreferredDistricts.ifBlank { if (postType == "GENERAL_POST") "" else "চলমান" }
+        val resolvedPhoto = resolveActorPhotoUrl()
+
+        val postId = runCatching { repository.generateFeedPostDocumentId() }
+            .getOrDefault("")
+            .ifBlank { "post_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        val nowTimestamp = Timestamp.now()
+
+        val optimisticPost = FeedPost(
+            id = postId,
+            authorId = currentUserId,
+            authorName = resolvedAuthorName,
+            authorPhotoUrl = resolvedPhoto,
+            postType = postType,
+            title = resolvedTitle,
+            district = resolvedDistrict,
+            upazilaOrLocation = resolvedUpazila,
+            designation = resolvedDesignation,
+            khedmotCategories = khedmotCategories,
+            customCategory = customCategory,
+            qualification = qualification,
+            salaryOrExperience = resolvedSalary,
+            deadlineOrPreferredDistricts = resolvedDeadline,
+            description = description.trim(),
+            contactNumber = contactNumber.trim(),
+            imageUrls = cleanImageUrls,
+            visibility = "PUBLIC",
+            createdAt = nowTimestamp,
+            updatedAt = nowTimestamp
+        )
+
+        // Immediately insert into feed state so the user sees their post right away (< 1 frame)
+        _localOptimisticPosts.value = (listOf(optimisticPost) + _localOptimisticPosts.value).distinctBy { it.id }
+
+        if (postType == "SEEKER_APPLICATION") {
+            val optimisticSubmission = KhedmotSubmission(
+                id = "app_$postId",
+                postId = postId,
+                postTitle = resolvedTitle,
+                postDesignation = resolvedDesignation,
+                applicantId = currentUserId,
+                applicantName = resolvedAuthorName,
+                applicantQualification = qualification,
+                applicantExperience = resolvedSalary,
+                applicantPhone = contactNumber.trim(),
+                coverNote = description.trim(),
+                recipientId = currentUserId,
+                status = "PUBLISHED_IN_FEED",
+                createdAt = nowTimestamp,
+                updatedAt = nowTimestamp
+            )
+            _localOptimisticSubmissions.value = (listOf(optimisticSubmission) + _localOptimisticSubmissions.value).distinctBy { it.id }
+        }
+
+        // Navigate to feed immediately before setting feedback banner so clearBanners() doesn't wipe it
+        onSuccessNavigate()
+        _feedbackBanner.value = when (postType) {
+            "JOB_CIRCULAR" -> "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।"
+            "GENERAL_POST" -> "আলহামদুলিল্লাহ, আপনার দ্বীনি পোস্টটি ফিডে প্রকাশিত হয়েছে।"
+            else -> "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদনটি ফিডে প্রকাশিত হয়েছে।"
+        }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val result = repository.createFeedPost(
                 authorName = resolvedAuthorName,
                 postType = postType,
@@ -1346,42 +1436,19 @@ class QawmiViewModel(
                 authorPhotoUrl = resolvedPhoto,
                 khedmotCategories = khedmotCategories,
                 customCategory = customCategory,
-                imageUrls = imageUrls
+                imageUrls = cleanImageUrls,
+                preallocatedPostId = postId
             )
-            result.onSuccess { postId ->
-                if (postId.isNotBlank()) {
-                    val optimisticPost = FeedPost(
-                        id = postId,
-                        authorId = currentUserId,
-                        authorName = resolvedAuthorName,
-                        authorPhotoUrl = resolvedPhoto,
-                        postType = postType,
-                        title = resolvedTitle,
-                        district = resolvedDistrict,
-                        upazilaOrLocation = resolvedUpazila,
-                        designation = resolvedDesignation,
-                        khedmotCategories = khedmotCategories,
-                        customCategory = customCategory,
-                        qualification = qualification,
-                        salaryOrExperience = resolvedSalary,
-                        deadlineOrPreferredDistricts = resolvedDeadline,
-                        description = description,
-                        contactNumber = contactNumber,
-                        imageUrls = imageUrls,
-                        visibility = "PUBLIC",
-                        createdAt = Timestamp.now(),
-                        updatedAt = Timestamp.now()
-                    )
-                    _localOptimisticPosts.value = (listOf(optimisticPost) + _localOptimisticPosts.value).distinctBy { it.id }
+            result.onFailure { err ->
+                if (!isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+                    _localOptimisticPosts.value = _localOptimisticPosts.value.filterNot { it.id == postId }
+                    if (postType == "SEEKER_APPLICATION") {
+                        _localOptimisticSubmissions.value = _localOptimisticSubmissions.value.filterNot { it.id == "app_$postId" }
+                    }
+                    _errorBanner.value = err.localizedMessage ?: "প্রকাশ করতে সমস্যা হয়েছে।"
+                } else {
+                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
                 }
-                _feedbackBanner.value = when (postType) {
-                    "JOB_CIRCULAR" -> "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।"
-                    "GENERAL_POST" -> "আলহামদুলিল্লাহ, আপনার দ্বীনি পোস্টটি ফিডে প্রকাশিত হয়েছে।"
-                    else -> "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদনটি ফিডে প্রকাশিত হয়েছে।"
-                }
-                onSuccessNavigate()
-            }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "প্রকাশ করতে সমস্যা হয়েছে।"
             }
         }
     }
@@ -1405,7 +1472,33 @@ class QawmiViewModel(
             _errorBanner.value = "‘অন্যান্য’ বিভাগ নির্বাচন করলে অনুগ্রহ করে খেদমতের ধরনটি লিখুন।"
             return
         }
-        runSubmittingAction(timeoutMs = 35_000L) {
+        val cleanImageUrls = imageUrls.map { it.trim() }.filter { it.isNotBlank() }
+        if (cleanImageUrls.size > 5) {
+            _errorBanner.value = "একটি পোস্টে সর্বোচ্চ ৫টি ছবি যুক্ত করা যাবে।"
+            return
+        }
+
+        val previousOptimisticList = _localOptimisticPosts.value
+        val updatedPost = post.copy(
+            title = title.trim(),
+            district = district.trim(),
+            upazilaOrLocation = upazilaOrLocation.trim(),
+            designation = designation.trim(),
+            qualification = qualification.trim(),
+            salaryOrExperience = salaryOrExperience.trim(),
+            deadlineOrPreferredDistricts = deadlineOrPreferredDistricts.trim(),
+            description = description.trim(),
+            contactNumber = contactNumber.trim(),
+            khedmotCategories = khedmotCategories,
+            customCategory = customCategory.trim(),
+            imageUrls = cleanImageUrls,
+            isEdited = true,
+            updatedAt = Timestamp.now()
+        )
+        _localOptimisticPosts.value = (listOf(updatedPost) + previousOptimisticList.filterNot { it.id == post.id }).distinctBy { it.id }
+        _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পোস্টটি সফলভাবে হালনাগাদ হয়েছে।"
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val res = repository.updateOwnFeedPost(
                 post = post,
                 title = title,
@@ -1419,34 +1512,15 @@ class QawmiViewModel(
                 contactNumber = contactNumber,
                 khedmotCategories = khedmotCategories,
                 customCategory = customCategory,
-                imageUrls = imageUrls
+                imageUrls = cleanImageUrls
             )
-            res.onSuccess {
-                _localOptimisticPosts.value = _localOptimisticPosts.value.map { existing ->
-                    if (existing.id == post.id) {
-                        existing.copy(
-                            title = title,
-                            district = district,
-                            upazilaOrLocation = upazilaOrLocation,
-                            designation = designation,
-                            qualification = qualification,
-                            salaryOrExperience = salaryOrExperience,
-                            deadlineOrPreferredDistricts = deadlineOrPreferredDistricts,
-                            description = description,
-                            contactNumber = contactNumber,
-                            khedmotCategories = khedmotCategories,
-                            customCategory = customCategory,
-                            imageUrls = imageUrls,
-                            isEdited = true,
-                            updatedAt = Timestamp.now()
-                        )
-                    } else {
-                        existing
-                    }
+            res.onFailure { err ->
+                if (!isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+                    _localOptimisticPosts.value = previousOptimisticList
+                    _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ করা যায়নি।"
+                } else {
+                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
                 }
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পোস্টটি সফলভাবে হালনাগাদ হয়েছে।"
-            }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ করা যায়নি।"
             }
         }
     }
@@ -1605,77 +1679,87 @@ class QawmiViewModel(
     }
 
     fun sharePostInApp(post: FeedPost, caption: String) {
-        runSubmittingAction {
-            val sharerName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
-            val sharerPhoto = ProfilePhotoHelper.compactSenderPhotoForMessage(resolveActorPhotoUrl())
-            val sharerDistrict = (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
-            val targetOriginalId = post.sharedPostId.ifBlank { post.id }
-            val targetOriginalAuthorId = post.sharedAuthorId.ifBlank { post.authorId }
-            val targetOriginalAuthorName = post.sharedAuthorName.ifBlank { post.authorName.ifBlank { post.title } }
-            val targetOriginalTitle = post.sharedTitle.ifBlank { post.title }
-            val targetOriginalDesc = post.sharedDescription.ifBlank {
-                buildString {
-                    if (post.designation.isNotBlank()) append("পদ/বিভাগ: ${post.designation} | ")
-                    if (post.district.isNotBlank()) append("জেলা: ${post.district} | ")
-                    append(post.description)
-                }
+        val sharerName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
+        val sharerPhoto = ProfilePhotoHelper.compactSenderPhotoForMessage(resolveActorPhotoUrl())
+        val sharerDistrict = (userProfileState.value as? UiState.Success)?.data?.district.orEmpty()
+        val targetOriginalId = post.sharedPostId.ifBlank { post.id }
+        val targetOriginalAuthorId = post.sharedAuthorId.ifBlank { post.authorId }
+        val targetOriginalAuthorName = post.sharedAuthorName.ifBlank { post.authorName.ifBlank { post.title } }
+        val targetOriginalTitle = post.sharedTitle.ifBlank { post.title }
+        val targetOriginalDesc = post.sharedDescription.ifBlank {
+            buildString {
+                if (post.designation.isNotBlank()) append("পদ/বিভাগ: ${post.designation} | ")
+                if (post.district.isNotBlank()) append("জেলা: ${post.district} | ")
+                append(post.description)
             }
-            val targetOriginalType = post.sharedPostType.ifBlank { post.postType }
+        }
+        val targetOriginalType = post.sharedPostType.ifBlank { post.postType }
 
+        val newSharedPostId = runCatching { repository.generateFeedPostDocumentId() }
+            .getOrDefault("")
+            .ifBlank { "share_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        val nowTimestamp = Timestamp.now()
+
+        val optimisticSharedPost = FeedPost(
+            id = newSharedPostId,
+            authorId = currentUserId,
+            authorName = sharerName,
+            authorPhotoUrl = sharerPhoto,
+            postType = "GENERAL_POST",
+            title = caption.trim().ifBlank { "$targetOriginalAuthorName-এর পোস্ট শেয়ার করেছেন" }.take(200),
+            district = sharerDistrict.ifBlank { post.district },
+            upazilaOrLocation = post.upazilaOrLocation,
+            designation = post.designation.ifBlank { "দ্বীনি খেদমত শেয়ার" },
+            qualification = post.qualification,
+            salaryOrExperience = post.salaryOrExperience,
+            deadlineOrPreferredDistricts = post.deadlineOrPreferredDistricts,
+            description = caption.trim(),
+            contactNumber = post.contactNumber,
+            khedmotCategories = post.khedmotCategories,
+            customCategory = post.customCategory,
+            sharedPostId = targetOriginalId,
+            sharedAuthorId = targetOriginalAuthorId,
+            sharedAuthorName = targetOriginalAuthorName,
+            sharedTitle = targetOriginalTitle,
+            sharedDescription = targetOriginalDesc,
+            sharedPostType = targetOriginalType,
+            visibility = "PUBLIC",
+            createdAt = nowTimestamp,
+            updatedAt = nowTimestamp
+        )
+
+        _localOptimisticPosts.value = (listOf(optimisticSharedPost) + _localOptimisticPosts.value).distinctBy { it.id }
+
+        val prevOverride = _localPostEngagementOverrides.value[post.id] ?: PostEngagementOverride()
+        val newExpectedShares = maxOf(post.shareCount + 1, prevOverride.minExpectedShareCount + 1)
+        _localPostEngagementOverrides.value = _localPostEngagementOverrides.value + (
+            post.id to prevOverride.copy(minExpectedShareCount = newExpectedShares)
+            )
+        _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val res = repository.shareFeedPostInApp(
                 originalPost = post,
                 sharerName = sharerName,
                 sharerPhotoUrl = sharerPhoto,
                 sharerDistrict = sharerDistrict,
-                shareCaption = caption
+                shareCaption = caption,
+                preallocatedPostId = newSharedPostId
             )
-            res.onSuccess { newSharedPostId ->
-                if (newSharedPostId.isNotBlank()) {
-                    val optimisticSharedPost = FeedPost(
-                        id = newSharedPostId,
-                        authorId = currentUserId,
-                        authorName = sharerName,
-                        authorPhotoUrl = sharerPhoto,
-                        postType = "GENERAL_POST",
-                        title = caption.trim().ifBlank { "$targetOriginalAuthorName-এর পোস্ট শেয়ার করেছেন" }.take(200),
-                        district = sharerDistrict.ifBlank { post.district },
-                        upazilaOrLocation = post.upazilaOrLocation,
-                        designation = post.designation.ifBlank { "দ্বীনি খেদমত শেয়ার" },
-                        qualification = post.qualification,
-                        salaryOrExperience = post.salaryOrExperience,
-                        deadlineOrPreferredDistricts = post.deadlineOrPreferredDistricts,
-                        description = caption.trim(),
-                        contactNumber = post.contactNumber,
-                        khedmotCategories = post.khedmotCategories,
-                        customCategory = post.customCategory,
-                        sharedPostId = targetOriginalId,
-                        sharedAuthorId = targetOriginalAuthorId,
-                        sharedAuthorName = targetOriginalAuthorName,
-                        sharedTitle = targetOriginalTitle,
-                        sharedDescription = targetOriginalDesc,
-                        sharedPostType = targetOriginalType,
-                        visibility = "PUBLIC",
-                        createdAt = Timestamp.now(),
-                        updatedAt = Timestamp.now()
-                    )
-                    _localOptimisticPosts.value = (listOf(optimisticSharedPost) + _localOptimisticPosts.value).distinctBy { it.id }
-                }
-                val prevOverride = _localPostEngagementOverrides.value[post.id] ?: PostEngagementOverride()
-                val newExpectedShares = maxOf(post.shareCount + 1, prevOverride.minExpectedShareCount + 1)
-                _localPostEngagementOverrides.value = _localPostEngagementOverrides.value + (
-                    post.id to prevOverride.copy(minExpectedShareCount = newExpectedShares)
-                    )
-                viewModelScope.launch {
-                    repository.recordVerifiedEngagementEvent(
-                        post = post,
-                        eventType = EngagementReceipt.EVENT_SHARE,
-                        currentConfig = intelligenceConfigState.value,
-                        currentAffinity = userAffinityState.value
-                    )
-                }
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
+            res.onSuccess {
+                repository.recordVerifiedEngagementEvent(
+                    post = post,
+                    eventType = EngagementReceipt.EVENT_SHARE,
+                    currentConfig = intelligenceConfigState.value,
+                    currentAffinity = userAffinityState.value
+                )
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি।"
+                if (!isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+                    _localOptimisticPosts.value = _localOptimisticPosts.value.filterNot { it.id == newSharedPostId }
+                    _errorBanner.value = err.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি।"
+                } else {
+                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
+                }
             }
         }
     }

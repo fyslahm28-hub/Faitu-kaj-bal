@@ -1495,6 +1495,10 @@ class QawmiRepository(
         }
     }
 
+    fun generateFeedPostDocumentId(): String {
+        return db.collection("feed_posts").document().id
+    }
+
     suspend fun createFeedPost(
         authorName: String,
         postType: String,
@@ -1518,11 +1522,16 @@ class QawmiRepository(
         sharedAuthorName: String = "",
         sharedTitle: String = "",
         sharedDescription: String = "",
-        sharedPostType: String = ""
+        sharedPostType: String = "",
+        preallocatedPostId: String = ""
     ): Result<String> {
         val uid = requireUserId()
         val collectionRef = db.collection("feed_posts")
-        val docRef = collectionRef.document()
+        val docRef = if (preallocatedPostId.isNotBlank()) {
+            collectionRef.document(preallocatedPostId.trim())
+        } else {
+            collectionRef.document()
+        }
         return try {
             val trimmedDesc = description.trim()
             if (trimmedDesc.toByteArray(Charsets.UTF_8).size > 140_000) {
@@ -1690,23 +1699,29 @@ class QawmiRepository(
                 )
             }
 
-            // 5. Write the lightweight /feed_posts/{postId} document FIRST so it goes live online immediately
-            // without waiting behind large attachment documents in the gRPC write stream.
-            docRef.set(payload).awaitMessageWriteConfirmation(
-                docRef,
-                12_000L
-            )
+            // 5. Queue the main /feed_posts/{postId} document, any offloaded attachments, and seeker submission
+            // immediately into Firestore's persistent SQLite cache & write queue so no document is ever lost
+            // even on slow mobile networks.
+            val allWriteTasks = mutableListOf<com.google.android.gms.tasks.Task<*>>()
+            val mainPostTask = docRef.set(payload)
+            mainPostTask.addOnCompleteListener { completedTask ->
+                if (completedTask.isSuccessful) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "feed_posts",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                }
+            }
+            allWriteTasks += mainPostTask
 
-            // 6. Write any offloaded attachment documents after the main post is queued/acknowledged
             for ((attachRef, attachPayload) in deferredAttachmentWrites) {
-                attachRef.set(attachPayload).awaitMessageWriteConfirmation(
-                    attachRef,
-                    12_000L
-                )
+                allWriteTasks += attachRef.set(attachPayload)
             }
 
-            // 6b. If this post is a SEEKER_APPLICATION, also register it in /khedmot_submissions
+            // 6. If this post is a SEEKER_APPLICATION, also register it in /khedmot_submissions
             // so Admin Panel and authorized users can track, approve, and manage it from Firebase.
+            var submissionWriteTask: com.google.android.gms.tasks.Task<*>? = null
             if (postType == "SEEKER_APPLICATION") {
                 runCatching {
                     val submissionRef = db.collection("khedmot_submissions").document("app_${docRef.id}")
@@ -1725,11 +1740,23 @@ class QawmiRepository(
                         "createdAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
-                    submissionRef.set(submissionPayload).awaitMessageWriteConfirmation(
-                        submissionRef,
-                        8_000L
-                    )
+                    submissionWriteTask = submissionRef.set(submissionPayload)
                 }
+            }
+
+            try {
+                kotlinx.coroutines.withTimeout(2_500L) {
+                    com.google.android.gms.tasks.Tasks.whenAll(allWriteTasks).await()
+                    submissionWriteTask?.await()
+                }
+            } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+                val primaryError = allWriteTasks.firstNotNullOfOrNull { it.exception }
+                if (primaryError != null) {
+                    throw primaryError
+                }
+                // All documents are already committed to Firestore's durable local persistence cache
+                // and queued for automatic background server sync. Wake the network non-blockingly.
+                runCatching { db.enableNetwork() }
             }
 
             // 7. Deliver community notification and Telegram Admin log with fast bounded timeout
@@ -1746,7 +1773,7 @@ class QawmiRepository(
                 else -> "${title.trim()} (${resolvedQualification}) '${resolvedDesignation}' খেদমতের জন্য আবেদন প্রকাশ করেছেন।"
             }
             val resolvedSender = authorName.trim().ifBlank { title.trim() }
-            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+            kotlinx.coroutines.withTimeoutOrNull(900L) {
                 coroutineScope {
                     launch {
                         runCatching {
@@ -1838,6 +1865,7 @@ class QawmiRepository(
             }
             val uploadedMedia = mediaUploadRes.getOrThrow()
 
+            val updateTasks = mutableListOf<com.google.android.gms.tasks.Task<*>>()
             var primaryAttachmentDocId = post.attachmentDocId
             val metadataMaps = mutableListOf<Map<String, String>>()
 
@@ -1858,7 +1886,7 @@ class QawmiRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                extRef.set(extPayload).awaitWithTimeout(10_000L)
+                updateTasks += extRef.set(extPayload)
                 primaryAttachmentDocId = extDocId
             }
 
@@ -1891,7 +1919,7 @@ class QawmiRepository(
                                 ?: IllegalArgumentException(ProfilePhotoHelper.OVERSIZED_POST_ERROR_BANGLA)
                         )
                     }
-                    mediaRef.set(mediaPayload).awaitWithTimeout(10_000L)
+                    updateTasks += mediaRef.set(mediaPayload)
                     ProfilePhotoHelper.cacheAttachmentDataUrl(mediaDocId, mediaItem.separateAttachmentDataUrl)
                     itemAttachmentDocId = mediaDocId
                     if (primaryAttachmentDocId.isBlank()) {
@@ -1956,7 +1984,18 @@ class QawmiRepository(
                 )
             }
 
-            docRef.update(updates).awaitWithTimeout(10_000L)
+            updateTasks += docRef.update(updates)
+            try {
+                kotlinx.coroutines.withTimeout(2_500L) {
+                    com.google.android.gms.tasks.Tasks.whenAll(updateTasks).await()
+                }
+            } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+                val taskError = updateTasks.firstNotNullOfOrNull { it.exception }
+                if (taskError != null) {
+                    throw taskError
+                }
+                runCatching { db.enableNetwork() }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2306,12 +2345,13 @@ class QawmiRepository(
         }
     }
 
-    suspend fun shareFeedPostInApp(
+        suspend fun shareFeedPostInApp(
         originalPost: FeedPost,
         sharerName: String,
         sharerPhotoUrl: String,
         sharerDistrict: String,
-        shareCaption: String
+        shareCaption: String,
+        preallocatedPostId: String = ""
     ): Result<String> {
         requireUserId()
         val targetOriginalId = originalPost.sharedPostId.ifBlank { originalPost.id }
@@ -2347,28 +2387,21 @@ class QawmiRepository(
             sharedAuthorName = targetOriginalAuthorName,
             sharedTitle = targetOriginalTitle,
             sharedDescription = targetOriginalDesc,
-            sharedPostType = targetOriginalType
+            sharedPostType = targetOriginalType,
+            preallocatedPostId = preallocatedPostId
         )
 
         createRes.onSuccess {
             runCatching {
                 val origRef = db.collection("feed_posts").document(originalPost.id)
-                try {
-                    origRef.update(
-                        mapOf(
-                            "shareCount" to FieldValue.increment(1L),
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).awaitMessageWriteConfirmation(origRef, 12_000L)
-                } catch (_: Exception) {
-                    val snap = origRef.getFastOrNull(2_000L)
-                    val currentShares = (snap?.getLong("shareCount")?.toInt() ?: originalPost.shareCount).coerceAtLeast(0)
-                    origRef.update(
-                        mapOf(
-                            "shareCount" to (currentShares + 1),
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).awaitMessageWriteConfirmation(origRef, 12_000L)
+                val incTask = origRef.update(
+                    mapOf(
+                        "shareCount" to FieldValue.increment(1L),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                    runCatching { incTask.await() }
                 }
             }
         }
