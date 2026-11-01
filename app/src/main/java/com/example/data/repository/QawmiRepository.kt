@@ -3737,7 +3737,7 @@ class QawmiRepository(
                 bypassDedup = bypassDedup
             )
         } else {
-            kotlinx.coroutines.withTimeoutOrNull(2_000L) {
+            kotlinx.coroutines.withTimeoutOrNull(8_000L) {
                 TelegramNotificationHelper.dispatchToTelegramBotVerified(
                     eventType = eventType,
                     title = resolvedTitle,
