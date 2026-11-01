@@ -68,6 +68,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -92,6 +93,7 @@ import com.example.data.model.FeedPost
 import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.UserProfile
+import com.example.data.repository.FirestoreConnectionMonitor
 import com.example.ui.components.ChatAttachmentImage
 import com.example.ui.components.IslamicStarEmblem
 import com.example.ui.components.UserAvatarImage
@@ -1116,6 +1118,22 @@ fun ProfileScreen(
     onViewPostDetail: (FeedPost) -> Unit = {},
     onDeleteOwnPost: (String) -> Unit = {},
     onNavigate: (MainDestination) -> Unit = {},
+    onSaveProfileExtended: ((
+        fullName: String,
+        accountType: String,
+        district: String,
+        designation: String,
+        qualification: String,
+        experience: String,
+        preferredDistricts: String,
+        bio: String,
+        contactInfo: String,
+        madrasaName: String,
+        photoUrl: String,
+        contactEmail: String,
+        phonePrivacy: String,
+        emailPrivacy: String
+    ) -> Unit)? = null,
     onSaveProfile: (
         fullName: String,
         accountType: String,
@@ -1130,8 +1148,30 @@ fun ProfileScreen(
         photoUrl: String
     ) -> Unit
 ) {
+    val saveProfileAction: (
+        String, String, String, String, String, String, String, String, String, String, String, String, String, String
+    ) -> Unit = { fName, accType, dist, desig, qual, exp, pref, b, cInfo, mName, pUrl, cEmail, pPriv, ePriv ->
+        if (onSaveProfileExtended != null) {
+            onSaveProfileExtended(fName, accType, dist, desig, qual, exp, pref, b, cInfo, mName, pUrl, cEmail, pPriv, ePriv)
+        } else {
+            onSaveProfile(fName, accType, dist, desig, qual, exp, pref, b, cInfo, mName, pUrl)
+        }
+    }
     val context = LocalContext.current
     val profile = (userProfileState as? UiState.Success)?.data
+
+    val isNetworkAvailable by FirestoreConnectionMonitor.isNetworkAvailable.collectAsState()
+    val isServerConnected by FirestoreConnectionMonitor.isServerConnected.collectAsState()
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(currentUserId) {
+        while (true) {
+            kotlinx.coroutines.delay(30_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    val isProfileOnline = isNetworkAvailable &&
+        isServerConnected &&
+        (profile?.isCurrentlyOnline(nowMillis) == true)
 
     var fullName by remember { mutableStateOf(profile?.fullName ?: currentUserDisplayName) }
     var accountType by remember { mutableStateOf(profile?.accountType ?: "khadim") }
@@ -1142,13 +1182,22 @@ fun ProfileScreen(
     var preferredDistricts by remember { mutableStateOf(profile?.preferredDistricts ?: "") }
     var bio by remember { mutableStateOf(profile?.bio ?: "") }
     var contactInfo by remember { mutableStateOf(profile?.contactInfo ?: "") }
+    var contactEmail by remember {
+        mutableStateOf(profile?.contactEmail?.takeIf { it.isNotBlank() } ?: currentUserEmail)
+    }
+    var phonePrivacy by remember {
+        mutableStateOf(UserProfile.normalizePrivacyMode(profile?.phonePrivacy))
+    }
+    var emailPrivacy by remember {
+        mutableStateOf(UserProfile.normalizePrivacyMode(profile?.emailPrivacy))
+    }
     var madrasaName by remember { mutableStateOf(profile?.madrasaName ?: "") }
     var photoUrl by remember { mutableStateOf(profile?.photoUrl ?: "") }
 
     var isEditExpanded by remember { mutableStateOf(false) }
     var selectedActivityTab by remember { mutableIntStateOf(0) } // 0 = আমার প্রকাশিত পোস্ট, 1 = আবেদন ও কার্যক্রম
 
-    LaunchedEffect(profile) {
+    LaunchedEffect(profile, currentUserEmail) {
         if (profile != null) {
             fullName = profile.fullName
             accountType = profile.accountType
@@ -1159,6 +1208,9 @@ fun ProfileScreen(
             preferredDistricts = profile.preferredDistricts
             bio = profile.bio
             contactInfo = profile.contactInfo
+            contactEmail = profile.contactEmail.ifBlank { currentUserEmail }
+            phonePrivacy = UserProfile.normalizePrivacyMode(profile.phonePrivacy)
+            emailPrivacy = UserProfile.normalizePrivacyMode(profile.emailPrivacy)
             madrasaName = profile.madrasaName
             photoUrl = profile.photoUrl
         }
@@ -1242,8 +1294,18 @@ fun ProfileScreen(
                             }
                             Surface(
                                 shape = RoundedCornerShape(50),
-                                color = Color(0xFF00C853).copy(alpha = 0.2f),
-                                modifier = Modifier.border(1.dp, Color(0xFF69F0AE), RoundedCornerShape(50))
+                                color = if (isProfileOnline) {
+                                    Color(0xFF00C853).copy(alpha = 0.2f)
+                                } else {
+                                    Color.White.copy(alpha = 0.14f)
+                                },
+                                modifier = Modifier
+                                    .border(
+                                        1.dp,
+                                        if (isProfileOnline) Color(0xFF69F0AE) else Color.White.copy(alpha = 0.45f),
+                                        RoundedCornerShape(50)
+                                    )
+                                    .testTag("profile_corner_online_badge")
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
@@ -1253,11 +1315,13 @@ fun ProfileScreen(
                                         modifier = Modifier
                                             .size(7.dp)
                                             .clip(CircleShape)
-                                            .background(Color(0xFF00E676))
+                                            .background(
+                                                if (isProfileOnline) Color(0xFF00E676) else Color(0xFFB0BEC5)
+                                            )
                                     )
                                     Spacer(modifier = Modifier.width(5.dp))
                                     Text(
-                                        text = "অনলাইন (সক্রিয়)",
+                                        text = if (isProfileOnline) "অনলাইন (সক্রিয়)" else "অফলাইন",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color.White,
                                         fontSize = 10.5.sp,
@@ -1623,15 +1687,59 @@ fun ProfileScreen(
                         }
                     }
                 )
-                ProfileInfoRow(
+                ProfileContactPrivacyRow(
                     icon = Icons.Default.Phone,
                     label = "যোগাযোগের মোবাইল নম্বর",
-                    value = contactInfo.ifBlank { "উল্লেখ করা হয়নি" }
+                    value = contactInfo.ifBlank { "উল্লেখ করা হয়নি" },
+                    selectedPrivacy = phonePrivacy,
+                    tagPrefix = "phone_privacy",
+                    onPrivacySelected = { newMode ->
+                        phonePrivacy = newMode
+                        val resolvedName = fullName.ifBlank { currentUserDisplayName.ifBlank { "আবদুল্লাহ" } }
+                        saveProfileAction(
+                            resolvedName,
+                            accountType,
+                            district,
+                            designation,
+                            qualification,
+                            experience,
+                            preferredDistricts,
+                            bio,
+                            contactInfo,
+                            madrasaName,
+                            photoUrl,
+                            contactEmail,
+                            newMode,
+                            emailPrivacy
+                        )
+                    }
                 )
-                ProfileInfoRow(
+                ProfileContactPrivacyRow(
                     icon = Icons.Default.Email,
-                    label = "সংযুক্ত গুগল ইমেইল",
-                    value = currentUserEmail.ifBlank { "সংযুক্ত গুগল অ্যাকাউন্ট" }
+                    label = "জিমেইল / ইমেইল",
+                    value = contactEmail.ifBlank { currentUserEmail.ifBlank { "উল্লেখ করা হয়নি" } },
+                    selectedPrivacy = emailPrivacy,
+                    tagPrefix = "email_privacy",
+                    onPrivacySelected = { newMode ->
+                        emailPrivacy = newMode
+                        val resolvedName = fullName.ifBlank { currentUserDisplayName.ifBlank { "আবদুল্লাহ" } }
+                        saveProfileAction(
+                            resolvedName,
+                            accountType,
+                            district,
+                            designation,
+                            qualification,
+                            experience,
+                            preferredDistricts,
+                            bio,
+                            contactInfo,
+                            madrasaName,
+                            photoUrl,
+                            contactEmail,
+                            phonePrivacy,
+                            newMode
+                        )
+                    }
                 )
             }
         }
@@ -1712,6 +1820,28 @@ fun ProfileScreen(
                             singleLine = true
                         )
                     }
+                    PrivacyModeSelectorRow(
+                        title = "মোবাইল নম্বর কে দেখতে পাবে:",
+                        selectedMode = phonePrivacy,
+                        tagPrefix = "edit_phone_privacy",
+                        onSelectMode = { phonePrivacy = it }
+                    )
+                    OutlinedTextField(
+                        value = contactEmail,
+                        onValueChange = { contactEmail = it },
+                        label = { Text("প্রোফাইল জিমেইল / ইমেইল (আলাদা জিমেইল দিতে পারেন)") },
+                        placeholder = { Text("example@gmail.com") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("profile_email_input"),
+                        singleLine = true
+                    )
+                    PrivacyModeSelectorRow(
+                        title = "জিমেইল / ইমেইল কে দেখতে পাবে:",
+                        selectedMode = emailPrivacy,
+                        tagPrefix = "edit_email_privacy",
+                        onSelectMode = { emailPrivacy = it }
+                    )
                     OutlinedTextField(
                         value = designation,
                         onValueChange = { designation = it },
@@ -1767,7 +1897,7 @@ fun ProfileScreen(
 
                     Button(
                         onClick = {
-                            onSaveProfile(
+                            saveProfileAction(
                                 fullName,
                                 accountType,
                                 district,
@@ -1778,7 +1908,10 @@ fun ProfileScreen(
                                 bio,
                                 contactInfo,
                                 madrasaName,
-                                photoUrl
+                                photoUrl,
+                                contactEmail,
+                                phonePrivacy,
+                                emailPrivacy
                             )
                             if (fullName.isNotBlank()) {
                                 isEditExpanded = false
@@ -2099,6 +2232,154 @@ private fun ProfileInfoRow(
 }
 
 @Composable
+private fun ProfileContactPrivacyRow(
+    icon: ImageVector,
+    label: String,
+    value: String,
+    selectedPrivacy: String,
+    tagPrefix: String,
+    onPrivacySelected: (String) -> Unit
+) {
+    val normalized = UserProfile.normalizePrivacyMode(selectedPrivacy)
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            Surface(
+                modifier = Modifier.size(32.dp),
+                shape = CircleShape,
+                color = QawmiMintSurface
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = QawmiDeepGreen,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = QawmiTextMuted
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = QawmiMintSurface,
+                        modifier = Modifier.border(0.8.dp, QawmiMintBorder, RoundedCornerShape(50))
+                    ) {
+                        Text(
+                            text = UserProfile.privacyLabelBangla(normalized),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = QawmiDeepGreen,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Text(
+                    text = value,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = QawmiTextDark,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 42.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            UserProfile.privacyOptions.forEach { (modeKey, modeLabel) ->
+                val isSelected = normalized == modeKey
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (isSelected) QawmiDeepGreen else QawmiSoftBg,
+                    modifier = Modifier
+                        .border(
+                            1.dp,
+                            if (isSelected) QawmiDeepGreen else QawmiMintBorder,
+                            RoundedCornerShape(50)
+                        )
+                        .clickable {
+                            if (!isSelected) {
+                                onPrivacySelected(modeKey)
+                            }
+                        }
+                        .testTag("${tagPrefix}_$modeKey")
+                ) {
+                    Text(
+                        text = modeLabel,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isSelected) Color.White else QawmiTextDark,
+                        fontSize = 10.5.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PrivacyModeSelectorRow(
+    title: String,
+    selectedMode: String,
+    tagPrefix: String,
+    onSelectMode: (String) -> Unit
+) {
+    val normalized = UserProfile.normalizePrivacyMode(selectedMode)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(QawmiSoftBg, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall,
+            color = QawmiTextSecondary,
+            fontWeight = FontWeight.SemiBold
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            UserProfile.privacyOptions.forEach { (modeKey, modeLabel) ->
+                val isSelected = normalized == modeKey
+                FilterChip(
+                    selected = isSelected,
+                    onClick = { onSelectMode(modeKey) },
+                    label = { Text(modeLabel, style = MaterialTheme.typography.labelSmall) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = QawmiDeepGreen,
+                        selectedLabelColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("${tagPrefix}_$modeKey")
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun SubmissionCompactRow(
     title: String,
     subtitle: String,
@@ -2168,6 +2449,7 @@ fun PublicUserProfileDialog(
     currentUserId: String,
     inspectedProfileState: UiState<UserProfile?>,
     userPublishedPosts: List<FeedPost>,
+    isFriendOrConnected: Boolean = false,
     onDismiss: () -> Unit,
     onSendMessageClick: (userId: String, userName: String) -> Unit,
     onPostClick: (FeedPost) -> Unit
@@ -2387,11 +2669,46 @@ fun PublicUserProfileDialog(
                         }
                     )
                     if (!profile?.contactInfo.isNullOrBlank()) {
-                        ProfileInfoRow(
-                            icon = Icons.Default.Phone,
-                            label = "যোগাযোগ নম্বর",
-                            value = profile?.contactInfo.orEmpty()
-                        )
+                        val canSeePhone = profile?.canViewerSeePhone(currentUserId, isFriendOrConnected) == true
+                        if (canSeePhone) {
+                            ProfileInfoRow(
+                                icon = Icons.Default.Phone,
+                                label = "যোগাযোগের মোবাইল নম্বর",
+                                value = profile?.contactInfo.orEmpty()
+                            )
+                        } else {
+                            val hiddenLabel = if (UserProfile.normalizePrivacyMode(profile?.phonePrivacy) == UserProfile.PRIVACY_ONLY_ME) {
+                                "অনলি মি (গোপন রাখা হয়েছে)"
+                            } else {
+                                "শুধুমাত্র ফ্রেন্ডদের জন্য দৃশ্যমান"
+                            }
+                            ProfileInfoRow(
+                                icon = Icons.Default.Phone,
+                                label = "যোগাযোগের মোবাইল নম্বর",
+                                value = hiddenLabel
+                            )
+                        }
+                    }
+                    if (!profile?.contactEmail.isNullOrBlank()) {
+                        val canSeeEmail = profile?.canViewerSeeEmail(currentUserId, isFriendOrConnected) == true
+                        if (canSeeEmail) {
+                            ProfileInfoRow(
+                                icon = Icons.Default.Email,
+                                label = "জিমেইল / ইমেইল",
+                                value = profile?.contactEmail.orEmpty()
+                            )
+                        } else {
+                            val hiddenLabel = if (UserProfile.normalizePrivacyMode(profile?.emailPrivacy) == UserProfile.PRIVACY_ONLY_ME) {
+                                "অনলি মি (গোপন রাখা হয়েছে)"
+                            } else {
+                                "শুধুমাত্র ফ্রেন্ডদের জন্য দৃশ্যমান"
+                            }
+                            ProfileInfoRow(
+                                icon = Icons.Default.Email,
+                                label = "জিমেইল / ইমেইল",
+                                value = hiddenLabel
+                            )
+                        }
                     }
 
                     if (userPublishedPosts.isNotEmpty()) {

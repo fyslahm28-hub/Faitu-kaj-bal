@@ -4188,6 +4188,11 @@ fun AdminPanelScreen(
     ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onSaveAdminMember: (memberId: String, name: String, role: String, isActive: Boolean) -> Unit = { _, _, _, _ -> },
     onInspectUserProfile: (String, String) -> Unit = { _, _ -> },
+    intelligenceConfig: com.example.data.model.IntelligenceConfig = com.example.data.model.IntelligenceConfig(),
+    algorithmPerformance: com.example.data.model.AlgorithmPerformanceSummary = com.example.data.model.AlgorithmPerformanceSummary(),
+    postIntelligenceMetricsMap: Map<String, com.example.data.model.PostIntelligenceMetrics> = emptyMap(),
+    onSaveIntelligenceConfig: (com.example.data.model.IntelligenceConfig) -> Unit = {},
+    onOverridePostAnomalyFlag: (FeedPost, Boolean, String) -> Unit = { _, _, _ -> },
     onDeletePost: (String) -> Unit
 ) {
     ModernAdminPanelRoot(
@@ -4215,6 +4220,11 @@ fun AdminPanelScreen(
         onPublishAppRelease = onPublishAppRelease,
         onSaveAdminMember = onSaveAdminMember,
         onInspectUserProfile = onInspectUserProfile,
+        intelligenceConfig = intelligenceConfig,
+        algorithmPerformance = algorithmPerformance,
+        postIntelligenceMetricsMap = postIntelligenceMetricsMap,
+        onSaveIntelligenceConfig = onSaveIntelligenceConfig,
+        onOverridePostAnomalyFlag = onOverridePostAnomalyFlag,
         onDeletePost = onDeletePost
     )
 }

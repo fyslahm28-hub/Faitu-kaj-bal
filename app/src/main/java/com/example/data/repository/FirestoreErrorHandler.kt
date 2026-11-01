@@ -8,6 +8,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.MemoryCacheSettings
+import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.Source
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -24,11 +25,12 @@ private val configuredFirestoreDatabases = ConcurrentHashMap<String, Boolean>()
 /**
  * Tracks real-time Firebase Firestore connection health, distinguishes real Server Data
  * (`!snapshot.metadata.isFromCache`) from Local Cached Data (`snapshot.metadata.isFromCache`),
- * monitors active listener registrations to prevent duplicate listener storms, and maintains
- * an honest diagnostic log of connection/permission/query errors.
+ * monitors active listener registrations to prevent duplicate listener storms, tracks network
+ * transport handoffs (Wi-Fi <-> Cellular), and maintains an honest diagnostic log.
  */
 object FirestoreConnectionMonitor {
     private const val MAX_ERROR_LOG_ENTRIES = 50
+    private const val DEFAULT_STALL_THRESHOLD_MS = 20_000L
 
     private val _isNetworkAvailable = MutableStateFlow(true)
     val isNetworkAvailable: StateFlow<Boolean> = _isNetworkAvailable.asStateFlow()
@@ -38,6 +40,15 @@ object FirestoreConnectionMonitor {
 
     private val _isServingFromCache = MutableStateFlow(false)
     val isServingFromCache: StateFlow<Boolean> = _isServingFromCache.asStateFlow()
+
+    private val _isReconnecting = MutableStateFlow(false)
+    val isReconnecting: StateFlow<Boolean> = _isReconnecting.asStateFlow()
+
+    private val _hasPendingWrites = MutableStateFlow(false)
+    val hasPendingWrites: StateFlow<Boolean> = _hasPendingWrites.asStateFlow()
+
+    private val _activeNetworkType = MutableStateFlow("UNKNOWN")
+    val activeNetworkType: StateFlow<String> = _activeNetworkType.asStateFlow()
 
     private val _activeListenerCount = MutableStateFlow(0)
     val activeListenerCount: StateFlow<Int> = _activeListenerCount.asStateFlow()
@@ -56,6 +67,16 @@ object FirestoreConnectionMonitor {
 
     private val listenerCountsByPath = ConcurrentHashMap<String, AtomicInteger>()
     private val lastServerConfirmedEpochMs = AtomicLong(0L)
+
+    val lastServerConfirmedAtMs: Long
+        get() = lastServerConfirmedEpochMs.get()
+
+    fun isServerStreamStalled(thresholdMs: Long = DEFAULT_STALL_THRESHOLD_MS): Boolean {
+        if (!_isServerConnected.value || _isServingFromCache.value) return true
+        val lastConfirmed = lastServerConfirmedEpochMs.get()
+        if (lastConfirmed <= 0L) return true
+        return (System.currentTimeMillis() - lastConfirmed) > thresholdMs
+    }
 
     fun onListenerAttached(path: String) {
         val cleanPath = path.ifBlank { "unknown" }
@@ -89,16 +110,22 @@ object FirestoreConnectionMonitor {
         isFromCache: Boolean,
         hasPendingWrites: Boolean
     ) {
+        _hasPendingWrites.value = hasPendingWrites
         if (!isFromCache) {
             lastServerConfirmedEpochMs.set(System.currentTimeMillis())
             _isServerConnected.value = _isNetworkAvailable.value
             _isServingFromCache.value = false
+            _isReconnecting.value = false
         } else {
             // Snapshot came from local cache: never masquerade local cache as live server data when disconnected
             if (!_isNetworkAvailable.value || !_isServerConnected.value) {
                 _isServingFromCache.value = true
             }
         }
+    }
+
+    fun onPendingWritesFlushed() {
+        _hasPendingWrites.value = false
     }
 
     fun onConnectionError(
@@ -146,12 +173,48 @@ object FirestoreConnectionMonitor {
         if (!available) {
             _isServerConnected.value = false
             _isServingFromCache.value = true
+            _isReconnecting.value = false
+            _activeNetworkType.value = "NONE"
         } else if (changed) {
+            _isReconnecting.value = true
             triggerGlobalReconnect("NETWORK_AVAILABLE")
         }
     }
 
+    fun onNetworkTypeChanged(networkType: String, available: Boolean) {
+        val normalizedType = networkType.trim().uppercase().ifBlank { if (available) "ONLINE" else "NONE" }
+        val prevType = _activeNetworkType.value
+        val prevAvailable = _isNetworkAvailable.value
+        _activeNetworkType.value = normalizedType
+        _isNetworkAvailable.value = available
+
+        if (!available) {
+            _isServerConnected.value = false
+            _isServingFromCache.value = true
+            _isReconnecting.value = false
+            return
+        }
+
+        val wasTransportSwitch = prevAvailable &&
+            prevType != "UNKNOWN" &&
+            prevType != "NONE" &&
+            prevType != normalizedType
+
+        if (!prevAvailable || wasTransportSwitch) {
+            _isReconnecting.value = true
+            val reason = if (wasTransportSwitch) {
+                "NETWORK_SWITCH_${prevType}_TO_${normalizedType}"
+            } else {
+                "NETWORK_RESTORED_$normalizedType"
+            }
+            triggerGlobalReconnect(reason)
+        }
+    }
+
     fun triggerGlobalReconnect(reason: String = "MANUAL_OR_NETWORK_RESTORE") {
+        if (_isNetworkAvailable.value && !_isServerConnected.value) {
+            _isReconnecting.value = true
+        }
         _recoveryGeneration.value = _recoveryGeneration.value + 1L
         val logEntry = "[${System.currentTimeMillis()}] GLOBAL_RECONNECT reason=$reason gen=${_recoveryGeneration.value}"
         synchronized(this) {
@@ -167,6 +230,9 @@ object FirestoreConnectionMonitor {
         _isNetworkAvailable.value = true
         _isServerConnected.value = true
         _isServingFromCache.value = false
+        _isReconnecting.value = false
+        _hasPendingWrites.value = false
+        _activeNetworkType.value = "UNKNOWN"
         _lastConnectionError.value = null
         _connectionErrorLogs.value = emptyList()
         _recoveryGeneration.value = 0L
@@ -184,9 +250,10 @@ object FirestoreConnectionMonitor {
 }
 
 /**
- * Returns a [FirebaseFirestore] instance configured with [MemoryCacheSettings] before its first
- * operation. This guarantees that stale, oversized, or wedged local SQLite mutations from earlier
- * app sessions on a user's device can never clog Firestore's single FIFO gRPC write stream.
+ * Returns a [FirebaseFirestore] instance configured with native SQLite [PersistentCacheSettings]
+ * (100 MB disk cache) before its first operation so cached Feed, Profile, Notification, and
+ * Application snapshots load within < 1 second across app restarts and offline sessions, while
+ * falling back safely to [MemoryCacheSettings] if disk cache initialization is unavailable.
  */
 fun getConfiguredFirestoreInstance(databaseId: String = ""): FirebaseFirestore {
     val cleanId = databaseId.trim()
@@ -201,11 +268,24 @@ fun getConfiguredFirestoreInstance(databaseId: String = ""): FirebaseFirestore {
     }
     val cacheKey = cleanId.ifBlank { "(default)" }
     if (configuredFirestoreDatabases.putIfAbsent(cacheKey, true) == null) {
-        runCatching {
+        val appliedPersistent = runCatching {
+            val persistentCache = PersistentCacheSettings.newBuilder()
+                .setSizeBytes(100L * 1024L * 1024L)
+                .build()
             val settings = FirebaseFirestoreSettings.Builder()
-                .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
+                .setLocalCacheSettings(persistentCache)
                 .build()
             db.firestoreSettings = settings
+            true
+        }.getOrDefault(false)
+
+        if (!appliedPersistent) {
+            runCatching {
+                val fallbackSettings = FirebaseFirestoreSettings.Builder()
+                    .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
+                    .build()
+                db.firestoreSettings = fallbackSettings
+            }
         }
     }
     return db

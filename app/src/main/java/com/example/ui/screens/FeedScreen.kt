@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -219,6 +220,7 @@ fun FeedScreen(
         imageUrls: List<String>
     ) -> Unit)? = null,
     onReportPost: (post: FeedPost, reason: String) -> Unit = { _, _ -> },
+    onRecordPostDwellView: (post: FeedPost, dwellTimeMs: Long) -> Unit = { _, _ -> },
     onRetryFeed: () -> Unit = {},
     onShowFeedback: (String) -> Unit = {}
 ) {
@@ -456,6 +458,14 @@ fun FeedScreen(
                                 )
                             }
                             val isCommentsOpen = expandedCommentsPostIds.contains(post.id)
+
+                            // Verified Unique View Dwell-Time Tracker (>= 2.8 seconds visible in feed)
+                            if (post.id.isNotBlank() && post.authorId != currentUserId) {
+                                LaunchedEffect(post.id, currentUserId) {
+                                    kotlinx.coroutines.delay(2_800L)
+                                    onRecordPostDwellView(resolvedPost, 2_800L)
+                                }
+                            }
 
                             FacebookStyleIslamicPostCard(
                                 post = resolvedPost,

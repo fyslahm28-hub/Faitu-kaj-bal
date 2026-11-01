@@ -46,10 +46,10 @@ service cloud.firestore {
     function isTokenVerifiedAdmin() {
       let rawEmail = isSignedIn() ? request.auth.token.get('email', '') : '';
       let email = rawEmail is string ? rawEmail.lower() : '';
+      let roleClaim = isSignedIn() ? request.auth.token.get('role', '') : '';
       return isSignedIn() && (
         request.auth.token.get('admin', false) == true ||
-        request.auth.token.get('role', '') == 'admin' ||
-        request.auth.token.get('role', '') == 'SUPER_ADMIN' ||
+        roleClaim in ['admin', 'SUPER_ADMIN', 'ADMIN', 'MODERATOR'] ||
         email in [
           'foysalahamad102@gmail.com',
           'foysalahamad204@gmail.com',
@@ -89,6 +89,9 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       let photoUrl = data.get('photoUrl', '');
+      let contactEmail = data.get('contactEmail', '');
+      let phonePrivacy = data.get('phonePrivacy', 'PUBLIC');
+      let emailPrivacy = data.get('emailPrivacy', 'PUBLIC');
       let isOnline = data.get('isOnline', false);
       let lastSeenAt = data.get('lastSeenAt', request.time);
       let typingToUserId = data.get('typingToUserId', '');
@@ -105,6 +108,9 @@ service cloud.firestore {
              data.preferredDistricts is string && data.preferredDistricts.size() <= 300 &&
              data.bio is string && data.bio.size() <= 1000 &&
              data.contactInfo is string && data.contactInfo.size() <= 150 &&
+             (contactEmail is string && contactEmail.size() <= 150) &&
+             (phonePrivacy is string && phonePrivacy in ['ONLY_ME', 'FRIENDS', 'PUBLIC']) &&
+             (emailPrivacy is string && emailPrivacy in ['ONLY_ME', 'FRIENDS', 'PUBLIC']) &&
              data.madrasaName is string && data.madrasaName.size() <= 200 &&
              (photoUrl is string && photoUrl.size() <= 250000) &&
              (isOnline is bool) &&
@@ -389,6 +395,65 @@ service cloud.firestore {
              isValidTimestamp(data.updatedAt);
     }
 
+    function isValidIntelligenceConfig(data, configId) {
+      return data.configId is string && data.configId == configId &&
+             data.skillMatchWeight is number && data.skillMatchWeight >= 0 && data.skillMatchWeight <= 100 &&
+             data.locationMatchWeight is number && data.locationMatchWeight >= 0 && data.locationMatchWeight <= 100 &&
+             data.experienceWeight is number && data.experienceWeight >= 0 && data.experienceWeight <= 100 &&
+             data.freshnessHalfLifeHours is number && data.freshnessHalfLifeHours >= 1 && data.freshnessHalfLifeHours <= 1000 &&
+             data.trendingWeight is number && data.trendingWeight >= 0 && data.trendingWeight <= 100 &&
+             data.verifiedMadrasaBonus is number && data.verifiedMadrasaBonus >= 0 && data.verifiedMadrasaBonus <= 100 &&
+             data.newPostBoostHours is number && data.newPostBoostHours >= 1 && data.newPostBoostHours <= 720 &&
+             data.minDwellTimeMs is int && data.minDwellTimeMs >= 500 && data.minDwellTimeMs <= 60000 &&
+             data.fraudPenaltyWeight is number && data.fraudPenaltyWeight >= 0 && data.fraudPenaltyWeight <= 100 &&
+             data.smartNotificationThreshold is number && data.smartNotificationThreshold >= 0 && data.smartNotificationThreshold <= 100 &&
+             data.isSmartRankingEnabled is bool &&
+             data.isTrendingEnabled is bool &&
+             data.isFraudDetectionEnabled is bool &&
+             data.isSmartNotificationEnabled is bool &&
+             data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 200 &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPostIntelligenceMetrics(data, postId) {
+      let flagReason = data.get('flagReason', '');
+      let lastInt = data.get('lastInteractionAt', null);
+      return data.postId is string && data.postId == postId &&
+             data.uniqueViewCount is int && data.uniqueViewCount >= 0 && data.uniqueViewCount <= 1000000 &&
+             data.uniqueClickCount is int && data.uniqueClickCount >= 0 && data.uniqueClickCount <= 1000000 &&
+             data.applyCount is int && data.applyCount >= 0 && data.applyCount <= 1000000 &&
+             data.bookmarkCount is int && data.bookmarkCount >= 0 && data.bookmarkCount <= 1000000 &&
+             data.shareCount is int && data.shareCount >= 0 && data.shareCount <= 1000000 &&
+             data.totalDwellTimeMs is int && data.totalDwellTimeMs >= 0 && data.totalDwellTimeMs <= 100000000000 &&
+             data.trendingScore is number && data.trendingScore >= 0 && data.trendingScore <= 100 &&
+             data.qualityScore is number && data.qualityScore >= 0 && data.qualityScore <= 100 &&
+             data.anomalyScore is number && data.anomalyScore >= 0 && data.anomalyScore <= 100 &&
+             data.isFlagged is bool &&
+             (flagReason is string && flagReason.size() <= 500) &&
+             (lastInt == null || lastInt is timestamp) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidEngagementReceipt(data, postId, receiptId) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.postId is string && data.postId == postId &&
+             data.eventType is string && data.eventType in ['VIEW', 'CLICK', 'APPLY', 'BOOKMARK', 'SHARE'] &&
+             receiptId == (request.auth.uid + '_' + data.eventType) &&
+             data.dwellTimeMs is int && data.dwellTimeMs >= 0 && data.dwellTimeMs <= 300000 &&
+             (data.eventType != 'VIEW' || data.dwellTimeMs >= 1500) &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidUserAffinityState(data, userId) {
+      let lastEvt = data.get('lastEventAt', null);
+      return data.userId is string && data.userId == userId &&
+             data.categoryWeights is map && data.categoryWeights.size() <= 100 &&
+             data.districtWeights is map && data.districtWeights.size() <= 100 &&
+             data.totalInteractions is int && data.totalInteractions >= 0 && data.totalInteractions <= 1000000 &&
+             (lastEvt == null || lastEvt is timestamp) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     // 4. Collection Rules
 
     // Admins Registry (সার্ভার-সাইড অ্যাডমিন পরিচয় ও অ্যাক্সেস)
@@ -429,7 +494,8 @@ service cloud.firestore {
                        incoming().keys().hasOnly([
                          'userId', 'fullName', 'accountType', 'district', 'designation',
                          'qualification', 'experience', 'preferredDistricts', 'bio',
-                         'contactInfo', 'madrasaName', 'photoUrl', 'isOnline', 'lastSeenAt',
+                         'contactInfo', 'contactEmail', 'phonePrivacy', 'emailPrivacy',
+                         'madrasaName', 'photoUrl', 'isOnline', 'lastSeenAt',
                          'typingToUserId', 'typingUpdatedAt', 'blockedUserIds', 'chatThemes',
                          'isVerified', 'createdAt', 'updatedAt'
                        ]) &&
@@ -453,7 +519,8 @@ service cloud.firestore {
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'fullName', 'accountType', 'district', 'designation',
                             'qualification', 'experience', 'preferredDistricts', 'bio',
-                            'contactInfo', 'madrasaName', 'photoUrl', 'isOnline',
+                            'contactInfo', 'contactEmail', 'phonePrivacy', 'emailPrivacy',
+                            'madrasaName', 'photoUrl', 'isOnline',
                             'lastSeenAt', 'typingToUserId', 'typingUpdatedAt',
                             'blockedUserIds', 'chatThemes', 'updatedAt'
                           ])) ||
@@ -523,6 +590,27 @@ service cloud.firestore {
                          incoming().diff(existing()).affectedKeys().hasOnly(['readAt']);
 
         allow delete: if isSignedIn() && isValidId(userId) && isValidId(notificationId) && request.auth.uid == userId;
+      }
+
+      // Adaptive Learning Affinity State (/users/{userId}/intelligence_state/{docId})
+      match /intelligence_state/{docId} {
+        allow get, list: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+
+        allow create, update: if isSignedIn() &&
+                                 isValidId(userId) &&
+                                 isValidId(docId) &&
+                                 request.auth.uid == userId &&
+                                 incoming().keys().hasAll([
+                                   'userId', 'categoryWeights', 'districtWeights',
+                                   'totalInteractions', 'updatedAt'
+                                 ]) &&
+                                 incoming().keys().hasOnly([
+                                   'userId', 'categoryWeights', 'districtWeights',
+                                   'totalInteractions', 'lastEventAt', 'updatedAt'
+                                 ]) &&
+                                 isValidUserAffinityState(incoming(), userId);
+
+        allow delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
       }
     }
 
@@ -1023,5 +1111,82 @@ service cloud.firestore {
 
       allow delete: if isAdmin() && isValidId(releaseId);
     }
+
+    // KKS Intelligence Engine Global Configuration (অ্যাডমিন অ্যালগরিদম কন্ট্রোল সেন্টার)
+    match /intelligence_config/{configId} {
+      allow get, list: if isSignedIn() && isValidId(configId);
+
+      allow create, update: if isTokenVerifiedAdmin() &&
+                               isValidId(configId) &&
+                               incoming().keys().hasAll([
+                                 'configId', 'skillMatchWeight', 'locationMatchWeight',
+                                 'experienceWeight', 'freshnessHalfLifeHours', 'trendingWeight',
+                                 'verifiedMadrasaBonus', 'newPostBoostHours', 'minDwellTimeMs',
+                                 'fraudPenaltyWeight', 'smartNotificationThreshold',
+                                 'isSmartRankingEnabled', 'isTrendingEnabled',
+                                 'isFraudDetectionEnabled', 'isSmartNotificationEnabled',
+                                 'updatedBy', 'updatedAt'
+                               ]) &&
+                               incoming().keys().hasOnly([
+                                 'configId', 'skillMatchWeight', 'locationMatchWeight',
+                                 'experienceWeight', 'freshnessHalfLifeHours', 'trendingWeight',
+                                 'verifiedMadrasaBonus', 'newPostBoostHours', 'minDwellTimeMs',
+                                 'fraudPenaltyWeight', 'smartNotificationThreshold',
+                                 'isSmartRankingEnabled', 'isTrendingEnabled',
+                                 'isFraudDetectionEnabled', 'isSmartNotificationEnabled',
+                                 'updatedBy', 'updatedAt'
+                               ]) &&
+                               isValidIntelligenceConfig(incoming(), configId);
+
+      allow delete: if isTokenVerifiedAdmin() && isValidId(configId);
+    }
+
+    // KKS Post Intelligence Metrics & Anti-Fraud Engagement Receipts
+    match /post_intelligence_metrics/{postId} {
+      allow get, list: if isSignedIn();
+
+      allow create, update: if isSignedIn() &&
+                               isValidId(postId) &&
+                               incoming().keys().hasAll([
+                                 'postId', 'uniqueViewCount', 'uniqueClickCount',
+                                 'applyCount', 'bookmarkCount', 'shareCount',
+                                 'totalDwellTimeMs', 'trendingScore', 'qualityScore',
+                                 'anomalyScore', 'isFlagged', 'updatedAt'
+                               ]) &&
+                               incoming().keys().hasOnly([
+                                 'postId', 'uniqueViewCount', 'uniqueClickCount',
+                                 'applyCount', 'bookmarkCount', 'shareCount',
+                                 'totalDwellTimeMs', 'trendingScore', 'qualityScore',
+                                 'anomalyScore', 'isFlagged', 'flagReason',
+                                 'lastInteractionAt', 'updatedAt'
+                               ]) &&
+                               isValidPostIntelligenceMetrics(incoming(), postId);
+
+      allow delete: if isTokenVerifiedAdmin() && isValidId(postId);
+
+      // Deterministic Engagement Receipts (/post_intelligence_metrics/{postId}/engagement_receipts/{uid}_{eventType})
+      match /engagement_receipts/{receiptId} {
+        allow get: if isSignedIn() &&
+                      isValidId(postId) &&
+                      isValidId(receiptId) &&
+                      (receiptId.matches('^' + request.auth.uid + '_.*') || isAdmin());
+        allow list: if isAdmin();
+
+        allow create: if isSignedIn() &&
+                         isValidId(postId) &&
+                         isValidId(receiptId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'postId', 'eventType', 'dwellTimeMs', 'createdAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'postId', 'eventType', 'dwellTimeMs', 'createdAt'
+                         ]) &&
+                         isValidEngagementReceipt(incoming(), postId, receiptId);
+
+        allow update: if false;
+        allow delete: if isTokenVerifiedAdmin();
+      }
+    }
   }
 }
+

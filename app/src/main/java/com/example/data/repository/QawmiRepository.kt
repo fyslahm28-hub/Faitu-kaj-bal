@@ -9,19 +9,25 @@ import com.example.data.model.BookmarkItem
 import kotlinx.coroutines.Dispatchers
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
+import com.example.data.model.EngagementReceipt
 import com.example.data.model.FeedComment
 import com.example.data.model.FeedPost
 import com.example.data.model.FeedPostExtendedAttachment
+import com.example.data.model.IntelligenceConfig
 import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
 import com.example.data.model.NotificationReadReceipt
+import com.example.data.model.PostIntelligenceMetrics
 import com.example.data.model.TelegramNotificationLog
+import com.example.data.model.UserAffinityState
 import com.example.data.model.UserProfile
 import com.example.ui.util.AdminSecurityHelper
 import com.example.ui.util.AppUpdateManagerHelper
+import com.example.ui.util.KksIntelligenceEngine
 import com.example.ui.util.ProfilePhotoHelper
 import com.example.ui.util.TelegramNotificationHelper
+import java.util.concurrent.ConcurrentHashMap
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentReference
@@ -85,59 +91,179 @@ class QawmiRepository(
         return runCatching { auth.currentUser?.uid?.trim().orEmpty() }.getOrDefault("")
     }
 
+    private val lastGrpcCycleEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
+
     /**
-     * Ensures the Firebase Firestore network connection and Auth token are active and triggers
-     * immediate re-subscription for any listener that had previously encountered an error,
-     * without tearing down or duplicating already-healthy listeners.
+     * Ensures the Firebase Firestore network connection and Auth token are active, resets stalled
+     * gRPC backoff states when recovering from long disconnects, flushes pending offline writes,
+     * and triggers immediate recovery for any detached or cache-bound listeners without duplicating
+     * already-healthy listeners.
      */
     suspend fun ensureLiveConnectionActive(forceTokenRefresh: Boolean = false, reason: String = "ENSURE_LIVE") {
-        runCatching {
-            val currentUser = auth.currentUser
-            if (currentUser != null) {
-                withTimeoutOrNull(4_000L) {
-                    currentUser.getIdToken(forceTokenRefresh).await()
+        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+
+        val currentUser = runCatching { auth.currentUser }.getOrNull()
+        if (currentUser != null && forceTokenRefresh) {
+            runCatching {
+                withTimeoutOrNull(2_000L) {
+                    currentUser.getIdToken(true).await()
+                }
+            }
+        } else if (currentUser != null) {
+            // Warm cached token non-blockingly with a tight bound
+            runCatching {
+                withTimeoutOrNull(400L) {
+                    currentUser.getIdToken(false).await()
                 }
             }
         }
+
+        val nowMs = System.currentTimeMillis()
+        val lastConfirmedMs = FirestoreConnectionMonitor.lastServerConfirmedAtMs
+        val isLongStall = !FirestoreConnectionMonitor.isServerConnected.value &&
+            lastConfirmedMs > 0L &&
+            (nowMs - lastConfirmedMs) > 20_000L
+        val prevCycleMs = lastGrpcCycleEpochMs.get()
+
+        if (isLongStall && (nowMs - prevCycleMs) > 6_000L && lastGrpcCycleEpochMs.compareAndSet(prevCycleMs, nowMs)) {
+            // Reset Firestore's internal gRPC exponential backoff timer when recovering from a long stall
+            runCatching {
+                withTimeoutOrNull(800L) {
+                    db.disableNetwork().await()
+                }
+            }
+        }
+
         runCatching {
-            withTimeoutOrNull(3_000L) {
+            withTimeoutOrNull(2_000L) {
                 db.enableNetwork().await()
             }
         }
-        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+
         FirestoreConnectionMonitor.triggerGlobalReconnect(reason)
+
+        // Flush any pending offline writes safely in a bounded window
+        if (FirestoreConnectionMonitor.hasPendingWrites.value) {
+            runCatching {
+                val flushed = withTimeoutOrNull(2_500L) {
+                    db.waitForPendingWrites().await()
+                    true
+                } ?: false
+                if (flushed) {
+                    FirestoreConnectionMonitor.onPendingWritesFlushed()
+                }
+            }
+        }
+    }
+
+    /**
+     * Refreshes critical user-facing collections (Feed, Profile, Notifications, Applications) in
+     * parallel on [Dispatchers.IO] with a strict 2-second timeout budget so returning to the
+     * foreground or reconnecting to the internet updates live snapshots within ~2 seconds without
+     * blocking the main thread or creating duplicate listeners.
+     */
+    suspend fun refreshCriticalDataInParallel(userId: String) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return@withContext
+        coroutineScope {
+            val feedJob = async {
+                withTimeoutOrNull(2_000L) {
+                    runCatching {
+                        val snap = db.collection("feed_posts").get(Source.SERVER).await()
+                        FirestoreConnectionMonitor.onSnapshotReceived(
+                            path = "feed_posts",
+                            isFromCache = snap.metadata.isFromCache,
+                            hasPendingWrites = snap.metadata.hasPendingWrites()
+                        )
+                    }
+                }
+            }
+            val profileJob = async {
+                if (effectiveUid.isNotBlank()) {
+                    withTimeoutOrNull(2_000L) {
+                        runCatching {
+                            val snap = db.collection("users").document(effectiveUid).get(Source.SERVER).await()
+                            FirestoreConnectionMonitor.onSnapshotReceived(
+                                path = "users/$effectiveUid",
+                                isFromCache = snap.metadata.isFromCache,
+                                hasPendingWrites = snap.metadata.hasPendingWrites()
+                            )
+                        }
+                    }
+                }
+            }
+            val notifJob = async {
+                if (effectiveUid.isNotBlank()) {
+                    withTimeoutOrNull(2_000L) {
+                        runCatching {
+                            val snap = db.collection("notifications").get(Source.SERVER).await()
+                            FirestoreConnectionMonitor.onSnapshotReceived(
+                                path = "notifications",
+                                isFromCache = snap.metadata.isFromCache,
+                                hasPendingWrites = snap.metadata.hasPendingWrites()
+                            )
+                        }
+                    }
+                }
+            }
+            val submissionsJob = async {
+                if (effectiveUid.isNotBlank()) {
+                    withTimeoutOrNull(2_000L) {
+                        runCatching {
+                            val snap = db.collection("khedmot_submissions")
+                                .whereEqualTo("applicantId", effectiveUid)
+                                .get(Source.SERVER)
+                                .await()
+                            FirestoreConnectionMonitor.onSnapshotReceived(
+                                path = "khedmot_submissions/sent/$effectiveUid",
+                                isFromCache = snap.metadata.isFromCache,
+                                hasPendingWrites = snap.metadata.hasPendingWrites()
+                            )
+                        }
+                    }
+                }
+            }
+            feedJob.await()
+            profileJob.await()
+            notifJob.await()
+            submissionsJob.await()
+        }
     }
 
     /**
      * Self-healing Firestore [com.google.firebase.firestore.Query] observer:
-     * 1. Attaches a single authoritative `addSnapshotListener` per flow (strictly deduplicated via
-     *    `activeRegistration`) so duplicate listeners are never created for the same flow.
-     * 2. Tracks whether each snapshot came from the real Firebase server (`!snapshot.metadata.isFromCache`)
-     *    or from local cache (`snapshot.metadata.isFromCache`) via [FirestoreConnectionMonitor].
+     * 1. Emits local cached data (`Source.CACHE`) immediately on [Dispatchers.IO] (target < 1s,
+     *    typically < 50ms) so the UI renders stored data right away on cold start or offline mode.
+     * 2. Attaches a single authoritative `addSnapshotListener` per flow (strictly deduplicated via
+     *    `activeRegistration`) using [MetadataChanges.INCLUDE] so server confirmation (`!isFromCache`)
+     *    is always detected even when cached documents match server documents.
      * 3. Automatically re-subscribes `addSnapshotListener` with bounded exponential backoff whenever
-     *    a transient gRPC idle reset, network drop, or token refresh causes `error != null` (since
-     *    Firestore SDK permanently removes a listener once it delivers an error).
-     * 4. Avoids launching redundant parallel server `.get()` calls on startup unless the live stream
-     *    has not emitted within `initialServerTimeoutMs`.
+     *    a transient gRPC idle reset, network drop, or token refresh causes `error != null`.
+     * 4. Performs an automatic background server refresh when a global reconnect signal arrives while
+     *    serving cached data or when the initial stream takes longer than `initialServerTimeoutMs`.
      */
     private fun <T> observeQueryWithFastInitialAndFallback(
         query: com.google.firebase.firestore.Query,
         path: String,
         includeMetadataChanges: Boolean = false,
-        initialServerTimeoutMs: Long = 3_500L,
+        initialServerTimeoutMs: Long = 1_800L,
         mapper: (QuerySnapshot) -> List<T>
     ): Flow<List<T>> = channelFlow {
         val hasEmittedAny = AtomicBoolean(false)
         val listenerHasEmitted = AtomicBoolean(false)
+        val hasReceivedServerSnapshot = AtomicBoolean(false)
         val activeRegistration = AtomicReference<ListenerRegistration?>(null)
         val isCountedAttached = AtomicBoolean(false)
         val retryAttempt = AtomicInteger(0)
         var recoveryJob: Job? = null
 
-        fun tryEmitSafe(items: List<T>, fromListener: Boolean = false) {
+        fun tryEmitSafe(items: List<T>, fromListener: Boolean = false, isServerData: Boolean = false) {
             hasEmittedAny.set(true)
             if (fromListener) {
                 listenerHasEmitted.set(true)
+            }
+            if (isServerData) {
+                hasReceivedServerSnapshot.set(true)
             }
             trySend(items)
         }
@@ -152,14 +278,12 @@ class QawmiRepository(
             }
         }
 
-        val metadataChoice = if (includeMetadataChanges) MetadataChanges.INCLUDE else MetadataChanges.EXCLUDE
-
         fun attachSnapshotListener() {
             if (!isActive) return
             // Guarantee at most 1 registration for this flow at any point in time
             detachCurrentRegistration()
             try {
-                val reg = query.addSnapshotListener(metadataChoice) { snapshot, error ->
+                val reg = query.addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
                     if (error != null) {
                         handleFirestoreError(error, OperationType.LIST, path)
                         detachCurrentRegistration()
@@ -170,11 +294,11 @@ class QawmiRepository(
                         }
 
                         recoveryJob?.cancel()
-                        recoveryJob = launch {
+                        recoveryJob = launch(Dispatchers.IO) {
                             val attempt = retryAttempt.incrementAndGet()
                             // Serve local cache fallback if nothing emitted yet, explicitly marked as cache
                             if (!hasEmittedAny.get() && runCatching { auth.currentUser }.getOrNull() != null) {
-                                val cachedFallback = withTimeoutOrNull(300L) {
+                                val cachedFallback = withTimeoutOrNull(250L) {
                                     runCatching { query.get(Source.CACHE).await() }.getOrNull()
                                 }
                                 if (cachedFallback != null) {
@@ -185,14 +309,14 @@ class QawmiRepository(
                                     )
                                     val mapped = runCatching { mapper(cachedFallback) }.getOrDefault(emptyList())
                                     if (!hasEmittedAny.get()) {
-                                        tryEmitSafe(mapped, fromListener = false)
+                                        tryEmitSafe(mapped, fromListener = false, isServerData = false)
                                     }
                                 } else if (!hasEmittedAny.get()) {
-                                    tryEmitSafe(emptyList(), fromListener = false)
+                                    tryEmitSafe(emptyList(), fromListener = false, isServerData = false)
                                 }
                             }
 
-                            val backoffMs = minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(3)), 8_000L)
+                            val backoffMs = minOf(600L * (1L shl (attempt - 1).coerceAtMost(3)), 5_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
 
@@ -200,7 +324,7 @@ class QawmiRepository(
                                 error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
                             ) {
                                 runCatching {
-                                    withTimeoutOrNull(4_000L) {
+                                    withTimeoutOrNull(2_500L) {
                                         auth.currentUser?.getIdToken(true)?.await()
                                     }
                                 }
@@ -214,13 +338,25 @@ class QawmiRepository(
 
                     if (snapshot != null) {
                         retryAttempt.set(0)
+                        val isFromCache = snapshot.metadata.isFromCache
+                        val hasPending = snapshot.metadata.hasPendingWrites()
                         FirestoreConnectionMonitor.onSnapshotReceived(
                             path = path,
-                            isFromCache = snapshot.metadata.isFromCache,
-                            hasPendingWrites = snapshot.metadata.hasPendingWrites()
+                            isFromCache = isFromCache,
+                            hasPendingWrites = hasPending
                         )
-                        val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
-                        tryEmitSafe(mapped, fromListener = true)
+                        val isFirstServerConfirm = !isFromCache && !hasReceivedServerSnapshot.get()
+                        if (!isFromCache) {
+                            hasReceivedServerSnapshot.set(true)
+                        }
+                        val shouldEmitPayload = !listenerHasEmitted.get() ||
+                            includeMetadataChanges ||
+                            snapshot.documentChanges.isNotEmpty() ||
+                            isFirstServerConfirm
+                        if (shouldEmitPayload) {
+                            val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
+                            tryEmitSafe(mapped, fromListener = true, isServerData = !isFromCache)
+                        }
                     }
                 }
                 activeRegistration.set(reg)
@@ -230,7 +366,7 @@ class QawmiRepository(
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.LIST, path)
                 if (!hasEmittedAny.get()) {
-                    tryEmitSafe(emptyList(), fromListener = false)
+                    tryEmitSafe(emptyList(), fromListener = false, isServerData = false)
                 }
             }
         }
@@ -238,25 +374,11 @@ class QawmiRepository(
         // 1. Attach real-time snapshot listener immediately
         attachSnapshotListener()
 
-        // 2. Re-attach immediately if a global network/auth reconnect signal arrives while detached
-        launch {
-            FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
-                if (isActive && activeRegistration.get() == null) {
-                    recoveryJob?.cancel()
-                    retryAttempt.set(0)
-                    runCatching { db.enableNetwork() }
-                    FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
-                    attachSnapshotListener()
-                }
-            }
-        }
-
-        // 3. Fast local cache seed if the snapshot listener hasn't emitted within 120ms
+        // 2. Instant zero-delay local cache seed on Dispatchers.IO (< 100ms) so UI shows cached data immediately
         launch(Dispatchers.IO) {
-            delay(120L)
             if (listenerHasEmitted.get() || hasEmittedAny.get()) return@launch
             if (runCatching { auth.currentUser }.getOrNull() == null) return@launch
-            val cachedSnap = withTimeoutOrNull(200L) {
+            val cachedSnap = withTimeoutOrNull(250L) {
                 runCatching { query.get(Source.CACHE).await() }.getOrNull()
             }
             if (cachedSnap != null && !cachedSnap.isEmpty && !listenerHasEmitted.get()) {
@@ -267,30 +389,60 @@ class QawmiRepository(
                 )
                 val mapped = runCatching { mapper(cachedSnap) }.getOrNull()
                 if (mapped != null && !listenerHasEmitted.get() && !hasEmittedAny.get()) {
-                    tryEmitSafe(mapped, fromListener = false)
+                    tryEmitSafe(mapped, fromListener = false, isServerData = false)
                 }
             }
         }
 
-        // 4. Only run a one-shot fallback if the live listener still hasn't emitted after initialServerTimeoutMs
+        // 3. Re-attach or refresh immediately if a global network/auth/foreground reconnect signal arrives
+        launch(Dispatchers.IO) {
+            FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
+                if (!isActive) return@collect
+                if (activeRegistration.get() == null) {
+                    recoveryJob?.cancel()
+                    retryAttempt.set(0)
+                    runCatching { db.enableNetwork() }
+                    FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
+                    attachSnapshotListener()
+                } else if (!hasReceivedServerSnapshot.get() || FirestoreConnectionMonitor.isServingFromCache.value) {
+                    // Active listener exists but is currently serving cached data; fetch fresh server snapshot in background
+                    val freshSnap = withTimeoutOrNull(2_000L) {
+                        runCatching { query.get(Source.SERVER).await() }.getOrNull()
+                    }
+                    if (freshSnap != null && isActive) {
+                        FirestoreConnectionMonitor.onSnapshotReceived(
+                            path = path,
+                            isFromCache = freshSnap.metadata.isFromCache,
+                            hasPendingWrites = freshSnap.metadata.hasPendingWrites()
+                        )
+                        val mapped = runCatching { mapper(freshSnap) }.getOrNull()
+                        if (mapped != null) {
+                            tryEmitSafe(mapped, fromListener = false, isServerData = !freshSnap.metadata.isFromCache)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Bounded fallback if no server-confirmed snapshot has arrived within initialServerTimeoutMs
         launch(Dispatchers.IO) {
             delay(initialServerTimeoutMs)
-            if (listenerHasEmitted.get()) return@launch
+            if (hasReceivedServerSnapshot.get()) return@launch
             var serverErr: Throwable? = null
-            val serverSnap = withTimeoutOrNull(2_500L) {
+            val serverSnap = withTimeoutOrNull(2_000L) {
                 runCatching { query.get().await() }
                     .onFailure { serverErr = it }
                     .getOrNull()
             }
-            if (serverSnap != null && !listenerHasEmitted.get()) {
+            if (serverSnap != null && !hasReceivedServerSnapshot.get()) {
                 FirestoreConnectionMonitor.onSnapshotReceived(
                     path = path,
                     isFromCache = serverSnap.metadata.isFromCache,
                     hasPendingWrites = serverSnap.metadata.hasPendingWrites()
                 )
                 val mapped = runCatching { mapper(serverSnap) }.getOrDefault(emptyList())
-                if (!listenerHasEmitted.get()) {
-                    tryEmitSafe(mapped, fromListener = false)
+                if (!hasReceivedServerSnapshot.get()) {
+                    tryEmitSafe(mapped, fromListener = false, isServerData = !serverSnap.metadata.isFromCache)
                 }
             } else if (!hasEmittedAny.get() && !listenerHasEmitted.get()) {
                 val fsErr = serverErr as? FirebaseFirestoreException
@@ -318,7 +470,7 @@ class QawmiRepository(
                     emptyList()
                 }
                 if (!hasEmittedAny.get() && !listenerHasEmitted.get()) {
-                    tryEmitSafe(fallbackList, fromListener = false)
+                    tryEmitSafe(fallbackList, fromListener = false, isServerData = false)
                 }
             }
         }
@@ -331,7 +483,7 @@ class QawmiRepository(
 
     /**
      * Self-healing single-document observer (`addSnapshotListener` with automatic re-subscription
-     * on stream/token errors and accurate Server vs Cache tracking).
+     * on stream/token errors, instant zero-delay local cache emission, and accurate Server vs Cache tracking).
      */
     private fun <T> observeDocumentWithAutoRecovery(
         docRef: DocumentReference,
@@ -341,6 +493,7 @@ class QawmiRepository(
         mapper: (DocumentSnapshot) -> T?
     ): Flow<T?> = channelFlow {
         val hasEmittedAny = AtomicBoolean(false)
+        val hasReceivedServerSnapshot = AtomicBoolean(false)
         val activeRegistration = AtomicReference<ListenerRegistration?>(null)
         val isCountedAttached = AtomicBoolean(false)
         val retryAttempt = AtomicInteger(0)
@@ -356,13 +509,11 @@ class QawmiRepository(
             }
         }
 
-        val metadataChoice = if (includeMetadataChanges) MetadataChanges.INCLUDE else MetadataChanges.EXCLUDE
-
         fun attachDocListener() {
             if (!isActive) return
             detachCurrentRegistration()
             try {
-                val reg = docRef.addSnapshotListener(metadataChoice) { snapshot, error ->
+                val reg = docRef.addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
                     if (error != null) {
                         handleFirestoreError(error, OperationType.GET, path)
                         detachCurrentRegistration()
@@ -391,14 +542,14 @@ class QawmiRepository(
                                     trySend(defaultValueOnError)
                                 }
                             }
-                            val backoffMs = minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(3)), 8_000L)
+                            val backoffMs = minOf(600L * (1L shl (attempt - 1).coerceAtMost(3)), 5_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
                             if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                 error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
                             ) {
                                 runCatching {
-                                    withTimeoutOrNull(4_000L) {
+                                    withTimeoutOrNull(2_500L) {
                                         auth.currentUser?.getIdToken(true)?.await()
                                     }
                                 }
@@ -412,11 +563,16 @@ class QawmiRepository(
 
                     if (snapshot != null) {
                         retryAttempt.set(0)
+                        val isFromCache = snapshot.metadata.isFromCache
+                        val hasPending = snapshot.metadata.hasPendingWrites()
                         FirestoreConnectionMonitor.onSnapshotReceived(
                             path = path,
-                            isFromCache = snapshot.metadata.isFromCache,
-                            hasPendingWrites = snapshot.metadata.hasPendingWrites()
+                            isFromCache = isFromCache,
+                            hasPendingWrites = hasPending
                         )
+                        if (!isFromCache) {
+                            hasReceivedServerSnapshot.set(true)
+                        }
                         hasEmittedAny.set(true)
                         val mapped = if (snapshot.exists()) {
                             runCatching { mapper(snapshot) }.getOrDefault(defaultValueOnError)
@@ -439,25 +595,12 @@ class QawmiRepository(
             }
         }
 
-        // Re-attach immediately if a global network/auth reconnect signal arrives while detached
-        launch {
-            FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
-                if (isActive && activeRegistration.get() == null) {
-                    recoveryJob?.cancel()
-                    retryAttempt.set(0)
-                    runCatching { db.enableNetwork() }
-                    FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
-                    attachDocListener()
-                }
-            }
-        }
-
         attachDocListener()
 
-        // Fast initial document fetch on Dispatchers.IO if listener hasn't emitted yet
+        // Fast zero-delay initial document fetch from local cache on Dispatchers.IO (< 100ms), then server fallback
         launch(Dispatchers.IO) {
             if (hasEmittedAny.get()) return@launch
-            val cached = withTimeoutOrNull(250L) {
+            val cached = withTimeoutOrNull(200L) {
                 runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
             }
             if (cached != null && cached.exists() && !hasEmittedAny.get()) {
@@ -471,18 +614,23 @@ class QawmiRepository(
                     hasEmittedAny.set(true)
                     trySend(mapped)
                 }
-            } else if (!hasEmittedAny.get()) {
-                val serverSnap = withTimeoutOrNull(2_500L) {
-                    runCatching { docRef.get().await() }.getOrNull()
-                }
-                if (serverSnap != null && serverSnap.exists() && !hasEmittedAny.get()) {
-                    FirestoreConnectionMonitor.onSnapshotReceived(
-                        path = path,
-                        isFromCache = serverSnap.metadata.isFromCache,
-                        hasPendingWrites = serverSnap.metadata.hasPendingWrites()
-                    )
-                    val mapped = runCatching { mapper(serverSnap) }.getOrDefault(defaultValueOnError)
-                    if (!hasEmittedAny.get()) {
+            }
+            if (!hasReceivedServerSnapshot.get()) {
+                delay(1_200L)
+                if (!hasReceivedServerSnapshot.get() && isActive) {
+                    val serverSnap = withTimeoutOrNull(2_000L) {
+                        runCatching { docRef.get().await() }.getOrNull()
+                    }
+                    if (serverSnap != null && serverSnap.exists() && !hasReceivedServerSnapshot.get()) {
+                        FirestoreConnectionMonitor.onSnapshotReceived(
+                            path = path,
+                            isFromCache = serverSnap.metadata.isFromCache,
+                            hasPendingWrites = serverSnap.metadata.hasPendingWrites()
+                        )
+                        if (!serverSnap.metadata.isFromCache) {
+                            hasReceivedServerSnapshot.set(true)
+                        }
+                        val mapped = runCatching { mapper(serverSnap) }.getOrDefault(defaultValueOnError)
                         hasEmittedAny.set(true)
                         trySend(mapped)
                     }
@@ -490,14 +638,37 @@ class QawmiRepository(
             }
         }
 
-        launch {
+        // Re-attach or refresh immediately if a global network/auth/foreground reconnect signal arrives
+        launch(Dispatchers.IO) {
             FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
-                if (isActive && activeRegistration.get() == null) {
+                if (!isActive) return@collect
+                if (activeRegistration.get() == null) {
                     recoveryJob?.cancel()
                     retryAttempt.set(0)
                     runCatching { db.enableNetwork() }
                     FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
                     attachDocListener()
+                } else if (!hasReceivedServerSnapshot.get() || FirestoreConnectionMonitor.isServingFromCache.value) {
+                    val freshDoc = withTimeoutOrNull(2_000L) {
+                        runCatching { docRef.get(Source.SERVER).await() }.getOrNull()
+                    }
+                    if (freshDoc != null && isActive) {
+                        FirestoreConnectionMonitor.onSnapshotReceived(
+                            path = path,
+                            isFromCache = freshDoc.metadata.isFromCache,
+                            hasPendingWrites = freshDoc.metadata.hasPendingWrites()
+                        )
+                        if (!freshDoc.metadata.isFromCache) {
+                            hasReceivedServerSnapshot.set(true)
+                        }
+                        val mapped = if (freshDoc.exists()) {
+                            runCatching { mapper(freshDoc) }.getOrDefault(defaultValueOnError)
+                        } else {
+                            null
+                        }
+                        hasEmittedAny.set(true)
+                        trySend(mapped)
+                    }
                 }
             }
         }
@@ -673,8 +844,18 @@ class QawmiRepository(
                 }
                 ?.toMap()
                 ?: obj.chatThemes
+            val resolvedContactEmail = runCatching { getString("contactEmail") }.getOrNull() ?: obj.contactEmail
+            val resolvedPhonePrivacy = UserProfile.normalizePrivacyMode(
+                runCatching { getString("phonePrivacy") }.getOrNull() ?: obj.phonePrivacy
+            )
+            val resolvedEmailPrivacy = UserProfile.normalizePrivacyMode(
+                runCatching { getString("emailPrivacy") }.getOrNull() ?: obj.emailPrivacy
+            )
             val candidate = obj.copy(
                 id = id,
+                contactEmail = resolvedContactEmail,
+                phonePrivacy = resolvedPhonePrivacy,
+                emailPrivacy = resolvedEmailPrivacy,
                 isOnline = resolvedOnline,
                 isVerified = resolvedVerified,
                 typingToUserId = resolvedTypingTo,
@@ -730,6 +911,9 @@ class QawmiRepository(
         val docRef = db.collection("users").document(uid)
         val resolvedName = profile.fullName.trim().ifBlank { "আবদুল্লাহ" }
         val resolvedPhoto = profile.photoUrl.trim()
+        val resolvedEmail = profile.contactEmail.trim().take(150)
+        val resolvedPhonePrivacy = UserProfile.normalizePrivacyMode(profile.phonePrivacy)
+        val resolvedEmailPrivacy = UserProfile.normalizePrivacyMode(profile.emailPrivacy)
         return try {
             val existingSnap = docRef.getFastOrNull(3_500L)
             if (existingSnap == null || !existingSnap.exists()) {
@@ -744,6 +928,9 @@ class QawmiRepository(
                     "preferredDistricts" to profile.preferredDistricts.trim(),
                     "bio" to profile.bio.trim(),
                     "contactInfo" to profile.contactInfo.trim(),
+                    "contactEmail" to resolvedEmail,
+                    "phonePrivacy" to resolvedPhonePrivacy,
+                    "emailPrivacy" to resolvedEmailPrivacy,
                     "madrasaName" to profile.madrasaName.trim(),
                     "photoUrl" to resolvedPhoto,
                     "isOnline" to true,
@@ -766,6 +953,9 @@ class QawmiRepository(
                     "preferredDistricts" to profile.preferredDistricts.trim(),
                     "bio" to profile.bio.trim(),
                     "contactInfo" to profile.contactInfo.trim(),
+                    "contactEmail" to resolvedEmail,
+                    "phonePrivacy" to resolvedPhonePrivacy,
+                    "emailPrivacy" to resolvedEmailPrivacy,
                     "madrasaName" to profile.madrasaName.trim(),
                     "photoUrl" to finalPhoto,
                     "isOnline" to true,
@@ -4295,7 +4485,345 @@ class QawmiRepository(
             Result.failure(e)
         }
     }
+
+    // =========================================================================
+    // 10. KKS INTELLIGENCE ENGINE (স্মার্ট র‍্যাঙ্কিং, অ্যান্টি-ফ্রড ও অ্যাডাপ্টিভ লার্নিং)
+    // =========================================================================
+
+    // Session-level deduplication cache for deterministic engagement receipts: "{uid}_{postId}_{eventType}"
+    private val sessionRecordedReceipts = ConcurrentHashMap.newKeySet<String>()
+    private val lastEngagementTimestampByEvent = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Observes the global KKS Intelligence Engine configuration (`/intelligence_config/global_weights`).
+     * Always emits a valid [IntelligenceConfig] immediately from cache or default values.
+     */
+    fun observeIntelligenceConfig(): Flow<IntelligenceConfig> {
+        val docRef = db.collection("intelligence_config")
+            .document(IntelligenceConfig.GLOBAL_CONFIG_DOC_ID)
+        return observeDocumentWithAutoRecovery(
+            docRef = docRef,
+            path = docRef.path,
+            includeMetadataChanges = false,
+            defaultValueOnError = IntelligenceConfig()
+        ) { snap ->
+            if (snap.exists()) {
+                snap.safeToObject(IntelligenceConfig::class.java) ?: IntelligenceConfig()
+            } else {
+                IntelligenceConfig()
+            }
+        }.map { it ?: IntelligenceConfig() }
+            .catch { emit(IntelligenceConfig()) }
+    }
+
+    /**
+     * Saves updated KKS Intelligence Engine weights and feature flags to `/intelligence_config/global_weights`.
+     * Restricted to verified Admins.
+     */
+    suspend fun saveIntelligenceConfig(
+        config: IntelligenceConfig,
+        adminName: String = "নাজিমে আলা (অ্যাডমিন)"
+    ): Result<Unit> {
+        requireUserId()
+        val docRef = db.collection("intelligence_config")
+            .document(IntelligenceConfig.GLOBAL_CONFIG_DOC_ID)
+        return try {
+            val safeAdmin = adminName.trim().ifBlank { "নাজিমে আলা (অ্যাডমিন)" }.take(120)
+            val payload = mapOf(
+                "configId" to IntelligenceConfig.GLOBAL_CONFIG_DOC_ID,
+                "skillMatchWeight" to config.skillMatchWeight.coerceIn(0.0, 100.0),
+                "locationMatchWeight" to config.locationMatchWeight.coerceIn(0.0, 100.0),
+                "experienceWeight" to config.experienceWeight.coerceIn(0.0, 100.0),
+                "freshnessHalfLifeHours" to config.freshnessHalfLifeHours.coerceIn(4.0, 720.0),
+                "trendingWeight" to config.trendingWeight.coerceIn(0.0, 100.0),
+                "verifiedMadrasaBonus" to config.verifiedMadrasaBonus.coerceIn(0.0, 50.0),
+                "newPostBoostHours" to config.newPostBoostHours.coerceIn(1.0, 168.0),
+                "minDwellTimeMs" to config.minDwellTimeMs.coerceIn(1_000L, 30_000L),
+                "fraudPenaltyWeight" to config.fraudPenaltyWeight.coerceIn(0.0, 100.0),
+                "smartNotificationThreshold" to config.smartNotificationThreshold.coerceIn(20.0, 95.0),
+                "isSmartRankingEnabled" to config.isSmartRankingEnabled,
+                "isTrendingEnabled" to config.isTrendingEnabled,
+                "isFraudDetectionEnabled" to config.isFraudDetectionEnabled,
+                "isSmartNotificationEnabled" to config.isSmartNotificationEnabled,
+                "updatedBy" to safeAdmin,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).awaitWithTimeout(8_000L)
+
+            withTimeoutOrNull(2_000L) {
+                runCatching {
+                    enqueueAndDispatchTelegramNotification(
+                        eventType = "ADMIN_SECURITY",
+                        title = "KKS Intelligence Engine কনফিগারেশন হালনাগাদ",
+                        message = "র‍্যাঙ্কিং: ${if (config.isSmartRankingEnabled) "চালু" else "বন্ধ"} | ট্রেন্ডিং: ${if (config.isTrendingEnabled) "চালু" else "বন্ধ"} | অ্যান্টি-ফ্রড: ${if (config.isFraudDetectionEnabled) "চালু" else "বন্ধ"} | যোগ্যতা গুরুত্ব: ${config.skillMatchWeight.toInt()}%",
+                        actorName = safeAdmin,
+                        referenceId = IntelligenceConfig.GLOBAL_CONFIG_DOC_ID
+                    )
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(translateFirestoreExceptionToBangla(e))
+        }
+    }
+
+    /**
+     * Observes post intelligence metrics (`/post_intelligence_metrics/{postId}`) across active posts.
+     */
+    fun observePostIntelligenceMetrics(): Flow<Map<String, PostIntelligenceMetrics>> {
+        val path = "post_intelligence_metrics"
+        return observeQueryWithFastInitialAndFallback(
+            query = db.collection(path),
+            path = path,
+            includeMetadataChanges = false,
+            initialServerTimeoutMs = 2_500L
+        ) { snap ->
+            snap.safeToObjects(PostIntelligenceMetrics::class.java)
+                .filter { it.id.isNotBlank() || it.postId.isNotBlank() }
+        }.map { metricsList ->
+            metricsList.associateBy { it.postId.ifBlank { it.id } }
+        }.catch { emit(emptyMap()) }
+    }
+
+    /**
+     * Observes the signed-in user's adaptive learning affinity profile
+     * (`/users/{userId}/intelligence_state/affinity`).
+     */
+    fun observeUserAffinityState(userId: String): Flow<UserAffinityState?> {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return kotlinx.coroutines.flow.flowOf(null)
+        val docRef = db.collection("users")
+            .document(effectiveUid)
+            .collection("intelligence_state")
+            .document(UserAffinityState.AFFINITY_DOC_ID)
+        return observeDocumentWithAutoRecovery(
+            docRef = docRef,
+            path = docRef.path,
+            includeMetadataChanges = false,
+            defaultValueOnError = null
+        ) { snap ->
+            if (snap.exists()) {
+                snap.safeToObject(UserAffinityState::class.java)
+            } else {
+                null
+            }
+        }.catch { emit(null) }
+    }
+
+    /**
+     * Records a verified unique user engagement event (`VIEW`, `CLICK`, `APPLY`, `BOOKMARK`, `SHARE`)
+     * with deterministic deduplication receipt (`/post_intelligence_metrics/{postId}/engagement_receipts/{uid}_{eventType}`),
+     * dwell-time gating, rate-limiting cooldown, and adaptive learning user affinity update.
+     */
+    suspend fun recordVerifiedEngagementEvent(
+        post: FeedPost,
+        eventType: String,
+        dwellTimeMs: Long = 0L,
+        currentConfig: IntelligenceConfig = IntelligenceConfig(),
+        currentAffinity: UserAffinityState? = null
+    ): Result<Boolean> {
+        val uid = auth.currentUser?.uid?.takeIf { it.isNotBlank() } ?: return Result.success(false)
+        val postId = post.id.trim()
+        val normalizedType = eventType.trim().uppercase()
+        if (postId.isBlank() || normalizedType !in EngagementReceipt.VALID_EVENT_TYPES) {
+            return Result.success(false)
+        }
+        // Authors viewing/clicking their own post do not inflate unique engagement counters
+        if (post.authorId == uid && (normalizedType == EngagementReceipt.EVENT_VIEW || normalizedType == EngagementReceipt.EVENT_CLICK)) {
+            return Result.success(false)
+        }
+        // Enforce minimum dwell time for VIEW events (prevents rapid scroll / bot view inflation)
+        val requiredDwellMs = currentConfig.minDwellTimeMs.coerceAtLeast(1_500L)
+        if (normalizedType == EngagementReceipt.EVENT_VIEW && dwellTimeMs < requiredDwellMs) {
+            return Result.success(false)
+        }
+
+        val sessionKey = "${uid}_${postId}_$normalizedType"
+        if (!sessionRecordedReceipts.add(sessionKey)) {
+            // Already recorded in this session
+            return Result.success(false)
+        }
+
+        // Anti-burst rate limit per event type (minimum 600ms between identical event types)
+        val nowMs = System.currentTimeMillis()
+        val prevEventMs = lastEngagementTimestampByEvent[normalizedType] ?: 0L
+        if ((nowMs - prevEventMs) in 1L..500L && normalizedType == EngagementReceipt.EVENT_CLICK) {
+            sessionRecordedReceipts.remove(sessionKey)
+            return Result.success(false)
+        }
+        lastEngagementTimestampByEvent[normalizedType] = nowMs
+
+        val receiptId = EngagementReceipt.buildDeterministicReceiptId(uid, normalizedType)
+        val metricsRef = db.collection("post_intelligence_metrics").document(postId)
+        val receiptRef = metricsRef.collection("engagement_receipts").document(receiptId)
+        val affinityRef = db.collection("users")
+            .document(uid)
+            .collection("intelligence_state")
+            .document(UserAffinityState.AFFINITY_DOC_ID)
+
+        return try {
+            // Check cache/server first so we never double-increment if receipt already exists
+            val existingReceiptSnap = receiptRef.getFastOrNull(1_800L)
+            if (existingReceiptSnap != null && existingReceiptSnap.exists()) {
+                return Result.success(false)
+            }
+
+            val existingMetricsSnap = metricsRef.getFastOrNull(1_800L)
+            val existingMetrics = existingMetricsSnap?.safeToObject(PostIntelligenceMetrics::class.java)
+                ?: PostIntelligenceMetrics(id = postId, postId = postId)
+
+            val newViews = existingMetrics.uniqueViewCount + if (normalizedType == EngagementReceipt.EVENT_VIEW) 1 else 0
+            val newClicks = existingMetrics.uniqueClickCount + if (normalizedType == EngagementReceipt.EVENT_CLICK) 1 else 0
+            val newApplies = existingMetrics.applyCount + if (normalizedType == EngagementReceipt.EVENT_APPLY) 1 else 0
+            val newBookmarks = existingMetrics.bookmarkCount + if (normalizedType == EngagementReceipt.EVENT_BOOKMARK) 1 else 0
+            val newShares = existingMetrics.shareCount + if (normalizedType == EngagementReceipt.EVENT_SHARE) 1 else 0
+            val safeDwellAddition = if (normalizedType == EngagementReceipt.EVENT_VIEW) {
+                dwellTimeMs.coerceIn(requiredDwellMs, 180_000L)
+            } else {
+                0L
+            }
+            val newTotalDwell = existingMetrics.totalDwellTimeMs + safeDwellAddition
+
+            val projectedMetrics = existingMetrics.copy(
+                postId = postId,
+                uniqueViewCount = newViews,
+                uniqueClickCount = newClicks,
+                applyCount = newApplies,
+                bookmarkCount = newBookmarks,
+                shareCount = newShares,
+                totalDwellTimeMs = newTotalDwell
+            )
+
+            val ageHours = post.createdAt?.toDate()?.time?.let {
+                ((nowMs - it).coerceAtLeast(0L).toDouble()) / (1000.0 * 3600.0)
+            } ?: 4.0
+
+            val anomalyEval = KksIntelligenceEngine.evaluateAnomalyAndFraud(post, projectedMetrics, currentConfig)
+            val updatedTrending = KksIntelligenceEngine.computeTrendingVelocity(
+                post = post,
+                metrics = projectedMetrics,
+                ageHours = ageHours,
+                anomalyRiskNorm = anomalyEval.anomalyRiskNorm
+            )
+            val updatedQuality = (
+                50.0 +
+                    (newApplies * 6.0) +
+                    (newBookmarks * 3.0) +
+                    (newShares * 2.5) +
+                    (newClicks * 1.2) -
+                    (anomalyEval.anomalyScore * 0.45)
+                ).coerceIn(0.0, 100.0)
+
+            val receiptPayload = mapOf(
+                "userId" to uid,
+                "postId" to postId,
+                "eventType" to normalizedType,
+                "dwellTimeMs" to safeDwellAddition,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+
+            val metricsPayload = mapOf(
+                "postId" to postId,
+                "uniqueViewCount" to newViews,
+                "uniqueClickCount" to newClicks,
+                "applyCount" to newApplies,
+                "bookmarkCount" to newBookmarks,
+                "shareCount" to newShares,
+                "totalDwellTimeMs" to newTotalDwell,
+                "trendingScore" to ((updatedTrending * 100.0).toInt() / 100.0),
+                "qualityScore" to ((updatedQuality * 100.0).toInt() / 100.0),
+                "anomalyScore" to ((anomalyEval.anomalyScore * 100.0).toInt() / 100.0),
+                "isFlagged" to anomalyEval.isFlagged,
+                "flagReason" to anomalyEval.reasonBangla.take(300),
+                "lastInteractionAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+
+            val updatedAffinity = KksIntelligenceEngine.computeUpdatedAffinityState(
+                currentState = currentAffinity,
+                userId = uid,
+                post = post,
+                eventType = normalizedType,
+                dwellTimeMs = safeDwellAddition,
+                nowMillis = nowMs
+            )
+
+            val affinityPayload = mapOf(
+                "userId" to uid,
+                "categoryWeights" to updatedAffinity.categoryWeights,
+                "districtWeights" to updatedAffinity.districtWeights,
+                "totalInteractions" to updatedAffinity.totalInteractions,
+                "lastEventAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+
+            val batch = db.batch()
+            batch.set(receiptRef, receiptPayload)
+            batch.set(metricsRef, metricsPayload)
+            batch.set(affinityRef, affinityPayload)
+            batch.commit().awaitWithTimeout(6_000L)
+            Result.success(true)
+        } catch (e: CancellationException) {
+            sessionRecordedReceipts.remove(sessionKey)
+            throw e
+        } catch (e: Exception) {
+            sessionRecordedReceipts.remove(sessionKey)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Allows a verified Admin from the Intelligence Control Center to clear an anomaly flag
+     * or manually flag a post for artificial engagement / spam penalty.
+     */
+    suspend fun adminOverridePostAnomalyFlag(
+        post: FeedPost,
+        existingMetrics: PostIntelligenceMetrics?,
+        flagPost: Boolean,
+        reasonBangla: String,
+        adminName: String = "নাজিমে আলা (অ্যাডমিন)"
+    ): Result<Unit> {
+        requireUserId()
+        val postId = post.id.trim()
+        if (postId.isBlank()) return Result.failure(IllegalArgumentException("বৈধ পোস্ট আইডি পাওয়া যায়নি।"))
+        val metricsRef = db.collection("post_intelligence_metrics").document(postId)
+        return try {
+            val base = existingMetrics ?: PostIntelligenceMetrics(id = postId, postId = postId)
+            val resolvedReason = if (flagPost) {
+                "[অ্যাডমিন প্যানেল] ${reasonBangla.trim().ifBlank { "কৃত্রিম এনগেজমেন্ট বা স্প্যাম সন্দেহে চিহ্নিত" }}".take(300)
+            } else {
+                ""
+            }
+            val payload = mapOf(
+                "postId" to postId,
+                "uniqueViewCount" to base.uniqueViewCount,
+                "uniqueClickCount" to base.uniqueClickCount,
+                "applyCount" to base.applyCount,
+                "bookmarkCount" to base.bookmarkCount,
+                "shareCount" to base.shareCount,
+                "totalDwellTimeMs" to base.totalDwellTimeMs,
+                "trendingScore" to if (flagPost) 0.0 else base.trendingScore,
+                "qualityScore" to if (flagPost) 15.0 else base.qualityScore.coerceAtLeast(60.0),
+                "anomalyScore" to if (flagPost) 85.0 else 0.0,
+                "isFlagged" to flagPost,
+                "flagReason" to resolvedReason,
+                "lastInteractionAt" to (base.lastInteractionAt ?: FieldValue.serverTimestamp()),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            metricsRef.set(payload).awaitWithTimeout(8_000L)
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, metricsRef.path)
+            Result.failure(translateFirestoreExceptionToBangla(e))
+        }
+    }
 }
+
 
 
 

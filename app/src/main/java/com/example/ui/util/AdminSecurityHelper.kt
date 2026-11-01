@@ -127,9 +127,16 @@ object AdminSecurityHelper {
         return false
     }
 
+    val SUPPORTED_ADMIN_ROLES: Set<String> = setOf(
+        "admin",
+        "SUPER_ADMIN",
+        "ADMIN",
+        "MODERATOR"
+    )
+
     /**
      * Inspects the signed Firebase ID Token (GetTokenResult) from Firebase Authentication
-     * to verify Custom Claims (`admin == true` or `role == "admin"`) alongside verified token email/phone.
+     * to verify Custom Claims (`admin == true` or `role in SUPPORTED_ADMIN_ROLES`) alongside verified token email/phone.
      */
     suspend fun verifyServerTokenAdminClaims(user: FirebaseUser?): Boolean {
         if (user == null) return false
@@ -143,9 +150,9 @@ object AdminSecurityHelper {
                 user.getIdToken(false).await()
             } ?: return isFirebaseAuthUserAdmin(authEmail = resolvedEmail, authPhone = resolvedPhone)
             val claims = tokenResult.claims
+            val roleClaim = (claims["role"] as? String).orEmpty().trim()
             val hasAdminClaim = (claims["admin"] as? Boolean == true) ||
-                (claims["role"] as? String == "admin") ||
-                (claims["role"] as? String == "SUPER_ADMIN")
+                roleClaim in SUPPORTED_ADMIN_ROLES
             val tokenEmail = (claims["email"] as? String)?.takeIf { it.isNotBlank() } ?: resolvedEmail
             val tokenPhone = (claims["phone_number"] as? String)?.takeIf { it.isNotBlank() } ?: resolvedPhone
             isFirebaseAuthUserAdmin(

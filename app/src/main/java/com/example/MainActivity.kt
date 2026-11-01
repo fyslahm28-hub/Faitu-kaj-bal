@@ -389,6 +389,7 @@ fun AppNavigation(
             }
         }
     } else {
+        val lifecycleOwner = LocalLifecycleOwner.current
         val currentUserId = user.uid
         val currentUserEmail = com.example.ui.util.AdminSecurityHelper.resolveEffectiveUserEmail(user)
         val currentUserPhone = com.example.ui.util.AdminSecurityHelper.resolveEffectiveUserPhone(user)
@@ -425,25 +426,117 @@ fun AppNavigation(
             }
         )
 
-        DisposableEffect(context, resolvedAuth, currentUserId) {
+        DisposableEffect(context, lifecycleOwner, resolvedAuth, currentUserId) {
             val connectivityManager = runCatching {
                 context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
             }.getOrNull()
 
+            fun resolveNetworkStatus(
+                cm: android.net.ConnectivityManager?,
+                specificNetwork: android.net.Network? = null
+            ): Pair<Boolean, String> {
+                if (cm == null) return true to "ONLINE"
+                val activeNet = specificNetwork ?: runCatching { cm.activeNetwork }.getOrNull()
+                    ?: return false to "NONE"
+                val caps = runCatching { cm.getNetworkCapabilities(activeNet) }.getOrNull()
+                    ?: return false to "NONE"
+                val hasInternet = caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                if (!hasInternet) return false to "NONE"
+                val transport = when {
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
+                    else -> "ONLINE"
+                }
+                return true to transport
+            }
+
+            // Initialize real connectivity state immediately on startup
+            val (initialOnline, initialTransport) = resolveNetworkStatus(connectivityManager)
+            com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(initialTransport, initialOnline)
+
+            var lastTransportType = initialTransport
+
             val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
-                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
-                    qawmiViewModel.onNetworkRestored()
+                    val (isOnline, transport) = resolveNetworkStatus(connectivityManager, network)
+                    val prevAvailable = com.example.data.repository.FirestoreConnectionMonitor.isNetworkAvailable.value
+                    val transportSwitched = lastTransportType != "UNKNOWN" &&
+                        lastTransportType != "NONE" &&
+                        transport != "NONE" &&
+                        lastTransportType != transport
+                    lastTransportType = transport
+                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(transport, isOnline)
+                    if (isOnline && (!prevAvailable || transportSwitched)) {
+                        qawmiViewModel.onNetworkRestored()
+                    }
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: android.net.Network,
+                    networkCapabilities: android.net.NetworkCapabilities
+                ) {
+                    val hasInternet = networkCapabilities.hasCapability(
+                        android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET
+                    )
+                    val transport = when {
+                        networkCapabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+                        networkCapabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+                        networkCapabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
+                        else -> if (hasInternet) "ONLINE" else "NONE"
+                    }
+                    val prevAvailable = com.example.data.repository.FirestoreConnectionMonitor.isNetworkAvailable.value
+                    val transportSwitched = hasInternet &&
+                        lastTransportType != "UNKNOWN" &&
+                        lastTransportType != "NONE" &&
+                        lastTransportType != transport
+                    if (hasInternet) {
+                        lastTransportType = transport
+                    }
+                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(transport, hasInternet)
+                    if (hasInternet && (!prevAvailable || transportSwitched)) {
+                        qawmiViewModel.onNetworkRestored()
+                    }
                 }
 
                 override fun onLost(network: android.net.Network) {
-                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkAvailabilityChanged(false)
+                    // Check if another active network (e.g., Cellular after Wi-Fi disconnect) is already carrying traffic
+                    val (stillOnline, fallbackTransport) = resolveNetworkStatus(connectivityManager)
+                    lastTransportType = fallbackTransport
+                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(
+                        fallbackTransport,
+                        stillOnline
+                    )
+                    if (stillOnline) {
+                        qawmiViewModel.onNetworkRestored()
+                    }
                 }
             }
 
             runCatching {
                 connectivityManager?.registerDefaultNetworkCallback(networkCallback)
             }
+
+            val lifecycleObserver = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_START,
+                    Lifecycle.Event.ON_RESUME -> {
+                        val (onlineNow, transportNow) = resolveNetworkStatus(connectivityManager)
+                        com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(
+                            transportNow,
+                            onlineNow
+                        )
+                        if (onlineNow) {
+                            qawmiViewModel.onAppForegrounded()
+                        }
+                    }
+                    Lifecycle.Event.ON_STOP -> {
+                        qawmiViewModel.onAppBackgrounded()
+                    }
+                    else -> Unit
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
             val idTokenListener = FirebaseAuth.IdTokenListener { authInstance ->
                 if (authInstance.currentUser?.uid == currentUserId) {
@@ -455,6 +548,7 @@ fun AppNavigation(
             }
 
             onDispose {
+                lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
                 runCatching { connectivityManager?.unregisterNetworkCallback(networkCallback) }
                 runCatching { resolvedAuth.removeIdTokenListener(idTokenListener) }
             }

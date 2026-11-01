@@ -52,6 +52,9 @@ data class UserProfile(
     val preferredDistricts: String = "",
     val bio: String = "",
     val contactInfo: String = "",
+    val contactEmail: String = "",
+    val phonePrivacy: String = PRIVACY_PUBLIC, // "ONLY_ME", "FRIENDS", "PUBLIC"
+    val emailPrivacy: String = PRIVACY_PUBLIC, // "ONLY_ME", "FRIENDS", "PUBLIC"
     val madrasaName: String = "",
     val photoUrl: String = "", // Base64 data:image/jpeg;base64,... or avatar preset / URL stored in Firestore
     @field:PropertyName("isOnline")
@@ -95,8 +98,51 @@ data class UserProfile(
         return lastSeenAt ?: typingUpdatedAt ?: updatedAt
     }
 
+    fun canViewerSeePhone(viewerUserId: String, isFriendOrConnected: Boolean): Boolean {
+        if (viewerUserId.isNotBlank() && (viewerUserId == id || viewerUserId == userId)) return true
+        return when (normalizePrivacyMode(phonePrivacy)) {
+            PRIVACY_ONLY_ME -> false
+            PRIVACY_FRIENDS -> isFriendOrConnected
+            else -> true
+        }
+    }
+
+    fun canViewerSeeEmail(viewerUserId: String, isFriendOrConnected: Boolean): Boolean {
+        if (viewerUserId.isNotBlank() && (viewerUserId == id || viewerUserId == userId)) return true
+        return when (normalizePrivacyMode(emailPrivacy)) {
+            PRIVACY_ONLY_ME -> false
+            PRIVACY_FRIENDS -> isFriendOrConnected
+            else -> true
+        }
+    }
+
     companion object {
         const val ONLINE_PRESENCE_TTL_MS = 180_000L // 3 minutes active heartbeat window
+        const val PRIVACY_ONLY_ME = "ONLY_ME"
+        const val PRIVACY_FRIENDS = "FRIENDS"
+        const val PRIVACY_PUBLIC = "PUBLIC"
+
+        val privacyOptions: List<Pair<String, String>> = listOf(
+            PRIVACY_ONLY_ME to "অনলি মি",
+            PRIVACY_FRIENDS to "ফ্রেন্ডস",
+            PRIVACY_PUBLIC to "পাবলিক"
+        )
+
+        fun normalizePrivacyMode(raw: String?): String {
+            return when (raw?.trim()?.uppercase()) {
+                PRIVACY_ONLY_ME -> PRIVACY_ONLY_ME
+                PRIVACY_FRIENDS -> PRIVACY_FRIENDS
+                else -> PRIVACY_PUBLIC
+            }
+        }
+
+        fun privacyLabelBangla(mode: String?): String {
+            return when (normalizePrivacyMode(mode)) {
+                PRIVACY_ONLY_ME -> "অনলি মি"
+                PRIVACY_FRIENDS -> "ফ্রেন্ডস"
+                else -> "পাবলিক"
+            }
+        }
     }
 }
 

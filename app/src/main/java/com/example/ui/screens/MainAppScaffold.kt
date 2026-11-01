@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Policy
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -192,7 +193,11 @@ fun MainAppScaffold(
         }
     }
 
+    val isNetworkAvailable by viewModel.isNetworkAvailable.collectAsStateWithLifecycle()
     val isServerConnected by viewModel.isServerConnected.collectAsStateWithLifecycle()
+    val isServingFromCache by viewModel.isServingFromCache.collectAsStateWithLifecycle()
+    val isReconnecting by viewModel.isReconnecting.collectAsStateWithLifecycle()
+    val hasPendingWrites by viewModel.hasPendingWrites.collectAsStateWithLifecycle()
     val userProfileState by viewModel.userProfileState.collectAsStateWithLifecycle()
     val feedPostsState by viewModel.feedPostsState.collectAsStateWithLifecycle()
     val postCommentsState by viewModel.postCommentsState.collectAsStateWithLifecycle()
@@ -208,9 +213,18 @@ fun MainAppScaffold(
     val adminUsersState by viewModel.adminUsersState.collectAsStateWithLifecycle()
     val adminSubmissionsState by viewModel.adminSubmissionsState.collectAsStateWithLifecycle()
     val adminRegistryListState by viewModel.adminRegistryListState.collectAsStateWithLifecycle()
+    val intelligenceConfig by viewModel.intelligenceConfigState.collectAsStateWithLifecycle()
+    val algorithmPerformance by viewModel.algorithmPerformanceState.collectAsStateWithLifecycle()
+    val postIntelligenceMetrics by viewModel.postIntelligenceMetricsState.collectAsStateWithLifecycle()
 
     val selectedPostForApply by viewModel.selectedPostForApply.collectAsStateWithLifecycle()
     val selectedPostForDetail by viewModel.selectedPostForDetail.collectAsStateWithLifecycle()
+
+    LaunchedEffect(selectedPostForDetail?.id) {
+        val activeDetail = selectedPostForDetail ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(2_600L)
+        viewModel.recordPostDwellView(activeDetail, 3_200L)
+    }
     val messageTargetUser by viewModel.messageTargetUser.collectAsStateWithLifecycle()
     val inspectedUserTarget by viewModel.inspectedUserTarget.collectAsStateWithLifecycle()
     val inspectedUserProfileState by viewModel.inspectedUserProfileState.collectAsStateWithLifecycle()
@@ -573,6 +587,96 @@ fun MainAppScaffold(
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
+                // Offline / Cached / Auto-Reconnecting status indicator banner
+                if (!isNetworkAvailable) {
+                    Surface(
+                        color = Color(0xFFFFF8E1),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .testTag("offline_mode_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.WifiOff,
+                                contentDescription = "অফলাইন মোড",
+                                tint = Color(0xFFE65100),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = if (hasPendingWrites) {
+                                    "অফলাইন মোড — সংরক্ষিত তথ্য দেখানো হচ্ছে (পেন্ডিং ডাটা ইন্টারনেট ফিরলে স্বয়ংক্রিয়ভাবে সিঙ্ক হবে)"
+                                } else {
+                                    "অফলাইন মোড — সংরক্ষিত (Cached) তথ্য দেখানো হচ্ছে। ইন্টারনেট ফিরলে স্বয়ংক্রিয়ভাবে আপডেট হবে।"
+                                },
+                                color = Color(0xFFBF360C),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = { viewModel.retryFeedStreams() },
+                                modifier = Modifier.testTag("offline_retry_button")
+                            ) {
+                                Text(
+                                    text = "পুনরায় চেষ্টা",
+                                    color = QawmiDeepGreen,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                } else if (isReconnecting || (isServingFromCache && !isServerConnected)) {
+                    Surface(
+                        color = Color(0xFFE8F5E9),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .testTag("syncing_connection_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                color = QawmiDeepGreen,
+                                strokeWidth = 2.dp
+                            )
+                            Text(
+                                text = "সংরক্ষিত তথ্য দেখানো হচ্ছে — সার্ভারের সাথে স্বয়ংক্রিয় সিঙ্ক চলছে...",
+                                color = QawmiDeepGreen,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = { viewModel.retryFeedStreams() },
+                                modifier = Modifier.testTag("sync_now_button")
+                            ) {
+                                Text(
+                                    text = "রিফ্রেশ",
+                                    color = QawmiDeepGreen,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Active upload / submission progress indicator banner
                 if (isSubmitting) {
                     Surface(
@@ -750,6 +854,7 @@ fun MainAppScaffold(
                                     )
                                 },
                                 onReportPost = { post, reason -> viewModel.reportPost(post, reason) },
+                                onRecordPostDwellView = { post, dwellMs -> viewModel.recordPostDwellView(post, dwellMs) },
                                 onRetryFeed = { viewModel.retryFeedStreams() }
                             )
                         }
@@ -837,6 +942,7 @@ fun MainAppScaffold(
                                     )
                                 },
                                 onReportPost = { post, reason -> viewModel.reportPost(post, reason) },
+                                onRecordPostDwellView = { post, dwellMs -> viewModel.recordPostDwellView(post, dwellMs) },
                                 onRetryFeed = { viewModel.retryFeedStreams() }
                             )
                         }
@@ -1067,6 +1173,24 @@ fun MainAppScaffold(
                                 onNavigate = { dest ->
                                     viewModel.navigateTo(dest)
                                 },
+                                onSaveProfileExtended = { name, type, dist, desig, qual, exp, pref, bio, phone, madrasa, photoUrl, email, pPriv, ePriv ->
+                                    viewModel.saveProfile(
+                                        fullName = name,
+                                        accountType = type,
+                                        district = dist,
+                                        designation = desig,
+                                        qualification = qual,
+                                        experience = exp,
+                                        preferredDistricts = pref,
+                                        bio = bio,
+                                        contactInfo = phone,
+                                        madrasaName = madrasa,
+                                        photoUrl = photoUrl,
+                                        contactEmail = email,
+                                        phonePrivacy = pPriv,
+                                        emailPrivacy = ePriv
+                                    )
+                                },
                                 onSaveProfile = { name, type, dist, desig, qual, exp, pref, bio, phone, madrasa, photoUrl ->
                                     viewModel.saveProfile(
                                         fullName = name,
@@ -1209,6 +1333,15 @@ fun MainAppScaffold(
                                 },
                                 onInspectUserProfile = { uid, name ->
                                     viewModel.openUserProfileInspection(uid, name)
+                                },
+                                intelligenceConfig = intelligenceConfig,
+                                algorithmPerformance = algorithmPerformance,
+                                postIntelligenceMetricsMap = postIntelligenceMetrics,
+                                onSaveIntelligenceConfig = { cfg ->
+                                    viewModel.adminSaveIntelligenceConfig(cfg)
+                                },
+                                onOverridePostAnomalyFlag = { post, flagPost, reason ->
+                                    viewModel.adminOverridePostAnomalyFlag(post, flagPost, reason)
                                 },
                                 onDeletePost = { id -> viewModel.deletePost(id) }
                             )
@@ -1386,12 +1519,36 @@ fun MainAppScaffold(
             ((feedPostsState as? UiState.Success)?.data ?: emptyList())
                 .filter { it.authorId == targetUid }
         }
+        val isConnectedFriend = remember(
+            targetUid,
+            viewModel.currentUserId,
+            messagesState,
+            userGroupsState,
+            mySentSubmissionsState,
+            receivedSubmissionsState
+        ) {
+            if (targetUid.isBlank()) {
+                false
+            } else if (targetUid == viewModel.currentUserId) {
+                true
+            } else {
+                val msgs = (messagesState as? UiState.Success)?.data ?: emptyList()
+                val groups = (userGroupsState as? UiState.Success)?.data ?: emptyList()
+                val sentSubs = (mySentSubmissionsState as? UiState.Success)?.data ?: emptyList()
+                val recSubs = (receivedSubmissionsState as? UiState.Success)?.data ?: emptyList()
+                msgs.any { (it.senderId == targetUid && it.receiverId == viewModel.currentUserId) || (it.senderId == viewModel.currentUserId && it.receiverId == targetUid) } ||
+                    groups.any { targetUid in it.memberIds && viewModel.currentUserId in it.memberIds } ||
+                    sentSubs.any { it.recipientId == targetUid } ||
+                    recSubs.any { it.applicantId == targetUid }
+            }
+        }
         PublicUserProfileDialog(
             targetUserId = targetUid,
             fallbackName = fallbackName,
             currentUserId = viewModel.currentUserId,
             inspectedProfileState = inspectedUserProfileState,
             userPublishedPosts = targetUserPosts,
+            isFriendOrConnected = isConnectedFriend,
             onDismiss = { viewModel.closeUserProfileInspection() },
             onSendMessageClick = { uid, name ->
                 viewModel.openDirectMessageTo(uid, name)

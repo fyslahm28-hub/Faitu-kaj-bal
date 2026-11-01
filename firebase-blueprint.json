@@ -24,6 +24,9 @@
         "preferredDistricts": { "type": "string", "required": true },
         "bio": { "type": "string", "required": true },
         "contactInfo": { "type": "string", "required": true },
+        "contactEmail": { "type": "string", "required": false },
+        "phonePrivacy": { "type": "string", "required": false, "enum": ["ONLY_ME", "FRIENDS", "PUBLIC"] },
+        "emailPrivacy": { "type": "string", "required": false, "enum": ["ONLY_ME", "FRIENDS", "PUBLIC"] },
         "madrasaName": { "type": "string", "required": true },
         "photoUrl": { "type": "string", "required": false },
         "isOnline": { "type": "boolean", "required": false },
@@ -264,6 +267,68 @@
         "createdAt": { "type": "timestamp", "required": true },
         "updatedAt": { "type": "timestamp", "required": true }
       }
+    },
+    "IntelligenceConfig": {
+      "description": "Global KKS Intelligence Engine ranking weights, anti-fraud thresholds, and feature flags controlled exclusively by verified Admins.",
+      "properties": {
+        "configId": { "type": "string", "required": true },
+        "skillMatchWeight": { "type": "number", "required": true },
+        "locationMatchWeight": { "type": "number", "required": true },
+        "experienceWeight": { "type": "number", "required": true },
+        "freshnessHalfLifeHours": { "type": "number", "required": true },
+        "trendingWeight": { "type": "number", "required": true },
+        "verifiedMadrasaBonus": { "type": "number", "required": true },
+        "newPostBoostHours": { "type": "number", "required": true },
+        "minDwellTimeMs": { "type": "number", "required": true },
+        "fraudPenaltyWeight": { "type": "number", "required": true },
+        "smartNotificationThreshold": { "type": "number", "required": true },
+        "isSmartRankingEnabled": { "type": "boolean", "required": true },
+        "isTrendingEnabled": { "type": "boolean", "required": true },
+        "isFraudDetectionEnabled": { "type": "boolean", "required": true },
+        "isSmartNotificationEnabled": { "type": "boolean", "required": true },
+        "updatedBy": { "type": "string", "required": true },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
+    },
+    "PostIntelligenceMetrics": {
+      "description": "Per-post deduplicated engagement counters, dwell time, trending velocity, quality score, and anti-fraud anomaly flags.",
+      "properties": {
+        "postId": { "type": "string", "required": true },
+        "uniqueViewCount": { "type": "number", "required": true },
+        "uniqueClickCount": { "type": "number", "required": true },
+        "applyCount": { "type": "number", "required": true },
+        "bookmarkCount": { "type": "number", "required": true },
+        "shareCount": { "type": "number", "required": true },
+        "totalDwellTimeMs": { "type": "number", "required": true },
+        "trendingScore": { "type": "number", "required": true },
+        "qualityScore": { "type": "number", "required": true },
+        "anomalyScore": { "type": "number", "required": true },
+        "isFlagged": { "type": "boolean", "required": true },
+        "flagReason": { "type": "string", "required": false },
+        "lastInteractionAt": { "type": "timestamp", "required": false },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
+    },
+    "EngagementReceipt": {
+      "description": "Deterministic per-user per-event deduplication receipt ({uid}_{eventType}) preventing duplicate views/clicks and artificial engagement.",
+      "properties": {
+        "userId": { "type": "string", "required": true },
+        "postId": { "type": "string", "required": true },
+        "eventType": { "type": "string", "required": true, "enum": ["VIEW", "CLICK", "APPLY", "BOOKMARK", "SHARE"] },
+        "dwellTimeMs": { "type": "number", "required": true },
+        "createdAt": { "type": "timestamp", "required": true }
+      }
+    },
+    "UserAffinityState": {
+      "description": "Per-user adaptive learning affinity profile storing time-decayed category and district preference weights.",
+      "properties": {
+        "userId": { "type": "string", "required": true },
+        "categoryWeights": { "type": "map", "required": true },
+        "districtWeights": { "type": "map", "required": true },
+        "totalInteractions": { "type": "number", "required": true },
+        "lastEventAt": { "type": "timestamp", "required": false },
+        "updatedAt": { "type": "timestamp", "required": true }
+      }
     }
   },
   "collections": [
@@ -286,6 +351,11 @@
       "path": "/users/{userId}/notification_reads/{notificationId}",
       "entity": "NotificationReadReceipt",
       "access": "Strict owner-only read, create, update, and delete."
+    },
+    {
+      "path": "/users/{userId}/intelligence_state/{docId}",
+      "entity": "UserAffinityState",
+      "access": "Strict owner-only read, create, and update (admins can read for diagnostics)."
     },
     {
       "path": "/feed_posts/{postId}",
@@ -336,6 +406,21 @@
       "path": "/app_releases/{releaseId}",
       "entity": "AppReleaseInfo",
       "access": "Authenticated users can read release metadata for auto-update detection; only verified admins or CI service account can create, update, or delete release records."
+    },
+    {
+      "path": "/intelligence_config/{configId}",
+      "entity": "IntelligenceConfig",
+      "access": "Authenticated users can read global ranking configuration; only verified admins can create, update, or delete."
+    },
+    {
+      "path": "/post_intelligence_metrics/{postId}",
+      "entity": "PostIntelligenceMetrics",
+      "access": "Authenticated users can read and update post intelligence metrics with validated bounds; only verified admins can delete."
+    },
+    {
+      "path": "/post_intelligence_metrics/{postId}/engagement_receipts/{receiptId}",
+      "entity": "EngagementReceipt",
+      "access": "Create-only deterministic receipt ({uid}_{eventType}) for authenticated users; no updates allowed; admins can audit/delete."
     }
   ]
 }

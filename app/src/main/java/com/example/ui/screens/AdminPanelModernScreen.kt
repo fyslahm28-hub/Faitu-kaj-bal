@@ -101,12 +101,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SupportAgent
 import com.example.data.model.AdminRegistryEntry
+import com.example.data.model.AlgorithmPerformanceSummary
 import com.example.data.model.FeedPost
+import com.example.data.model.IntelligenceConfig
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
+import com.example.data.model.PostIntelligenceMetrics
 import com.example.data.model.TelegramNotificationLog
 import com.example.data.model.UserProfile
 import com.example.ui.components.UserAvatarImage
@@ -147,7 +151,8 @@ enum class AdminSubScreen {
     APP_SETTINGS,           // ৯. অ্যাপ সেটিংস
     BOOST_MANAGEMENT,       // ১০. বুস্ট ম্যানেজমেন্ট
     TELEGRAM_INTEGRATION,   // ১১. টেলিগ্রাম ইন্টিগ্রেশন
-    ACTIVITY_LOG            // ১২. অ্যাডমিন অ্যাক্টিভিটি লগ
+    ACTIVITY_LOG,           // ১২. অ্যাডমিন অ্যাক্টিভিটি লগ
+    INTELLIGENCE_CONTROL    // ১৩. KKS Intelligence ও অ্যালগরিদম কন্ট্রোল
 }
 
 private data class AdminDisplayMember(
@@ -191,6 +196,11 @@ fun ModernAdminPanelRoot(
     ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onSaveAdminMember: (memberId: String, name: String, role: String, isActive: Boolean) -> Unit = { _, _, _, _ -> },
     onInspectUserProfile: (String, String) -> Unit = { _, _ -> },
+    intelligenceConfig: IntelligenceConfig = IntelligenceConfig(),
+    algorithmPerformance: AlgorithmPerformanceSummary = AlgorithmPerformanceSummary(),
+    postIntelligenceMetricsMap: Map<String, PostIntelligenceMetrics> = emptyMap(),
+    onSaveIntelligenceConfig: (IntelligenceConfig) -> Unit = {},
+    onOverridePostAnomalyFlag: (FeedPost, Boolean, String) -> Unit = { _, _, _ -> },
     onRetryServerLoad: () -> Unit = {},
     onDeletePost: (String) -> Unit
 ) {
@@ -622,6 +632,20 @@ fun ModernAdminPanelRoot(
                 AdminSubScreen.ACTIVITY_LOG -> {
                     AdminActivityLogView(
                         telegramLogs = realTelegramLogs,
+                        onBack = { handleBack() }
+                    )
+                }
+
+                AdminSubScreen.INTELLIGENCE_CONTROL -> {
+                    AdminIntelligenceControlCenterView(
+                        intelligenceConfig = intelligenceConfig,
+                        algorithmPerformance = algorithmPerformance,
+                        postMetricsMap = postIntelligenceMetricsMap,
+                        allPosts = realPosts,
+                        isSubmitting = isSubmitting,
+                        onSaveConfig = onSaveIntelligenceConfig,
+                        onOverridePostAnomaly = onOverridePostAnomalyFlag,
+                        onToggleBoostPost = onToggleBoostPost,
                         onBack = { handleBack() }
                     )
                 }
@@ -1083,6 +1107,11 @@ private fun AdminDashboardView(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    QuickAdminChip(
+                        icon = Icons.Default.Psychology,
+                        label = "KKS Intelligence",
+                        onClick = { onNavigateSubScreen(AdminSubScreen.INTELLIGENCE_CONTROL) }
+                    )
                     QuickAdminChip(
                         icon = Icons.Default.Add,
                         label = "নতুন বিজ্ঞপ্তি",
@@ -2609,6 +2638,7 @@ private fun AdminSettingsAndLogsHubView(
     onOpenSubScreen: (AdminSubScreen) -> Unit
 ) {
     val menuItems = listOf(
+        Triple("KKS Intelligence ও অ্যালগরিদম কন্ট্রোল", Icons.Default.Psychology, AdminSubScreen.INTELLIGENCE_CONTROL),
         Triple("অ্যাপ সেটিংস", Icons.Default.Settings, AdminSubScreen.APP_SETTINGS),
         Triple("নোটিফিকেশন সেটিংস", Icons.Default.NotificationsActive, AdminSubScreen.APP_SETTINGS),
         Triple("কনটেন্ট ম্যানেজমেন্ট", Icons.Default.Description, AdminSubScreen.NOTICES),

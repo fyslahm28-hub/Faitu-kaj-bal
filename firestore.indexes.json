@@ -1,0 +1,63 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "feed_posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "visibility", "order": "ASCENDING" },
+        { "fieldPath": "approvalStatus", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "feed_posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "postType", "order": "ASCENDING" },
+        { "fieldPath": "district", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "post_intelligence_metrics",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "isFlagged", "order": "ASCENDING" },
+        { "fieldPath": "trendingScore", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "post_intelligence_metrics",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "isFlagged", "order": "ASCENDING" },
+        { "fieldPath": "anomalyScore", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "khedmot_submissions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "applicantId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "khedmot_submissions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "recipientId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "notifications",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "recipientId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

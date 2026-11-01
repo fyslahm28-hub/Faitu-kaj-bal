@@ -858,3 +858,129 @@ test("Collection List Queries (Query Snapshots): Inbox messages, Group conversat
   await assertFails(unauthDb.collection("feed_posts").get());
 });
 
+test("KKS Intelligence Engine: intelligence_config is readable by signed-in users and writable only by verified admins", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "regular_user@gmail.com",
+  }).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID_1, {
+    email: "foysalahamad102@gmail.com",
+    email_verified: true,
+    role: "SUPER_ADMIN",
+  }).firestore();
+
+  const validConfig = {
+    configId: "global_weights",
+    skillMatchWeight: 34.0,
+    locationMatchWeight: 22.0,
+    experienceWeight: 14.0,
+    freshnessHalfLifeHours: 36.0,
+    trendingWeight: 18.0,
+    verifiedMadrasaBonus: 12.0,
+    newPostBoostHours: 18.0,
+    minDwellTimeMs: 2500,
+    fraudPenaltyWeight: 45.0,
+    smartNotificationThreshold: 62.0,
+    isSmartRankingEnabled: true,
+    isTrendingEnabled: true,
+    isFraudDetectionEnabled: true,
+    isSmartNotificationEnabled: true,
+    updatedBy: "নাজিমে আলা (অ্যাডমিন)",
+    updatedAt: nowDate(),
+  };
+
+  // Non-admin cannot modify algorithm weights
+  await assertFails(
+    aliceDb.collection("intelligence_config").doc("global_weights").set(validConfig)
+  );
+
+  // Verified Admin can save algorithm weights
+  await assertSucceeds(
+    adminDb.collection("intelligence_config").doc("global_weights").set(validConfig)
+  );
+
+  // Signed-in user can read global_weights
+  await assertSucceeds(
+    aliceDb.collection("intelligence_config").doc("global_weights").get()
+  );
+});
+
+test("KKS Intelligence Engine: engagement_receipts enforce deterministic ID, dwell-time gate, and create-only immutability", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  // Valid VIEW receipt with >= 1500ms dwell time and deterministic ID {uid}_VIEW
+  await assertSucceeds(
+    aliceDb
+      .collection("post_intelligence_metrics")
+      .doc("post_101")
+      .collection("engagement_receipts")
+      .doc(`${ALICE_UID}_VIEW`)
+      .set({
+        userId: ALICE_UID,
+        postId: "post_101",
+        eventType: "VIEW",
+        dwellTimeMs: 3200,
+        createdAt: nowDate(),
+      })
+  );
+
+  // Cannot spoof another user's receipt ID
+  await assertFails(
+    aliceDb
+      .collection("post_intelligence_metrics")
+      .doc("post_101")
+      .collection("engagement_receipts")
+      .doc(`${BOB_UID}_VIEW`)
+      .set({
+        userId: ALICE_UID,
+        postId: "post_101",
+        eventType: "VIEW",
+        dwellTimeMs: 3200,
+        createdAt: nowDate(),
+      })
+  );
+
+  // Cannot create VIEW receipt with rapid scroll dwell time (< 1500ms)
+  await assertFails(
+    bobDb
+      .collection("post_intelligence_metrics")
+      .doc("post_101")
+      .collection("engagement_receipts")
+      .doc(`${BOB_UID}_VIEW`)
+      .set({
+        userId: BOB_UID,
+        postId: "post_101",
+        eventType: "VIEW",
+        dwellTimeMs: 400,
+        createdAt: nowDate(),
+      })
+  );
+
+  // User affinity state is strictly owner-only
+  await assertSucceeds(
+    aliceDb
+      .collection("users")
+      .doc(ALICE_UID)
+      .collection("intelligence_state")
+      .doc("affinity")
+      .set({
+        userId: ALICE_UID,
+        categoryWeights: { দাওরা: 4.5, ইফতা: 3.0 },
+        districtWeights: { ঢাকা: 5.0 },
+        totalInteractions: 3,
+        lastEventAt: nowDate(),
+        updatedAt: nowDate(),
+      })
+  );
+
+  await assertFails(
+    bobDb
+      .collection("users")
+      .doc(ALICE_UID)
+      .collection("intelligence_state")
+      .doc("affinity")
+      .get()
+  );
+});
+
+

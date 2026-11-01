@@ -4,22 +4,29 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.AdminRegistryEntry
+import com.example.data.model.AlgorithmPerformanceSummary
 import com.example.data.model.AppNotification
 import com.example.data.model.AppReleaseInfo
 import com.example.data.model.BookmarkItem
 import com.example.data.model.ChatGroup
 import com.example.data.model.DirectMessage
+import com.example.data.model.EngagementReceipt
 import com.example.data.model.FeedComment
 import com.example.data.model.FeedPost
+import com.example.data.model.IntelligenceConfig
 import com.example.data.model.KhedmotCategoryHelper
 import com.example.data.model.KhedmotSubmission
 import com.example.data.model.MadrasaProfile
+import com.example.data.model.PostIntelligenceMetrics
+import com.example.data.model.ScoredFeedPost
 import com.example.data.model.TelegramNotificationLog
+import com.example.data.model.UserAffinityState
 import com.example.data.model.UserProfile
 import com.example.data.repository.QawmiRepository
 import com.example.data.repository.formatFirestoreErrorBangla
 import com.example.data.repository.isRetryableFirestoreMessageError
 import com.example.ui.util.AdminSecurityHelper
+import com.example.ui.util.KksIntelligenceEngine
 import com.example.ui.util.ProfilePhotoHelper
 import com.google.firebase.Timestamp
 import kotlinx.coroutines.CancellationException
@@ -235,8 +242,11 @@ class QawmiViewModel(
     }
 
     // Live Firebase Connection & Data Source (Server vs Cache) state
+    val isNetworkAvailable: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isNetworkAvailable
     val isServerConnected: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isServerConnected
     val isServingFromCache: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isServingFromCache
+    val isReconnecting: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.isReconnecting
+    val hasPendingWrites: StateFlow<Boolean> = com.example.data.repository.FirestoreConnectionMonitor.hasPendingWrites
     val lastConnectionError: StateFlow<String?> = com.example.data.repository.FirestoreConnectionMonitor.lastConnectionError
     val connectionErrorLogs: StateFlow<List<String>> = com.example.data.repository.FirestoreConnectionMonitor.connectionErrorLogs
 
@@ -324,7 +334,28 @@ class QawmiViewModel(
     private val _localOptimisticSubmissions = MutableStateFlow<List<KhedmotSubmission>>(emptyList())
     private val _localOptimisticMessages = MutableStateFlow<List<DirectMessage>>(emptyList())
 
-    val feedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
+    private val _localIntelligenceConfigOverride = MutableStateFlow<IntelligenceConfig?>(null)
+    private val _localPostMetricsOverrides = MutableStateFlow<Map<String, PostIntelligenceMetrics>>(emptyMap())
+
+    val intelligenceConfigState: StateFlow<IntelligenceConfig> = combine(
+        _adminDataRefreshToken.flatMapLatest { repository.observeIntelligenceConfig() },
+        _localIntelligenceConfigOverride
+    ) { remoteConfig, localOverride ->
+        localOverride ?: remoteConfig
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, IntelligenceConfig())
+
+    val postIntelligenceMetricsState: StateFlow<Map<String, PostIntelligenceMetrics>> = combine(
+        _adminDataRefreshToken.flatMapLatest { repository.observePostIntelligenceMetrics() },
+        _localPostMetricsOverrides
+    ) { remoteMap, localOverrides ->
+        if (localOverrides.isEmpty()) remoteMap else (remoteMap + localOverrides)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    val userAffinityState: StateFlow<UserAffinityState?> = _adminDataRefreshToken
+        .flatMapLatest { repository.observeUserAffinityState(currentUserId) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private val rawMergedFeedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
         repository.observePublicFeedPosts(),
         _localOptimisticPosts,
         _localPostEngagementOverrides,
@@ -397,6 +428,57 @@ class QawmiViewModel(
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+
+    /**
+     * KKS Intelligence Engine Ranked & Scored Feed Posts.
+     */
+    val scoredFeedPostsState: StateFlow<List<ScoredFeedPost>> = combine(
+        rawMergedFeedPostsState,
+        userProfileState,
+        userAffinityState,
+        postIntelligenceMetricsState,
+        intelligenceConfigState
+    ) { postsUiState, profileUiState, affinity, metricsMap, config ->
+        val rawPosts = (postsUiState as? UiState.Success)?.data ?: return@combine emptyList()
+        val profile = (profileUiState as? UiState.Success)?.data
+        KksIntelligenceEngine.rankFeedPosts(
+            posts = rawPosts,
+            userProfile = profile,
+            affinityState = affinity,
+            metricsMap = metricsMap,
+            config = config
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val scoredFeedPostsMapState: StateFlow<Map<String, ScoredFeedPost>> = scoredFeedPostsState
+        .map { list -> list.associateBy { it.post.id } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    val recommendedPostsState: StateFlow<List<ScoredFeedPost>> = scoredFeedPostsState
+        .map { scored -> KksIntelligenceEngine.selectRecommendedPosts(scored, currentUserId, limit = 6) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val trendingPostsState: StateFlow<List<ScoredFeedPost>> = scoredFeedPostsState
+        .map { scored -> KksIntelligenceEngine.selectTrendingPosts(scored, limit = 6) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val feedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
+        rawMergedFeedPostsState,
+        scoredFeedPostsState,
+        intelligenceConfigState
+    ) { rawUiState, scoredList, config ->
+        when (rawUiState) {
+            is UiState.Loading -> UiState.Loading
+            is UiState.Error -> rawUiState
+            is UiState.Success -> {
+                if (config.isSmartRankingEnabled && scoredList.isNotEmpty()) {
+                    UiState.Success(scoredList.map { it.post })
+                } else {
+                    rawUiState
+                }
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val postCommentsState: StateFlow<UiState<List<FeedComment>>> = combine(
         _adminDataRefreshToken.flatMapLatest {
@@ -759,15 +841,39 @@ class QawmiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
+    /**
+     * Real-time KKS Intelligence Engine Analytics & Anomaly Summary for Admin Control Center.
+     */
+    val algorithmPerformanceState: StateFlow<AlgorithmPerformanceSummary> = combine(
+        rawMergedFeedPostsState,
+        postIntelligenceMetricsState,
+        adminSubmissionsState,
+        intelligenceConfigState
+    ) { postsUi, metricsMap, subsUi, config ->
+        val posts = (postsUi as? UiState.Success)?.data ?: emptyList()
+        val subs = (subsUi as? UiState.Success)?.data ?: emptyList()
+        KksIntelligenceEngine.computeSystemAnalytics(
+            posts = posts,
+            metricsMap = metricsMap,
+            submissions = subs,
+            config = config
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, AlgorithmPerformanceSummary())
+
     private val acknowledgedDeliveredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val inFlightMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val recoveredPendingSyncIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val pendingOutgoingQueue = java.util.concurrent.ConcurrentHashMap<String, FailedMessageDraft>()
 
+    private val lastForegroundSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
+
     init {
         setUserOnlineStatus(true)
         verifyAndSyncAdminIdentity()
         observeAndAcknowledgeDeliveredMessages()
+        viewModelScope.launch {
+            repository.refreshCriticalDataInParallel(currentUserId)
+        }
     }
 
     private fun observeAndAcknowledgeDeliveredMessages() {
@@ -908,14 +1014,42 @@ class QawmiViewModel(
     }
 
     /**
-     * Synchronizes all live Firestore modules when network connectivity returns or when the app
-     * resumes to foreground, without tearing down or duplicating already-healthy listeners.
+     * Triggered when the app returns to the foreground (`ON_START` / `ON_RESUME`).
+     * Immediately wakes up the Firebase connection and refreshes Feed, Profile, Notifications,
+     * and Applications in parallel without duplicating active listeners.
+     */
+    fun onAppForegrounded() {
+        val now = System.currentTimeMillis()
+        val prev = lastForegroundSyncEpochMs.get()
+        if ((now - prev) < 1_500L) return
+        lastForegroundSyncEpochMs.set(now)
+
+        viewModelScope.launch {
+            repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "APP_FOREGROUND")
+            repository.refreshCriticalDataInParallel(currentUserId)
+            setUserOnlineStatus(true)
+            retryPendingFailedMessagesAutomatically()
+        }
+    }
+
+    /**
+     * Triggered when the app moves to the background (`ON_STOP`).
+     */
+    fun onAppBackgrounded() {
+        setUserOnlineStatus(false)
+    }
+
+    /**
+     * Synchronizes all live Firestore modules when network connectivity returns or switches
+     * (e.g., Wi-Fi <-> Mobile Data), without tearing down or duplicating already-healthy listeners.
      */
     fun onNetworkRestored() {
         _adminDataRefreshToken.value = _adminDataRefreshToken.value + 1
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "NETWORK_RESTORED")
+            repository.refreshCriticalDataInParallel(currentUserId)
             setUserOnlineStatus(true)
+            retryPendingFailedMessagesAutomatically()
         }
     }
 
@@ -926,7 +1060,20 @@ class QawmiViewModel(
         _adminDataRefreshToken.value = _adminDataRefreshToken.value + 1
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "AUTH_TOKEN_REFRESHED")
+            repository.refreshCriticalDataInParallel(currentUserId)
             verifyAndSyncAdminIdentity()
+        }
+    }
+
+    private fun retryPendingFailedMessagesAutomatically() {
+        if (!com.example.data.repository.FirestoreConnectionMonitor.isNetworkAvailable.value) return
+        val failedList = _localOptimisticMessages.value.filter { msg ->
+            msg.id.isNotBlank() &&
+                msg.localDeliveryState == "FAILED" &&
+                msg.id !in inFlightMessageIds
+        }
+        failedList.forEach { msg ->
+            retryFailedMessage(msg)
         }
     }
 
@@ -937,10 +1084,43 @@ class QawmiViewModel(
 
     fun openApplyDialog(post: FeedPost?) {
         _selectedPostForApply.value = post
+        if (post != null) {
+            recordPostClickEngagement(post)
+        }
     }
 
     fun openPostDetailDialog(post: FeedPost?) {
         _selectedPostForDetail.value = post
+        if (post != null) {
+            recordPostClickEngagement(post)
+        }
+    }
+
+    fun recordPostDwellView(post: FeedPost, dwellTimeMs: Long) {
+        val config = intelligenceConfigState.value
+        if (dwellTimeMs < config.minDwellTimeMs) return
+        viewModelScope.launch {
+            repository.recordVerifiedEngagementEvent(
+                post = post,
+                eventType = EngagementReceipt.EVENT_VIEW,
+                dwellTimeMs = dwellTimeMs,
+                currentConfig = config,
+                currentAffinity = userAffinityState.value
+            )
+        }
+    }
+
+    fun recordPostClickEngagement(post: FeedPost) {
+        val config = intelligenceConfigState.value
+        viewModelScope.launch {
+            repository.recordVerifiedEngagementEvent(
+                post = post,
+                eventType = EngagementReceipt.EVENT_CLICK,
+                dwellTimeMs = 0L,
+                currentConfig = config,
+                currentAffinity = userAffinityState.value
+            )
+        }
     }
 
     fun openUserProfileInspection(userId: String, fallbackName: String) {
@@ -1015,6 +1195,9 @@ class QawmiViewModel(
         contactInfo: String,
         madrasaName: String,
         photoUrl: String = "",
+        contactEmail: String = "",
+        phonePrivacy: String = UserProfile.PRIVACY_PUBLIC,
+        emailPrivacy: String = UserProfile.PRIVACY_PUBLIC,
         onComplete: () -> Unit = {}
     ) {
         if (fullName.isBlank()) {
@@ -1022,7 +1205,11 @@ class QawmiViewModel(
             return
         }
         runSubmittingAction {
-            val existingPhoto = (userProfileState.value as? UiState.Success)?.data?.photoUrl.orEmpty()
+            val existingProfile = (userProfileState.value as? UiState.Success)?.data
+            val existingPhoto = existingProfile?.photoUrl.orEmpty()
+            val resolvedEmail = contactEmail.trim().ifBlank {
+                existingProfile?.contactEmail?.takeIf { it.isNotBlank() } ?: currentUserEmail
+            }
             val profile = UserProfile(
                 userId = currentUserId,
                 fullName = fullName.trim(),
@@ -1034,13 +1221,16 @@ class QawmiViewModel(
                 preferredDistricts = preferredDistricts.trim(),
                 bio = bio.trim(),
                 contactInfo = contactInfo.trim(),
+                contactEmail = resolvedEmail,
+                phonePrivacy = UserProfile.normalizePrivacyMode(phonePrivacy),
+                emailPrivacy = UserProfile.normalizePrivacyMode(emailPrivacy),
                 madrasaName = madrasaName.trim(),
                 photoUrl = photoUrl.ifBlank { existingPhoto },
                 isOnline = true
             )
             val result = repository.saveUserProfile(profile)
             result.onSuccess {
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার প্রোফাইল তথ্য ও ছবি সংরক্ষিত হয়েছে।"
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার প্রোফাইল তথ্য ও প্রাইভেসি সেটিংস সংরক্ষিত হয়েছে।"
                 onComplete()
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "প্রোফাইল সংরক্ষণে ত্রুটি হয়েছে।"
@@ -1445,6 +1635,14 @@ class QawmiViewModel(
                 _localPostEngagementOverrides.value = _localPostEngagementOverrides.value + (
                     post.id to prevOverride.copy(minExpectedShareCount = newExpectedShares)
                     )
+                viewModelScope.launch {
+                    repository.recordVerifiedEngagementEvent(
+                        post = post,
+                        eventType = EngagementReceipt.EVENT_SHARE,
+                        currentConfig = intelligenceConfigState.value,
+                        currentAffinity = userAffinityState.value
+                    )
+                }
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি।"
@@ -1482,6 +1680,14 @@ class QawmiViewModel(
             clearBanners()
             val result = repository.toggleBookmark(post, isCurrentlyBookmarked)
             result.onSuccess { added ->
+                if (added) {
+                    repository.recordVerifiedEngagementEvent(
+                        post = post,
+                        eventType = EngagementReceipt.EVENT_BOOKMARK,
+                        currentConfig = intelligenceConfigState.value,
+                        currentAffinity = userAffinityState.value
+                    )
+                }
                 _feedbackBanner.value = if (added) {
                     "পছন্দের খেদমত তালিকায় সংরক্ষিত হয়েছে।"
                 } else {
@@ -1569,6 +1775,14 @@ class QawmiViewModel(
                         updatedAt = Timestamp.now()
                     )
                     _localOptimisticSubmissions.value = (listOf(optimisticSub) + _localOptimisticSubmissions.value).distinctBy { it.id }
+                }
+                viewModelScope.launch {
+                    repository.recordVerifiedEngagementEvent(
+                        post = post,
+                        eventType = EngagementReceipt.EVENT_APPLY,
+                        currentConfig = intelligenceConfigState.value,
+                        currentAffinity = userAffinityState.value
+                    )
                 }
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদন সংশ্লিষ্ট মাদরাসায় প্রেরিত হয়েছে।"
                 _selectedPostForApply.value = null
@@ -2536,6 +2750,70 @@ class QawmiViewModel(
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, অ্যাডমিন সদস্যের তথ্য সার্ভারে সংরক্ষিত হয়েছে।"
             }.onFailure { err ->
                 _errorBanner.value = err.localizedMessage ?: "অ্যাডমিন সদস্যের তথ্য সংরক্ষণে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun adminSaveIntelligenceConfig(config: IntelligenceConfig) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন KKS Intelligence Engine কনফিগারেশন পরিবর্তন করতে পারবেন।"
+            return
+        }
+        val prevOverride = _localIntelligenceConfigOverride.value
+        val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+        _localIntelligenceConfigOverride.value = config.copy(updatedBy = adminName, updatedAt = Timestamp.now())
+        runSubmittingAction {
+            val result = repository.saveIntelligenceConfig(config, adminName)
+            result.onSuccess {
+                _feedbackBanner.value = "আলহামদুলিল্লাহ, KKS Intelligence Engine-এর র‍্যাঙ্কিং ও অ্যালগরিদম নিয়ম সংরক্ষিত হয়েছে।"
+            }.onFailure { err ->
+                _localIntelligenceConfigOverride.value = prevOverride
+                _errorBanner.value = err.localizedMessage ?: "অ্যালগরিদম কনফিগারেশন সংরক্ষণে ত্রুটি হয়েছে।"
+            }
+        }
+    }
+
+    fun adminOverridePostAnomalyFlag(
+        post: FeedPost,
+        flagPost: Boolean,
+        reasonBangla: String = ""
+    ) {
+        if (!isAdminUser) {
+            _errorBanner.value = "শুধুমাত্র অনুমোদিত অ্যাডমিন এই কার্যক্রম পরিচালনা করতে পারবেন।"
+            return
+        }
+        val existingMetrics = postIntelligenceMetricsState.value[post.id]
+        val adminName = resolveActorDisplayName("নাজিমে আলা (অ্যাডমিন)")
+        val resolvedReason = if (flagPost) {
+            "[অ্যাডমিন প্যানেল] ${reasonBangla.trim().ifBlank { "কৃত্রিম এনগেজমেন্ট বা স্প্যাম সন্দেহে চিহ্নিত" }}"
+        } else {
+            ""
+        }
+        val optimisticMetrics = (existingMetrics ?: PostIntelligenceMetrics(id = post.id, postId = post.id)).copy(
+            isFlagged = flagPost,
+            flagReason = resolvedReason,
+            anomalyScore = if (flagPost) 85.0 else 0.0,
+            trendingScore = if (flagPost) 0.0 else (existingMetrics?.trendingScore ?: 0.0),
+            updatedAt = Timestamp.now()
+        )
+        _localPostMetricsOverrides.value = _localPostMetricsOverrides.value + (post.id to optimisticMetrics)
+        viewModelScope.launch {
+            clearBanners()
+            val res = repository.adminOverridePostAnomalyFlag(
+                post = post,
+                existingMetrics = existingMetrics,
+                flagPost = flagPost,
+                reasonBangla = reasonBangla,
+                adminName = adminName
+            )
+            res.onSuccess {
+                _feedbackBanner.value = if (flagPost) {
+                    "পোস্টটি অ্যান্টি-ফ্রড তালিকায় চিহ্নিত ও র‍্যাঙ্কিং পেনাল্টি যুক্ত করা হয়েছে।"
+                } else {
+                    "পোস্টটির অ্যান্টি-ফ্রড ফ্ল্যাগ প্রত্যাহার করা হয়েছে।"
+                }
+            }.onFailure { err ->
+                _errorBanner.value = err.localizedMessage ?: "অ্যান্টি-ফ্রড স্ট্যাটাস হালনাগাদ করা যায়নি।"
             }
         }
     }
