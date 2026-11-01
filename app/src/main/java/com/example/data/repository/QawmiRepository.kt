@@ -155,6 +155,9 @@ class QawmiRepository(
             }
         }
 
+    private val activeQueryServerCallbacks = ConcurrentHashMap<String, (QuerySnapshot) -> Unit>()
+    private val activeDocServerCallbacks = ConcurrentHashMap<String, (DocumentSnapshot) -> Unit>()
+
     private suspend fun syncQueryFromServerIfNeeded(
         query: com.google.firebase.firestore.Query,
         path: String
@@ -188,6 +191,7 @@ class QawmiRepository(
                 isFromCache = snap.metadata.isFromCache,
                 hasPendingWrites = snap.metadata.hasPendingWrites()
             )
+            activeQueryServerCallbacks[path]?.invoke(snap)
         }
     }
 
@@ -221,6 +225,7 @@ class QawmiRepository(
                 isFromCache = snap.metadata.isFromCache,
                 hasPendingWrites = snap.metadata.hasPendingWrites()
             )
+            activeDocServerCallbacks[path]?.invoke(snap)
         }
     }
 
@@ -471,14 +476,13 @@ class QawmiRepository(
                             isFromCache = isFromCache,
                             hasPendingWrites = hasPending
                         )
-                        val isFirstServerConfirm = !isFromCache && !hasReceivedServerSnapshot.get()
                         if (!isFromCache) {
                             hasReceivedServerSnapshot.set(true)
                         }
                         val shouldEmitPayload = !listenerHasEmitted.get() ||
+                            !isFromCache ||
                             includeMetadataChanges ||
-                            snapshot.documentChanges.isNotEmpty() ||
-                            isFirstServerConfirm
+                            snapshot.documentChanges.isNotEmpty()
                         if (shouldEmitPayload) {
                             val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
                             tryEmitSafe(mapped, fromListener = true, isServerData = !isFromCache)
@@ -493,6 +497,15 @@ class QawmiRepository(
                 handleFirestoreError(e, OperationType.LIST, path)
                 if (!hasEmittedAny.get()) {
                     tryEmitSafe(emptyList(), fromListener = false, isServerData = false)
+                }
+            }
+        }
+
+        activeQueryServerCallbacks[path] = { serverSnap ->
+            if (isActive) {
+                val mapped = runCatching { mapper(serverSnap) }.getOrNull()
+                if (mapped != null) {
+                    tryEmitSafe(mapped, fromListener = false, isServerData = !serverSnap.metadata.isFromCache)
                 }
             }
         }
@@ -533,14 +546,9 @@ class QawmiRepository(
                     runCatching { db.enableNetwork() }
                     FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
                     attachSnapshotListener()
-                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value &&
-                    !FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)
-                ) {
-                    // Wait briefly in case the active listener already received a server push
-                    delay(200L)
-                    if (!isActive || FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)) {
-                        return@collect
-                    }
+                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                    delay(180L)
+                    if (!isActive) return@collect
                     val freshSnap = withTimeoutOrNull(1_500L) {
                         runCatching { query.get(Source.SERVER).await() }.getOrNull()
                     }
@@ -559,12 +567,10 @@ class QawmiRepository(
             }
         }
 
-        // 4. Bounded fast server sync (< 2s total startup budget) if the watch stream hasn't confirmed yet
+        // 4. Bounded fast server sync (< 2s total startup budget) if this flow's watch stream hasn't confirmed yet
         launch(Dispatchers.IO) {
             delay(initialServerTimeoutMs)
-            if (hasReceivedServerSnapshot.get() ||
-                FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 2_000L)
-            ) {
+            if (hasReceivedServerSnapshot.get()) {
                 return@launch
             }
             var serverErr: Throwable? = null
@@ -620,6 +626,7 @@ class QawmiRepository(
         }
 
         awaitClose {
+            activeQueryServerCallbacks.remove(path)
             recoveryJob?.cancel()
             detachCurrentRegistration()
         }
@@ -739,6 +746,21 @@ class QawmiRepository(
             }
         }
 
+        activeDocServerCallbacks[path] = { serverDoc ->
+            if (isActive) {
+                if (!serverDoc.metadata.isFromCache) {
+                    hasReceivedServerSnapshot.set(true)
+                }
+                val mapped = if (serverDoc.exists()) {
+                    runCatching { mapper(serverDoc) }.getOrDefault(defaultValueOnError)
+                } else {
+                    defaultValueOnError
+                }
+                hasEmittedAny.set(true)
+                trySend(mapped)
+            }
+        }
+
         attachDocListener()
 
         // Fast zero-delay initial document fetch from local cache on Dispatchers.IO (< 100ms), then < 2s server fallback
@@ -763,7 +785,6 @@ class QawmiRepository(
             if (!hasReceivedServerSnapshot.get()) {
                 delay(650L)
                 if (!hasReceivedServerSnapshot.get() &&
-                    !FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 2_000L) &&
                     FirestoreConnectionMonitor.isNetworkAvailable.value &&
                     isActive
                 ) {
@@ -803,13 +824,9 @@ class QawmiRepository(
                     runCatching { db.enableNetwork() }
                     FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
                     attachDocListener()
-                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value &&
-                    !FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)
-                ) {
-                    delay(200L)
-                    if (!isActive || FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 1_500L)) {
-                        return@collect
-                    }
+                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                    delay(180L)
+                    if (!isActive) return@collect
                     val freshDoc = withTimeoutOrNull(1_500L) {
                         runCatching { docRef.get(Source.SERVER).await() }.getOrNull()
                     }
@@ -835,6 +852,7 @@ class QawmiRepository(
         }
 
         awaitClose {
+            activeDocServerCallbacks.remove(path)
             recoveryJob?.cancel()
             detachCurrentRegistration()
         }
@@ -1699,9 +1717,9 @@ class QawmiRepository(
                 )
             }
 
-            // 5. Queue the main /feed_posts/{postId} document, any offloaded attachments, and seeker submission
-            // immediately into Firestore's persistent SQLite cache & write queue so no document is ever lost
-            // even on slow mobile networks.
+            // 5. Ensure network is active and commit the main /feed_posts/{postId} document, any offloaded attachments,
+            // and seeker submission to the Firestore server so all other users' phones receive it in real time.
+            runCatching { db.enableNetwork() }
             val allWriteTasks = mutableListOf<com.google.android.gms.tasks.Task<*>>()
             val mainPostTask = docRef.set(payload)
             mainPostTask.addOnCompleteListener { completedTask ->
@@ -1711,6 +1729,10 @@ class QawmiRepository(
                         isFromCache = false,
                         hasPendingWrites = false
                     )
+                } else {
+                    completedTask.exception?.let { err ->
+                        handleFirestoreError(err, OperationType.CREATE, docRef.path)
+                    }
                 }
             }
             allWriteTasks += mainPostTask
@@ -1727,14 +1749,14 @@ class QawmiRepository(
                     val submissionRef = db.collection("khedmot_submissions").document("app_${docRef.id}")
                     val submissionPayload = mapOf(
                         "postId" to docRef.id,
-                        "postTitle" to title.trim().ifBlank { "দ্বীনি খেদমত আবেদন" }.take(250),
-                        "postDesignation" to resolvedDesignation.take(200),
+                        "postTitle" to title.trim().ifBlank { "দ্বীনি খেদমত আবেদন" }.take(200),
+                        "postDesignation" to resolvedDesignation.take(150),
                         "applicantId" to uid,
-                        "applicantName" to authorName.trim().ifBlank { title.trim() }.take(200),
-                        "applicantQualification" to resolvedQualification.take(250),
-                        "applicantExperience" to salaryOrExperience.trim().ifBlank { "আলোচনা সাপেক্ষ" }.take(250),
+                        "applicantName" to authorName.trim().ifBlank { title.trim() }.ifBlank { "দ্বীনি ভাই" }.take(150),
+                        "applicantQualification" to resolvedQualification.take(200),
+                        "applicantExperience" to salaryOrExperience.trim().ifBlank { "আলোচনা সাপেক্ষ" }.take(150),
                         "applicantPhone" to contactNumber.trim().ifBlank { "প্রোফাইলে উল্লেখিত" }.take(100),
-                        "coverNote" to trimmedDesc.ifBlank { "খেদমতের জন্য সরাসরি প্রকাশিত আবেদন।" }.take(3500),
+                        "coverNote" to trimmedDesc.ifBlank { "খেদমতের জন্য সরাসরি প্রকাশিত আবেদন।" }.take(1000),
                         "recipientId" to madrasaId.trim().ifBlank { uid }.take(128),
                         "status" to "PENDING",
                         "createdAt" to FieldValue.serverTimestamp(),
@@ -1745,17 +1767,15 @@ class QawmiRepository(
             }
 
             try {
-                kotlinx.coroutines.withTimeout(2_500L) {
+                kotlinx.coroutines.withTimeout(15_000L) {
                     com.google.android.gms.tasks.Tasks.whenAll(allWriteTasks).await()
-                    submissionWriteTask?.await()
+                    runCatching { submissionWriteTask?.await() }
                 }
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
                 val primaryError = allWriteTasks.firstNotNullOfOrNull { it.exception }
                 if (primaryError != null) {
                     throw primaryError
                 }
-                // All documents are already committed to Firestore's durable local persistence cache
-                // and queued for automatic background server sync. Wake the network non-blockingly.
                 runCatching { db.enableNetwork() }
             }
 
@@ -1984,9 +2004,10 @@ class QawmiRepository(
                 )
             }
 
+            runCatching { db.enableNetwork() }
             updateTasks += docRef.update(updates)
             try {
-                kotlinx.coroutines.withTimeout(2_500L) {
+                kotlinx.coroutines.withTimeout(15_000L) {
                     com.google.android.gms.tasks.Tasks.whenAll(updateTasks).await()
                 }
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
@@ -2772,36 +2793,77 @@ class QawmiRepository(
         }
     }
 
+    fun generateSubmissionDocumentId(): String {
+        return db.collection("khedmot_submissions").document().id
+    }
+
     suspend fun submitApplicationToCircular(
         post: FeedPost,
         applicantName: String,
         applicantQualification: String,
         applicantExperience: String,
         applicantPhone: String,
-        coverNote: String
+        coverNote: String,
+        preallocatedSubmissionId: String = ""
     ): Result<String> {
         val uid = requireUserId()
-        val docRef = db.collection("khedmot_submissions").document()
+        val docRef = if (preallocatedSubmissionId.isNotBlank()) {
+            db.collection("khedmot_submissions").document(preallocatedSubmissionId.trim())
+        } else {
+            db.collection("khedmot_submissions").document()
+        }
         return try {
+            val safePostId = post.id.trim().ifBlank { "post_${System.currentTimeMillis()}" }.take(128)
+            val safePostTitle = post.title.trim().ifBlank { "দ্বীনি খেদমত বিজ্ঞপ্তি" }.take(200)
+            val safeDesignation = post.designation.trim().ifBlank { "দ্বীনি খেদমত" }.take(150)
+            val safeApplicantName = applicantName.trim().ifBlank { "খেদমতপ্রার্থী" }.take(150)
+            val safeQualification = applicantQualification.trim().take(200)
+            val safeExperience = applicantExperience.trim().take(150)
+            val safePhone = applicantPhone.trim().take(100)
+            val safeCoverNote = coverNote.trim().take(1000)
+            val safeRecipientId = post.authorId.trim().ifBlank { uid }.take(128)
+
             val payload = mapOf(
-                "postId" to post.id,
-                "postTitle" to post.title,
-                "postDesignation" to post.designation,
+                "postId" to safePostId,
+                "postTitle" to safePostTitle,
+                "postDesignation" to safeDesignation,
                 "applicantId" to uid,
-                "applicantName" to applicantName.trim(),
-                "applicantQualification" to applicantQualification.trim(),
-                "applicantExperience" to applicantExperience.trim(),
-                "applicantPhone" to applicantPhone.trim(),
-                "coverNote" to coverNote.trim(),
-                "recipientId" to post.authorId,
+                "applicantName" to safeApplicantName,
+                "applicantQualification" to safeQualification,
+                "applicantExperience" to safeExperience,
+                "applicantPhone" to safePhone,
+                "coverNote" to safeCoverNote,
+                "recipientId" to safeRecipientId,
                 "status" to "PENDING",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            docRef.set(payload).awaitMessageWriteConfirmation(
-                docRef,
-                12_000L
-            )
+            runCatching { db.enableNetwork() }
+            val writeTask = docRef.set(payload)
+            writeTask.addOnCompleteListener { completedTask ->
+                if (completedTask.isSuccessful) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "khedmot_submissions/sent/$uid",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                } else {
+                    completedTask.exception?.let { err ->
+                        handleFirestoreError(err, OperationType.CREATE, docRef.path)
+                    }
+                }
+            }
+            try {
+                kotlinx.coroutines.withTimeout(15_000L) {
+                    writeTask.await()
+                }
+            } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+                val taskError = writeTask.exception
+                if (taskError != null) {
+                    throw taskError
+                }
+                runCatching { db.enableNetwork() }
+            }
 
             // Deliver real-time notification to the Madrasa / circular author and Telegram Admin log concurrently with a fast timeout
             kotlinx.coroutines.withTimeoutOrNull(1_500L) {
@@ -3247,7 +3309,7 @@ class QawmiRepository(
                 isDeletedForEveryone = resolvedDeletedForEveryone,
                 createdAt = resolvedCreatedAt
             ).apply {
-                localDeliveryState = "SENT"
+                localDeliveryState = if (hasPending) "SENDING" else "DELIVERED"
             }
         } catch (_: Throwable) {
             null
@@ -3415,6 +3477,7 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
+            runCatching { db.enableNetwork() }
             val writeTask = docRef.set(payload)
             writeTask.addOnCompleteListener { completedTask ->
                 if (completedTask.isSuccessful) {
@@ -3423,11 +3486,15 @@ class QawmiRepository(
                         isFromCache = false,
                         hasPendingWrites = false
                     )
+                } else {
+                    completedTask.exception?.let { err ->
+                        handleFirestoreError(err, OperationType.CREATE, docRef.path)
+                    }
                 }
             }
 
             try {
-                kotlinx.coroutines.withTimeout(2_500L) {
+                kotlinx.coroutines.withTimeout(15_000L) {
                     writeTask.await()
                 }
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
@@ -3435,9 +3502,6 @@ class QawmiRepository(
                 if (taskError != null) {
                     throw taskError
                 }
-                // Firestore has already written the message to its durable local persistence cache and queued
-                // it for immediate background delivery over the gRPC stream. Wake the network non-blockingly
-                // and succeed immediately so slow mobile networks never trigger a false timeout failure.
                 runCatching { db.enableNetwork() }
             }
 

@@ -675,10 +675,10 @@ class QawmiViewModel(
                         msg.readByUserIds.any { it.isNotBlank() && it != currentUserId }
                     )
                 val isSentByMe = msg.senderId == currentUserId
+                val isConfirmedOnServer = msg.id in remoteIds && msg.localDeliveryState != "SENDING"
                 val resolvedState = when {
-                    localOverrideState == "FAILED" && !isDeliveredOrSeenRemotely -> "FAILED"
-                    isSentByMe -> "DELIVERED"
-                    isDeliveredOrSeenRemotely || localOverrideState == "DELIVERED" -> "DELIVERED"
+                    localOverrideState == "FAILED" && !isDeliveredOrSeenRemotely && !isConfirmedOnServer -> "FAILED"
+                    isDeliveredOrSeenRemotely || localOverrideState == "DELIVERED" || (isSentByMe && isConfirmedOnServer) -> "DELIVERED"
                     localOverrideState == "SENT" || msg.id in remoteIds -> "SENT"
                     localOverrideState == "SENDING" -> "SENDING"
                     else -> "SENT"
@@ -1861,36 +1861,44 @@ class QawmiViewModel(
             _errorBanner.value = "অনুগ্রহ করে আপনার নাম ও যোগাযোগের নম্বর উল্লেখ করুন।"
             return
         }
-        runSubmittingAction {
+        clearBanners()
+        val submissionId = runCatching { repository.generateSubmissionDocumentId() }
+            .getOrDefault("")
+            .ifBlank { "sub_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        val nowTs = Timestamp.now()
+        val optimisticSub = KhedmotSubmission(
+            id = submissionId,
+            postId = post.id,
+            postTitle = post.title,
+            postDesignation = post.designation,
+            applicantId = currentUserId,
+            applicantName = applicantName.trim(),
+            applicantQualification = applicantQualification.trim(),
+            applicantExperience = applicantExperience.trim(),
+            applicantPhone = applicantPhone.trim(),
+            coverNote = coverNote.trim(),
+            recipientId = post.authorId.ifBlank { currentUserId },
+            status = "PENDING",
+            createdAt = nowTs,
+            updatedAt = nowTs
+        )
+        _localOptimisticSubmissions.value = (listOf(optimisticSub) + _localOptimisticSubmissions.value).distinctBy { it.id }
+        _selectedPostForApply.value = null
+        onComplete()
+        _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদন সংশ্লিষ্ট মাদরাসায় প্রেরিত হয়েছে।"
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val result = repository.submitApplicationToCircular(
                 post = post,
                 applicantName = applicantName,
                 applicantQualification = applicantQualification,
                 applicantExperience = applicantExperience,
                 applicantPhone = applicantPhone,
-                coverNote = coverNote
+                coverNote = coverNote,
+                preallocatedSubmissionId = submissionId
             )
-            result.onSuccess { submissionId ->
-                if (submissionId.isNotBlank()) {
-                    val optimisticSub = KhedmotSubmission(
-                        id = submissionId,
-                        postId = post.id,
-                        postTitle = post.title,
-                        postDesignation = post.designation,
-                        applicantId = currentUserId,
-                        applicantName = applicantName.trim(),
-                        applicantQualification = applicantQualification.trim(),
-                        applicantExperience = applicantExperience.trim(),
-                        applicantPhone = applicantPhone.trim(),
-                        coverNote = coverNote.trim(),
-                        recipientId = post.authorId,
-                        status = "PENDING",
-                        createdAt = Timestamp.now(),
-                        updatedAt = Timestamp.now()
-                    )
-                    _localOptimisticSubmissions.value = (listOf(optimisticSub) + _localOptimisticSubmissions.value).distinctBy { it.id }
-                }
-                viewModelScope.launch {
+            result.onSuccess {
+                runCatching {
                     repository.recordVerifiedEngagementEvent(
                         post = post,
                         eventType = EngagementReceipt.EVENT_APPLY,
@@ -1898,11 +1906,13 @@ class QawmiViewModel(
                         currentAffinity = userAffinityState.value
                     )
                 }
-                _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদন সংশ্লিষ্ট মাদরাসায় প্রেরিত হয়েছে।"
-                _selectedPostForApply.value = null
-                onComplete()
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "আবেদন প্রেরণে ত্রুটি হয়েছে।"
+                if (!com.example.data.repository.isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+                    _localOptimisticSubmissions.value = _localOptimisticSubmissions.value.filterNot { it.id == submissionId }
+                    _errorBanner.value = err.localizedMessage ?: "আবেদন প্রেরণে ত্রুটি হয়েছে।"
+                } else {
+                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
+                }
             }
         }
     }
@@ -1987,11 +1997,7 @@ class QawmiViewModel(
         val resolvedSubject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }
         val resolvedGroupName = groupName.ifBlank { receiverName }
 
-        val initialReadBy = if (!isGroupMsg && receiverId.isNotBlank()) {
-            listOf(currentUserId, "DELIVERED:$receiverId")
-        } else {
-            listOf(currentUserId)
-        }
+        val initialReadBy = listOf(currentUserId)
 
         val optimisticMsg = DirectMessage(
             id = messageId,
@@ -2010,7 +2016,7 @@ class QawmiViewModel(
             readByUserIds = initialReadBy,
             createdAt = existingCreatedAt
         ).apply {
-            localDeliveryState = "DELIVERED"
+            localDeliveryState = "SENT"
         }
 
         // Insert or update in-place by messageId so retrying NEVER duplicates the message

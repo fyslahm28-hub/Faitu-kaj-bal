@@ -26,16 +26,16 @@ service cloud.firestore {
     }
 
     function isValidTimestamp(ts) {
-      return ts is timestamp && ts <= request.time;
+      return ts is timestamp && ts <= request.time + duration.value(10, 'm');
     }
 
     function hasUserBlocked(blockerUid, targetUid) {
       let path = /databases/$(database)/documents/users/$(blockerUid);
-      let rawBlocked = exists(path) ? get(path).data.get('blockedUserIds', []) : [];
-      let blocked = rawBlocked is list ? rawBlocked : [];
       return isValidId(blockerUid) &&
              isValidId(targetUid) &&
-             (targetUid in blocked);
+             exists(path) &&
+             (get(path).data.get('blockedUserIds', null) is list) &&
+             (targetUid in get(path).data.get('blockedUserIds', []));
     }
 
     function isBlockedBetween(uid1, uid2) {
@@ -151,15 +151,15 @@ service cloud.firestore {
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 200 &&
              (data.get('authorPhotoUrl', '') is string && data.get('authorPhotoUrl', '').size() <= 250000) &&
              data.postType is string && (data.postType == 'JOB_CIRCULAR' || data.postType == 'SEEKER_APPLICATION' || data.postType == 'GENERAL_POST') &&
-             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
-             data.district is string && data.district.size() <= 100 && (data.postType == 'GENERAL_POST' || data.district.size() >= 1) &&
-             data.upazilaOrLocation is string && data.upazilaOrLocation.size() <= 200 &&
-             data.designation is string && data.designation.size() <= 150 && (data.postType == 'GENERAL_POST' || data.designation.size() >= 1) &&
-             data.qualification is string && data.qualification.size() <= 200 && (data.postType == 'GENERAL_POST' || data.qualification.size() >= 1) &&
-             data.salaryOrExperience is string && data.salaryOrExperience.size() <= 150 &&
-             data.deadlineOrPreferredDistricts is string && data.deadlineOrPreferredDistricts.size() <= 250 &&
-             data.description is string && data.description.size() <= 2000 &&
-             data.contactNumber is string && data.contactNumber.size() <= 100 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+             data.district is string && data.district.size() <= 150 && (data.postType == 'GENERAL_POST' || data.district.size() >= 1) &&
+             data.upazilaOrLocation is string && data.upazilaOrLocation.size() <= 250 &&
+             data.designation is string && data.designation.size() <= 250 && (data.postType == 'GENERAL_POST' || data.designation.size() >= 1) &&
+             data.qualification is string && data.qualification.size() <= 300 && (data.postType == 'GENERAL_POST' || data.qualification.size() >= 1) &&
+             data.salaryOrExperience is string && data.salaryOrExperience.size() <= 250 &&
+             data.deadlineOrPreferredDistricts is string && data.deadlineOrPreferredDistricts.size() <= 300 &&
+             data.description is string && data.description.size() <= 4000 &&
+             data.contactNumber is string && data.contactNumber.size() <= 150 &&
              data.madrasaId is string && data.madrasaId.size() <= 128 &&
              data.isVerifiedMadrasa is bool &&
              (data.get('isBoosted', false) is bool) &&
@@ -245,16 +245,16 @@ service cloud.firestore {
 
     function isValidKhedmotSubmission(data) {
       return data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
-             data.postTitle is string && data.postTitle.size() >= 1 && data.postTitle.size() <= 200 &&
-             data.postDesignation is string && data.postDesignation.size() <= 150 &&
+             data.postTitle is string && data.postTitle.size() >= 1 && data.postTitle.size() <= 300 &&
+             data.postDesignation is string && data.postDesignation.size() <= 250 &&
              data.applicantId is string && data.applicantId.size() >= 1 && data.applicantId.size() <= 128 &&
-             data.applicantName is string && data.applicantName.size() >= 1 && data.applicantName.size() <= 150 &&
-             data.applicantQualification is string && data.applicantQualification.size() <= 200 &&
-             data.applicantExperience is string && data.applicantExperience.size() <= 150 &&
-             data.applicantPhone is string && data.applicantPhone.size() <= 100 &&
-             data.coverNote is string && data.coverNote.size() <= 1000 &&
+             data.applicantName is string && data.applicantName.size() >= 1 && data.applicantName.size() <= 250 &&
+             data.applicantQualification is string && data.applicantQualification.size() <= 300 &&
+             data.applicantExperience is string && data.applicantExperience.size() <= 300 &&
+             data.applicantPhone is string && data.applicantPhone.size() <= 150 &&
+             data.coverNote is string && data.coverNote.size() <= 4000 &&
              data.recipientId is string && data.recipientId.size() >= 1 && data.recipientId.size() <= 128 &&
-             data.status is string && (data.status == 'PENDING' || data.status == 'SHORTLISTED' || data.status == 'ACCEPTED' || data.status == 'REJECTED') &&
+             data.status is string && (data.status == 'PENDING' || data.status == 'SHORTLISTED' || data.status == 'ACCEPTED' || data.status == 'REJECTED' || data.status == 'PUBLISHED_IN_FEED') &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
     }
@@ -295,15 +295,15 @@ service cloud.firestore {
       let hasImages = imageUrls is list && imageUrls.size() >= 1;
       let editedAt = data.get('editedAt', request.time);
       return data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
-             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 150 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 200 &&
              (data.get('senderPhotoUrl', '') is string && data.get('senderPhotoUrl', '').size() <= 250000) &&
              data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 128 &&
-             data.receiverName is string && data.receiverName.size() >= 1 && data.receiverName.size() <= 150 &&
+             data.receiverName is string && data.receiverName.size() >= 1 && data.receiverName.size() <= 200 &&
              (data.get('groupId', '') is string && data.get('groupId', '').size() <= 128) &&
-             (data.get('groupName', '') is string && data.get('groupName', '').size() <= 150) &&
+             (data.get('groupName', '') is string && data.get('groupName', '').size() <= 200) &&
              (data.get('groupMemberIds', []) is list && data.get('groupMemberIds', []).size() <= 50) &&
-             data.subject is string && data.subject.size() <= 200 &&
-             data.body is string && ((data.body.size() >= 1 && data.body.size() <= 1500) || (hasImages && data.body.size() <= 1500)) &&
+             data.subject is string && data.subject.size() <= 250 &&
+             data.body is string && ((data.body.size() >= 1 && data.body.size() <= 2000) || (hasImages && data.body.size() <= 2000)) &&
              (imageUrls is list && imageUrls.size() <= 5) &&
              data.isRead is bool &&
              (data.get('readByUserIds', []) is list && data.get('readByUserIds', []).size() <= 50) &&
@@ -674,7 +674,8 @@ service cloud.firestore {
         let extReactionNames = ext.get('userReactionNames', {}) is map ? ext.get('userReactionNames', {}) : {};
         return inc.get('authorId', '') == ext.get('authorId', '') &&
                inc.get('postType', '') == ext.get('postType', '') &&
-               inc.get('createdAt', request.time) == ext.get('createdAt', request.time) && (
+               (inc.get('createdAt', request.time) == ext.get('createdAt', request.time) ||
+                (request.auth.uid == ext.get('authorId', '') && isValidTimestamp(inc.createdAt))) && (
                  (statusUnchanged &&
                   diffKeys.hasOnly([
                     'userReactions', 'userReactionNames', 'commentCount', 'shareCount', 'updatedAt'
@@ -692,7 +693,7 @@ service cloud.firestore {
                     'deadlineOrPreferredDistricts', 'description',
                     'contactNumber', 'khedmotCategories', 'customCategory',
                     'imageUrls', 'mediaTypes', 'mediaMetadata', 'attachmentDocId',
-                    'isEdited', 'visibility', 'updatedAt'
+                    'isEdited', 'visibility', 'createdAt', 'updatedAt'
                   ]) &&
                   isValidFeedPost(inc)) ||
                  (isAdmin() &&
@@ -856,7 +857,7 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        isValidId(submissionId) &&
                        incoming().applicantId == request.auth.uid &&
-                       incoming().status == 'PENDING' &&
+                       (incoming().status == 'PENDING' || incoming().status == 'PUBLISHED_IN_FEED') &&
                        incoming().keys().hasAll([
                          'postId', 'postTitle', 'postDesignation', 'applicantId',
                          'applicantName', 'applicantQualification', 'applicantExperience',
@@ -872,11 +873,15 @@ service cloud.firestore {
                        isValidKhedmotSubmission(incoming());
 
       allow update: if isSignedIn() &&
-                       isValidId(submissionId) &&
-                       (request.auth.uid == existing().recipientId || isAdmin()) &&
-                       (incoming().get('status', '') in ['PENDING', 'SHORTLISTED', 'ACCEPTED', 'REJECTED']) &&
-                       isValidTimestamp(incoming().get('updatedAt', request.time)) &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+                       isValidId(submissionId) && (
+                         ((request.auth.uid == existing().recipientId || isAdmin()) &&
+                          (incoming().get('status', '') in ['PENDING', 'SHORTLISTED', 'ACCEPTED', 'REJECTED', 'PUBLISHED_IN_FEED']) &&
+                          isValidTimestamp(incoming().get('updatedAt', request.time)) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+                         (request.auth.uid == existing().applicantId &&
+                          incoming().applicantId == existing().applicantId &&
+                          isValidKhedmotSubmission(incoming()))
+                       );
 
       allow delete: if isSignedIn() && isValidId(submissionId) && (
         existing().applicantId == request.auth.uid || isAdmin()
@@ -939,9 +944,9 @@ service cloud.firestore {
 
       allow get: if isSignedIn() && isValidId(messageId) && (resource == null || isMessageParticipant(existing()));
       allow list: if isSignedIn() && (
-                    existing().get('senderId', '') == request.auth.uid ||
-                    existing().get('receiverId', '') == request.auth.uid ||
-                    request.auth.uid in existing().get('groupMemberIds', [])
+                    resource.data.senderId == request.auth.uid ||
+                    resource.data.receiverId == request.auth.uid ||
+                    request.auth.uid in resource.data.get('groupMemberIds', [])
                   );
 
       allow create: if isSignedIn() &&

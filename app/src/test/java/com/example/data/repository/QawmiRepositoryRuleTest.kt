@@ -1448,6 +1448,189 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertFalse("isServingFromCache must be false after receiving live server snapshot", FirestoreConnectionMonitor.isServingFromCache.value)
     }
 
+    @Test
+    fun crossDeviceDelivery_viewModelPublishPost_applyAndSendMessage_receivedOnOtherUserPhone() = runBlocking {
+        val phoneAEmail = "phone_a_${UUID.randomUUID()}@test.com"
+        val phoneBEmail = "phone_b_${UUID.randomUUID()}@test.com"
+
+        // Create User B first (even without a /users/{uid} profile doc initially, to prove messages & posts still deliver!)
+        val userBUid = signInTestUser(phoneBEmail)
+
+        // Switch to Phone A (User A)
+        val userAUid = signInTestUser(phoneAEmail)
+        val repoA = QawmiRepository(firestore, auth)
+        val viewModelA = com.example.ui.viewmodel.QawmiViewModel(
+            repository = repoA,
+            currentUserId = userAUid,
+            currentUserEmail = phoneAEmail,
+            currentUserDisplayName = "মাওলানা ফয়সাল আহমাদ"
+        )
+
+        // 1. Phone A publishes a SEEKER_APPLICATION post via QawmiViewModel.publishFeedPost
+        val uniqueSeekerTitle = "খেদমত আবেদন ডিভাইস টেস্ট ${UUID.randomUUID().toString().take(8)}"
+        var navigatedAfterSeekerPost = false
+        viewModelA.publishFeedPost(
+            authorName = "মাওলানা ফয়সাল আহমাদ",
+            postType = "SEEKER_APPLICATION",
+            title = uniqueSeekerTitle,
+            district = "ময়মনসিংহ",
+            upazilaOrLocation = "সদর",
+            designation = "মুদাররিস ও নাযিমে দারুল ইকামা",
+            qualification = "দাওরায়ে হাদীস ও ইফতা",
+            salaryOrExperience = "৪ বছর অভিজ্ঞতা",
+            deadlineOrPreferredDistricts = "ময়মনসিংহ, ঢাকা",
+            description = "আলহামদুলিল্লাহ, কিতাব বিভাগ ও দারুল ইকামায় খেদমতে আগ্রহী।",
+            contactNumber = "01700112233",
+            khedmotCategories = listOf("কিতাব বিভাগ", "দারুল ইকামা"),
+            onSuccessNavigate = { navigatedAfterSeekerPost = true }
+        )
+        assertTrue("publishFeedPost must navigate immediately", navigatedAfterSeekerPost)
+
+        // 2. Phone A publishes a JOB_CIRCULAR post via QawmiViewModel.publishFeedPost
+        val uniqueGeneralTitle = "নিয়োগ বিজ্ঞপ্তি ডিভাইস টেস্ট ${UUID.randomUUID().toString().take(8)}"
+        viewModelA.publishFeedPost(
+            authorName = "মাওলানা ফয়সাল আহমাদ",
+            postType = "JOB_CIRCULAR",
+            title = uniqueGeneralTitle,
+            district = "ময়মনসিংহ",
+            upazilaOrLocation = "সদর",
+            designation = "মুহাদ্দিস",
+            qualification = "দাওরায়ে হাদীস",
+            salaryOrExperience = "১৫,০০০ টাকা",
+            deadlineOrPreferredDistricts = "চলমান",
+            description = "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ, মাদরাসায় একজন অভিজ্ঞ মুহাদ্দিস আবশ্যক।",
+            contactNumber = "01700112233",
+            onSuccessNavigate = {}
+        )
+
+        // 3. Phone A sends a direct message to User B via QawmiViewModel.sendMessage
+        val uniqueMessageBody = "আসসালামু আলাইকুম ভাই, মেসেজটি আপনার ফোনে পৌঁছেছে কি? ${UUID.randomUUID().toString().take(6)}"
+        var messageComposerCleared = false
+        viewModelA.sendMessage(
+            receiverId = userBUid,
+            receiverName = "মাওলানা আব্দুল্লাহ (ফোন বি)",
+            subject = "খেদমত সংক্রান্ত যোগাযোগ",
+            body = uniqueMessageBody,
+            onSent = { messageComposerCleared = true }
+        )
+        assertTrue("sendMessage must clear composer immediately", messageComposerCleared)
+
+        // Wait until Phone A's background coroutines commit the 2 posts and 1 message to the Firestore server
+        awaitMainLooperCondition(
+            8_000L,
+            { "Waiting for server commit from Phone A; errorBanner=${viewModelA.errorBanner.value}" }
+        ) {
+            val serverPosts = runCatching {
+                kotlinx.coroutines.runBlocking {
+                    firestore.collection("feed_posts")
+                        .whereEqualTo("authorId", userAUid)
+                        .get(com.google.firebase.firestore.Source.SERVER)
+                        .awaitWithTimeout(2_000L)
+                }
+            }.getOrNull()
+            val serverMsgs = runCatching {
+                kotlinx.coroutines.runBlocking {
+                    firestore.collection("messages")
+                        .whereEqualTo("senderId", userAUid)
+                        .get(com.google.firebase.firestore.Source.SERVER)
+                        .awaitWithTimeout(2_000L)
+                }
+            }.getOrNull()
+            (serverPosts?.documents?.any { it.getString("title") == uniqueSeekerTitle } == true) &&
+                (serverPosts.documents.any { it.getString("title") == uniqueGeneralTitle }) &&
+                (serverMsgs?.documents?.any { it.getString("body") == uniqueMessageBody && it.getString("receiverId") == userBUid } == true)
+        }
+        org.junit.Assert.assertNull("Phone A must have no errorBanner", viewModelA.errorBanner.value)
+
+        // 4. Switch to Phone B (User B) and verify Phone B receives both posts AND the message from the database!
+        signInTestUser(phoneBEmail)
+        val repoB = QawmiRepository(firestore, auth)
+        val viewModelB = com.example.ui.viewmodel.QawmiViewModel(
+            repository = repoB,
+            currentUserId = userBUid,
+            currentUserEmail = phoneBEmail,
+            currentUserDisplayName = "মাওলানা আব্দুল্লাহ (ফোন বি)"
+        )
+
+        awaitMainLooperCondition(
+            8_000L,
+            { "Phone B feedPostsState=${viewModelB.feedPostsState.value}, messagesState=${viewModelB.messagesState.value}" }
+        ) {
+            val feedOnB = (viewModelB.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val msgsOnB = (viewModelB.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            feedOnB.any { it.title == uniqueSeekerTitle && it.authorId == userAUid } &&
+                feedOnB.any { it.title == uniqueGeneralTitle && it.authorId == userAUid } &&
+                msgsOnB.any { it.body == uniqueMessageBody && it.senderId == userAUid && it.receiverId == userBUid }
+        }
+
+        val feedOnPhoneB = (viewModelB.feedPostsState.value as com.example.ui.viewmodel.UiState.Success).data
+        val msgsOnPhoneB = (viewModelB.messagesState.value as com.example.ui.viewmodel.UiState.Success).data
+        assertTrue("Phone B must receive User A's Seeker Application post", feedOnPhoneB.any { it.title == uniqueSeekerTitle })
+        assertTrue("Phone B must receive User A's Circular post", feedOnPhoneB.any { it.title == uniqueGeneralTitle })
+        assertTrue("Phone B must receive User A's Direct Message", msgsOnPhoneB.any { it.body == uniqueMessageBody })
+
+        // 5. Phone B submits a Khedmot Application to Phone A's circular AND replies with a message to Phone A
+        val circularPostOnB = feedOnPhoneB.first { it.title == uniqueGeneralTitle }
+        var applyCompletedOnB = false
+        viewModelB.submitKhedmotApplication(
+            post = circularPostOnB,
+            applicantName = "মাওলানা আব্দুল্লাহ (ফোন বি)",
+            applicantQualification = "দাওরায়ে হাদীস ও ইফতা",
+            applicantExperience = "৩ বছর",
+            applicantPhone = "01899887766",
+            coverNote = "আমি উক্ত মুহাদ্দিস পদে খেদমত করতে আগ্রহী।",
+            onComplete = { applyCompletedOnB = true }
+        )
+        assertTrue("submitKhedmotApplication on Phone B must complete immediately", applyCompletedOnB)
+
+        val replyBodyFromB = "ওয়া আলাইকুমুস সালাম ভাই, আপনার মেসেজ ও পোস্ট আমার ফোনে পেয়েছি এবং আবেদন করেছি! ${UUID.randomUUID().toString().take(6)}"
+        viewModelB.sendMessage(
+            receiverId = userAUid,
+            receiverName = "মাওলানা ফয়সাল আহমাদ",
+            subject = "খেদমত সংক্রান্ত উত্তর",
+            body = replyBodyFromB
+        )
+
+        // Wait until Phone B's application and reply message commit to the Firestore server
+        awaitMainLooperCondition(
+            8_000L,
+            { "Waiting for server commit from Phone B; errorBanner=${viewModelB.errorBanner.value}" }
+        ) {
+            val serverSubs = runCatching {
+                kotlinx.coroutines.runBlocking {
+                    firestore.collection("khedmot_submissions")
+                        .whereEqualTo("applicantId", userBUid)
+                        .get(com.google.firebase.firestore.Source.SERVER)
+                        .awaitWithTimeout(2_000L)
+                }
+            }.getOrNull()
+            val serverReplies = runCatching {
+                kotlinx.coroutines.runBlocking {
+                    firestore.collection("messages")
+                        .whereEqualTo("senderId", userBUid)
+                        .get(com.google.firebase.firestore.Source.SERVER)
+                        .awaitWithTimeout(2_000L)
+                }
+            }.getOrNull()
+            (serverSubs?.documents?.any { it.getString("postId") == circularPostOnB.id && it.getString("recipientId") == userAUid } == true) &&
+                (serverReplies?.documents?.any { it.getString("body") == replyBodyFromB && it.getString("receiverId") == userAUid } == true)
+        }
+        org.junit.Assert.assertNull("Phone B must have no errorBanner", viewModelB.errorBanner.value)
+
+        // 6. Switch back to Phone A (User A) and verify Phone A receives Phone B's application AND reply message!
+        signInTestUser(phoneAEmail)
+        viewModelA.onAuthSessionRefreshed()
+        awaitMainLooperCondition(
+            8_000L,
+            { "Phone A receivedSubmissionsState=${viewModelA.receivedSubmissionsState.value}, messagesState=${viewModelA.messagesState.value}" }
+        ) {
+            val receivedSubsOnA = (viewModelA.receivedSubmissionsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val msgsOnA = (viewModelA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            receivedSubsOnA.any { it.postId == circularPostOnB.id && it.applicantId == userBUid } &&
+                msgsOnA.any { it.body == replyBodyFromB && it.senderId == userBUid && it.receiverId == userAUid }
+        }
+    }
+
     private fun userAUidEmail(email: String): String = email
 
     private suspend fun awaitMainLooperCondition(timeoutMs: Long, debugInfo: () -> String = { "" }, condition: () -> Boolean) {
@@ -1465,6 +1648,7 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         awaitMainLooperCondition(timeoutMs, { label }, condition)
     }
 }
+
 
 
 
