@@ -3301,7 +3301,7 @@ class QawmiRepository(
         return try {
             // Only skip set() if the message was ALREADY acknowledged by the remote server (!hasPendingWrites):
             if (preallocatedMessageId.isNotBlank()) {
-                val existingDoc = docRef.getFromCacheOnlyOrNull(50L)
+                val existingDoc = docRef.getFromCacheOnlyOrNull(25L)
                 if (existingDoc != null &&
                     existingDoc.exists() &&
                     existingDoc.getString("senderId") == uid &&
@@ -3314,7 +3314,7 @@ class QawmiRepository(
             if (!isGroupMessage) {
                 // Zero-latency local cache block check (no pre-flight network calls before docRef.set).
                 // Server-side Firestore Security Rules also enforce !isBlockedBetween atomically.
-                val senderSnap = db.collection("users").document(uid).getFromCacheOnlyOrNull(40L)
+                val senderSnap = db.collection("users").document(uid).getFromCacheOnlyOrNull(25L)
                 val senderBlockedList = (senderSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -3324,7 +3324,7 @@ class QawmiRepository(
                     )
                 }
 
-                val receiverSnap = db.collection("users").document(trimmedReceiverId).getFromCacheOnlyOrNull(40L)
+                val receiverSnap = db.collection("users").document(trimmedReceiverId).getFromCacheOnlyOrNull(25L)
                 val receiverBlockedList = (receiverSnap?.get("blockedUserIds") as? List<*>)
                     ?.mapNotNull { it as? String }
                     .orEmpty()
@@ -3350,8 +3350,14 @@ class QawmiRepository(
                 return Result.failure(IllegalArgumentException("অনুগ্রহ করে পয়গাম লিখুন অথবা ছবি নির্বাচন করুন।"))
             }
 
-            // Compact senderPhotoUrl synchronously so we never upload 100KB-240KB of raw Base64 avatar data on every chat message
-            val compactSenderPhoto = ProfilePhotoHelper.compactSenderPhotoForMessage(senderPhotoUrl.trim())
+            // Avoid uploading inline Base64 avatar data on every chat message (profiles are already synced via users/{uid});
+            // only keep lightweight preset/http URLs so text messages stay ~250 bytes and transmit instantaneously.
+            val trimmedSenderPhoto = senderPhotoUrl.trim()
+            val compactSenderPhoto = if (trimmedSenderPhoto.startsWith("data:image", ignoreCase = true)) {
+                ""
+            } else {
+                ProfilePhotoHelper.compactSenderPhotoForMessage(trimmedSenderPhoto)
+            }
 
             val payload = mutableMapOf<String, Any>(
                 "senderId" to uid,
@@ -3376,12 +3382,30 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
-            runCatching { db.enableNetwork() }
+            val writeTask = docRef.set(payload)
+            writeTask.addOnCompleteListener { completedTask ->
+                if (completedTask.isSuccessful) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "messages",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                }
+            }
+
             try {
-                docRef.set(payload).awaitMessageWriteConfirmation(docRef, timeoutMs = 3_500L)
+                kotlinx.coroutines.withTimeout(2_500L) {
+                    writeTask.await()
+                }
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+                val taskError = writeTask.exception
+                if (taskError != null) {
+                    throw taskError
+                }
+                // Firestore has already written the message to its durable local persistence cache and queued
+                // it for immediate background delivery over the gRPC stream. Wake the network non-blockingly
+                // and succeed immediately so slow mobile networks never trigger a false timeout failure.
                 runCatching { db.enableNetwork() }
-                throw timeoutEx
             }
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.

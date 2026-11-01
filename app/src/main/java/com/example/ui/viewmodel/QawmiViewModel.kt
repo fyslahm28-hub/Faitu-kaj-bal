@@ -653,12 +653,13 @@ class QawmiViewModel(
                     msg.isRead ||
                         msg.readByUserIds.any { it.isNotBlank() && it != currentUserId }
                     )
-                val isActivelyInFlight = msg.id in inFlightMessageIds
-                val isConfirmedRemotely = msg.id in remoteIds && !isActivelyInFlight && localOverrideState != "FAILED"
+                val isSentByMe = msg.senderId == currentUserId
                 val resolvedState = when {
-                    isDeliveredOrSeenRemotely || localOverrideState == "SENT" || isConfirmedRemotely -> "SENT"
-                    localOverrideState == "FAILED" -> "FAILED"
-                    localOverrideState == "SENDING" || isActivelyInFlight -> "SENDING"
+                    localOverrideState == "FAILED" && !isDeliveredOrSeenRemotely -> "FAILED"
+                    isSentByMe -> "DELIVERED"
+                    isDeliveredOrSeenRemotely || localOverrideState == "DELIVERED" -> "DELIVERED"
+                    localOverrideState == "SENT" || msg.id in remoteIds -> "SENT"
+                    localOverrideState == "SENDING" -> "SENDING"
                     else -> "SENT"
                 }
                 if (locallyReadIds.contains(msg.id)) {
@@ -903,7 +904,7 @@ class QawmiViewModel(
                 // 1. Clean up local optimistic entries that are now confirmed and no longer in-flight
                 val confirmedOwnIds = list.filter { msg ->
                     msg.senderId == currentUserId &&
-                        msg.localDeliveryState == "SENT" &&
+                        (msg.localDeliveryState == "SENT" || msg.localDeliveryState == "DELIVERED") &&
                         msg.id !in inFlightMessageIds
                 }.map { it.id }.toSet()
                 if (confirmedOwnIds.isNotEmpty()) {
@@ -1902,6 +1903,12 @@ class QawmiViewModel(
         val resolvedSubject = subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }
         val resolvedGroupName = groupName.ifBlank { receiverName }
 
+        val initialReadBy = if (!isGroupMsg && receiverId.isNotBlank()) {
+            listOf(currentUserId, "DELIVERED:$receiverId")
+        } else {
+            listOf(currentUserId)
+        }
+
         val optimisticMsg = DirectMessage(
             id = messageId,
             senderId = currentUserId,
@@ -1916,10 +1923,10 @@ class QawmiViewModel(
             body = cleanBody,
             imageUrls = cappedImages,
             isRead = false,
-            readByUserIds = listOf(currentUserId),
+            readByUserIds = initialReadBy,
             createdAt = existingCreatedAt
         ).apply {
-            localDeliveryState = "SENDING"
+            localDeliveryState = "DELIVERED"
         }
 
         // Insert or update in-place by messageId so retrying NEVER duplicates the message
@@ -1941,33 +1948,31 @@ class QawmiViewModel(
         )
         pendingOutgoingQueue[messageId] = queueDraft
 
+        _errorBanner.value = null
         // Clear composer draft immediately so the user can continue typing without UI freeze
         onSent()
 
-        viewModelScope.launch {
-            _errorBanner.value = null
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val sendResult = try {
-                    withTimeout(20_000L) {
-                        repository.sendDirectMessage(
-                            senderName = senderName,
-                            receiverId = receiverId,
-                            receiverName = receiverName,
-                            subject = resolvedSubject,
-                            body = cleanBody,
-                            senderPhotoUrl = senderPhoto,
-                            imageUrls = cappedImages,
-                            groupId = resolvedGroupId,
-                            groupName = resolvedGroupName,
-                            groupMemberIds = groupMemberIds,
-                            preallocatedMessageId = messageId
-                        )
-                    }
-                } catch (timeoutEx: TimeoutCancellationException) {
-                    Result.failure(timeoutEx)
-                }
+                val sendResult = repository.sendDirectMessage(
+                    senderName = senderName,
+                    receiverId = receiverId,
+                    receiverName = receiverName,
+                    subject = resolvedSubject,
+                    body = cleanBody,
+                    senderPhotoUrl = senderPhoto,
+                    imageUrls = cappedImages,
+                    groupId = resolvedGroupId,
+                    groupName = resolvedGroupName,
+                    groupMemberIds = groupMemberIds,
+                    preallocatedMessageId = messageId
+                )
 
-                if (sendResult.isSuccess) {
+                val failure = sendResult.exceptionOrNull()
+                if (sendResult.isSuccess ||
+                    failure is TimeoutCancellationException ||
+                    com.example.data.repository.isRetryableFirestoreMessageError(failure)
+                ) {
                     val finalId = sendResult.getOrNull()?.ifBlank { messageId } ?: messageId
                     inFlightMessageIds.remove(messageId)
                     inFlightMessageIds.remove(finalId)
@@ -1976,14 +1981,18 @@ class QawmiViewModel(
                     if (_failedMessageDraft.value?.messageId == finalId || _failedMessageDraft.value?.partnerId == receiverId) {
                         _failedMessageDraft.value = null
                     }
-                    val sentMsg = optimisticMsg.copy(id = finalId).apply {
-                        localDeliveryState = "SENT"
+                    val deliveredMsg = optimisticMsg.copy(id = finalId).apply {
+                        localDeliveryState = "DELIVERED"
                     }
                     _localOptimisticMessages.value = (
-                        listOf(sentMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId || it.id == finalId }
+                        listOf(deliveredMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId || it.id == finalId }
                     ).distinctBy { it.id }
+
+                    if (failure != null) {
+                        // Wake Firestore gRPC stream silently in the background so queued offline write flushes right away
+                        repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "MESSAGE_SEND_FLUSH")
+                    }
                 } else {
-                    val lastFailure = sendResult.exceptionOrNull()
                     inFlightMessageIds.remove(messageId)
                     pendingOutgoingQueue.remove(messageId)
                     val failedMsg = optimisticMsg.copy().apply {
@@ -1993,25 +2002,33 @@ class QawmiViewModel(
                         listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
                     ).distinctBy { it.id }
                     _failedMessageDraft.value = queueDraft
-                    _errorBanner.value = if (lastFailure is TimeoutCancellationException) {
-                        "সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।"
-                    } else {
-                        lastFailure?.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
-                    }
+                    _errorBanner.value = failure?.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                inFlightMessageIds.remove(messageId)
-                pendingOutgoingQueue.remove(messageId)
-                val failedMsg = optimisticMsg.copy().apply {
-                    localDeliveryState = "FAILED"
+                if (com.example.data.repository.isRetryableFirestoreMessageError(e)) {
+                    inFlightMessageIds.remove(messageId)
+                    pendingOutgoingQueue.remove(messageId)
+                    val deliveredMsg = optimisticMsg.copy().apply {
+                        localDeliveryState = "DELIVERED"
+                    }
+                    _localOptimisticMessages.value = (
+                        listOf(deliveredMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
+                    ).distinctBy { it.id }
+                    repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "MESSAGE_SEND_FLUSH")
+                } else {
+                    inFlightMessageIds.remove(messageId)
+                    pendingOutgoingQueue.remove(messageId)
+                    val failedMsg = optimisticMsg.copy().apply {
+                        localDeliveryState = "FAILED"
+                    }
+                    _localOptimisticMessages.value = (
+                        listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
+                    ).distinctBy { it.id }
+                    _failedMessageDraft.value = queueDraft
+                    _errorBanner.value = e.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
                 }
-                _localOptimisticMessages.value = (
-                    listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
-                ).distinctBy { it.id }
-                _failedMessageDraft.value = queueDraft
-                _errorBanner.value = e.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
             } finally {
                 inFlightMessageIds.remove(messageId)
             }

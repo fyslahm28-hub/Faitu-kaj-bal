@@ -1305,7 +1305,8 @@ fun MessagesScreen(
 
     // Smart auto-scroll: scroll to bottom when opening a conversation, when sending a message,
     // or when already near the bottom of the list (do not yank user while reading older messages)
-    LaunchedEffect(receiverId, activeConversationMessages.size) {
+    val latestActiveMessageId = activeConversationMessages.lastOrNull()?.id.orEmpty()
+    LaunchedEffect(receiverId, activeConversationMessages.size, latestActiveMessageId) {
         if (receiverId.isNotBlank() && activeConversationMessages.isNotEmpty()) {
             val isOpeningConversation = lastOpenedConversationId != receiverId
             val latestMsg = activeConversationMessages.lastOrNull()
@@ -1313,7 +1314,7 @@ fun MessagesScreen(
             val lastVisibleIdx = chatListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             val isNearBottom = lastVisibleIdx >= (activeConversationMessages.lastIndex - 3).coerceAtLeast(0)
             if (isOpeningConversation || isLatestSentByMe || isNearBottom || activeConversationMessages.size <= 3) {
-                chatListState.scrollToItem(activeConversationMessages.lastIndex)
+                chatListState.scrollToItem(activeConversationMessages.lastIndex, scrollOffset = 10_000)
                 lastOpenedConversationId = receiverId
             }
         }
