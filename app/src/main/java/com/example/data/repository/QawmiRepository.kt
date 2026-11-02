@@ -95,9 +95,8 @@ class QawmiRepository(
 
     /**
      * Ensures the Firebase Firestore network connection is active without unnecessarily
-     * re-initializing or reconnecting Firebase Auth. Only refreshes the Auth ID token when
-     * explicitly requested (`forceTokenRefresh = true`) or recovering from an authentication error,
-     * and only cycles the Firestore network when recovering from a verified long gRPC stall.
+     * re-initializing or reconnecting Firebase Auth, and without ever calling `db.disableNetwork()`
+     * which would interrupt in-flight writes or active snapshot listeners.
      */
     suspend fun ensureLiveConnectionActive(forceTokenRefresh: Boolean = false, reason: String = "ENSURE_LIVE") =
         kotlinx.coroutines.withContext(Dispatchers.IO) {
@@ -107,32 +106,17 @@ class QawmiRepository(
             FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
 
             val currentUser = runCatching { auth.currentUser }.getOrNull()
-            if (currentUser != null && forceTokenRefresh) {
+            if (currentUser != null) {
+                val shouldRefreshToken = forceTokenRefresh || !FirestoreConnectionMonitor.isServerConnected.value
                 runCatching {
-                    withTimeoutOrNull(1_500L) {
-                        currentUser.getIdToken(true).await()
-                    }
-                }
-            }
-
-            val nowMs = System.currentTimeMillis()
-            val lastConfirmedMs = FirestoreConnectionMonitor.lastServerConfirmedAtMs
-            val isLongStall = !FirestoreConnectionMonitor.isServerConnected.value &&
-                lastConfirmedMs > 0L &&
-                (nowMs - lastConfirmedMs) > 20_000L
-            val prevCycleMs = lastGrpcCycleEpochMs.get()
-
-            if (isLongStall && (nowMs - prevCycleMs) > 6_000L && lastGrpcCycleEpochMs.compareAndSet(prevCycleMs, nowMs)) {
-                // Reset Firestore's internal gRPC exponential backoff timer when recovering from a long stall
-                runCatching {
-                    withTimeoutOrNull(600L) {
-                        db.disableNetwork().await()
+                    withTimeoutOrNull(1_800L) {
+                        currentUser.getIdToken(shouldRefreshToken).await()
                     }
                 }
             }
 
             runCatching {
-                withTimeoutOrNull(1_200L) {
+                withTimeoutOrNull(1_500L) {
                     db.enableNetwork().await()
                 }
             }
@@ -1717,7 +1701,25 @@ class QawmiRepository(
                 )
             }
 
-            // 5. Ensure network is active and commit the main /feed_posts/{postId} document, any offloaded attachments,
+            // 5. Idempotency check on retry: if a preallocatedPostId was already confirmed on the server
+            // by a previous attempt that timed out on the client, do not overwrite createdAt.
+            if (preallocatedPostId.isNotBlank()) {
+                val cachedExisting = docRef.getFromCacheOnlyOrNull(60L)
+                if (cachedExisting != null &&
+                    cachedExisting.exists() &&
+                    !cachedExisting.metadata.hasPendingWrites() &&
+                    cachedExisting.getString("authorId") == uid
+                ) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "feed_posts",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                    return Result.success(docRef.id)
+                }
+            }
+
+            // 6. Ensure network is active and commit the main /feed_posts/{postId} document, any offloaded attachments,
             // and seeker submission to the Firestore server so all other users' phones receive it in real time.
             runCatching { db.enableNetwork() }
             val allWriteTasks = mutableListOf<com.google.android.gms.tasks.Task<*>>()
@@ -1741,7 +1743,7 @@ class QawmiRepository(
                 allWriteTasks += attachRef.set(attachPayload)
             }
 
-            // 6. If this post is a SEEKER_APPLICATION, also register it in /khedmot_submissions
+            // 7. If this post is a SEEKER_APPLICATION, also register it in /khedmot_submissions
             // so Admin Panel and authorized users can track, approve, and manage it from Firebase.
             var submissionWriteTask: com.google.android.gms.tasks.Task<*>? = null
             if (postType == "SEEKER_APPLICATION") {
@@ -1774,12 +1776,23 @@ class QawmiRepository(
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
                 val primaryError = allWriteTasks.firstNotNullOfOrNull { it.exception }
                 if (primaryError != null) {
-                    throw primaryError
+                    handleFirestoreError(primaryError, OperationType.CREATE, docRef.path)
+                    return Result.failure(translateFirestoreExceptionToBangla(primaryError))
                 }
-                runCatching { db.enableNetwork() }
+                val serverConfirmed = runCatching {
+                    val snap = withTimeoutOrNull(1_500L) { docRef.get(Source.SERVER).await() }
+                    snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("authorId") == uid
+                }.getOrDefault(false)
+                if (!serverConfirmed) {
+                    runCatching { db.enableNetwork() }
+                    handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
+                    return Result.failure(
+                        IllegalStateException("সার্ভারে পোস্ট সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।")
+                    )
+                }
             }
 
-            // 7. Deliver community notification and Telegram Admin log with fast bounded timeout
+            // 8. Deliver community notification and Telegram Admin log with fast bounded timeout
             val isCircular = postType == "JOB_CIRCULAR"
             val isGeneral = postType == "GENERAL_POST"
             val notifTitle = when {
@@ -1825,6 +1838,15 @@ class QawmiRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (preallocatedPostId.isNotBlank()) {
+                val alreadyOnServer = runCatching {
+                    val snap = withTimeoutOrNull(2_000L) { docRef.get(Source.SERVER).await() }
+                    snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("authorId") == uid
+                }.getOrDefault(false)
+                if (alreadyOnServer) {
+                    return Result.success(docRef.id)
+                }
+            }
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
             Result.failure(translateFirestoreExceptionToBangla(e))
         }
@@ -2013,9 +2035,14 @@ class QawmiRepository(
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
                 val taskError = updateTasks.firstNotNullOfOrNull { it.exception }
                 if (taskError != null) {
-                    throw taskError
+                    handleFirestoreError(taskError, OperationType.UPDATE, docRef.path)
+                    return Result.failure(translateFirestoreExceptionToBangla(taskError))
                 }
                 runCatching { db.enableNetwork() }
+                handleFirestoreError(timeoutEx, OperationType.UPDATE, docRef.path)
+                return Result.failure(
+                    IllegalStateException("সার্ভারে পোস্ট হালনাগাদ করতে নির্ধারিত সময়ের বেশি লাগছে। অনুগ্রহ করে পুনরায় চেষ্টা করুন।")
+                )
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -2838,6 +2865,22 @@ class QawmiRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
+            if (preallocatedSubmissionId.isNotBlank()) {
+                val cachedExisting = docRef.getFromCacheOnlyOrNull(60L)
+                if (cachedExisting != null &&
+                    cachedExisting.exists() &&
+                    !cachedExisting.metadata.hasPendingWrites() &&
+                    cachedExisting.getString("applicantId") == uid
+                ) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "khedmot_submissions/sent/$uid",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                    return Result.success(docRef.id)
+                }
+            }
+
             runCatching { db.enableNetwork() }
             val writeTask = docRef.set(payload)
             writeTask.addOnCompleteListener { completedTask ->
@@ -2860,9 +2903,20 @@ class QawmiRepository(
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
                 val taskError = writeTask.exception
                 if (taskError != null) {
-                    throw taskError
+                    handleFirestoreError(taskError, OperationType.CREATE, docRef.path)
+                    return Result.failure(translateFirestoreExceptionToBangla(taskError))
                 }
-                runCatching { db.enableNetwork() }
+                val serverConfirmed = runCatching {
+                    val snap = withTimeoutOrNull(1_500L) { docRef.get(Source.SERVER).await() }
+                    snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("applicantId") == uid
+                }.getOrDefault(false)
+                if (!serverConfirmed) {
+                    runCatching { db.enableNetwork() }
+                    handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
+                    return Result.failure(
+                        IllegalStateException("সার্ভারে আবেদন সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।")
+                    )
+                }
             }
 
             // Deliver real-time notification to the Madrasa / circular author and Telegram Admin log concurrently with a fast timeout
@@ -2900,6 +2954,15 @@ class QawmiRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (preallocatedSubmissionId.isNotBlank()) {
+                val alreadyOnServer = runCatching {
+                    val snap = withTimeoutOrNull(2_000L) { docRef.get(Source.SERVER).await() }
+                    snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("applicantId") == uid
+                }.getOrDefault(false)
+                if (alreadyOnServer) {
+                    return Result.success(docRef.id)
+                }
+            }
             handleFirestoreError(e, OperationType.CREATE, docRef.path)
             Result.failure(translateFirestoreExceptionToBangla(e))
         }
@@ -3477,6 +3540,22 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
+            if (preallocatedMessageId.isNotBlank()) {
+                val cachedExisting = docRef.getFromCacheOnlyOrNull(60L)
+                if (cachedExisting != null &&
+                    cachedExisting.exists() &&
+                    !cachedExisting.metadata.hasPendingWrites() &&
+                    cachedExisting.getString("senderId") == uid
+                ) {
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "messages",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                    return Result.success(docRef.id)
+                }
+            }
+
             runCatching { db.enableNetwork() }
             val writeTask = docRef.set(payload)
             writeTask.addOnCompleteListener { completedTask ->
@@ -3500,9 +3579,20 @@ class QawmiRepository(
             } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
                 val taskError = writeTask.exception
                 if (taskError != null) {
-                    throw taskError
+                    handleFirestoreError(taskError, OperationType.CREATE, docRef.path)
+                    return Result.failure(translateFirestoreExceptionToBangla(taskError))
                 }
-                runCatching { db.enableNetwork() }
+                val serverConfirmed = runCatching {
+                    val snap = withTimeoutOrNull(1_500L) { docRef.get(Source.SERVER).await() }
+                    snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("senderId") == uid
+                }.getOrDefault(false)
+                if (!serverConfirmed) {
+                    runCatching { db.enableNetwork() }
+                    handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
+                    return Result.failure(
+                        IllegalStateException("সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।")
+                    )
+                }
             }
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.
@@ -3511,6 +3601,15 @@ class QawmiRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (preallocatedMessageId.isNotBlank()) {
+                val alreadyOnServer = runCatching {
+                    val snap = withTimeoutOrNull(2_000L) { docRef.get(Source.SERVER).await() }
+                    snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("senderId") == uid
+                }.getOrDefault(false)
+                if (alreadyOnServer) {
+                    return Result.success(docRef.id)
+                }
+            }
             if (!isGroupMessage) {
                 val msg = e.message.orEmpty()
                 if (msg.contains("PERMISSION_DENIED", ignoreCase = true) ||

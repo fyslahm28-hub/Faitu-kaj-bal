@@ -111,7 +111,7 @@ fun ensureFirebaseInitialized(context: Context): Boolean {
                     val fallbackOptions = FirebaseOptions.Builder()
                         .setProjectId(decodeB64("Z2VuLWxhbmctY2xpZW50LTAwNDgwNTk5NDQ="))
                         .setApplicationId(decodeB64("MTo2Mjk1ODY3NDk1NDc6YW5kcm9pZDo3MDAwZDQyN2Y4ZWY5NTJiMjkyOTJl"))
-                        .setApiKey(decodeB64("QUl6YVN5QTc0MWQzbkZQamE1R2lwZ1E0b0EwU1duckN5c2ZBVlRr"))
+                        .setApiKey(decodeB64("QUl6YVN5QTc0MWQzbkZQamE1R2lwZ1E0b0EwU1duclN5c2ZBVlRr"))
                         .setGcmSenderId(decodeB64("NjI5NTg2NzQ5NTQ3"))
                         .setStorageBucket(decodeB64("Z2VuLWxhbmctY2xpZW50LTAwNDgwNTk5NDQuZmlyZWJhc2VzdG9yYWdlLmFwcA=="))
                         .build()

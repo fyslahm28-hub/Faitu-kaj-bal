@@ -286,24 +286,32 @@ object FirestoreConnectionMonitor {
     }
 }
 
+const val DEFAULT_NAMED_FIRESTORE_DATABASE_ID = "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c"
+
 /**
  * Returns a [FirebaseFirestore] instance configured with native SQLite [PersistentCacheSettings]
  * (100 MB disk cache) before its first operation so cached Feed, Profile, Notification, and
  * Application snapshots load within < 1 second across app restarts and offline sessions, while
  * falling back safely to [MemoryCacheSettings] if disk cache initialization is unavailable.
  */
-fun getConfiguredFirestoreInstance(databaseId: String = ""): FirebaseFirestore {
-    val cleanId = databaseId.trim()
-    val db = runCatching {
-        if (cleanId.isNotBlank() && cleanId != "(default)") {
-            FirebaseFirestore.getInstance(cleanId)
+fun getConfiguredFirestoreInstance(databaseId: String = DEFAULT_NAMED_FIRESTORE_DATABASE_ID): FirebaseFirestore {
+    val cleanId = databaseId.trim().let { raw ->
+        if (raw.isBlank() || raw == "(default)") {
+            DEFAULT_NAMED_FIRESTORE_DATABASE_ID
         } else {
+            raw
+        }
+    }
+    val db = runCatching {
+        FirebaseFirestore.getInstance(cleanId)
+    }.getOrElse {
+        runCatching {
+            FirebaseFirestore.getInstance(DEFAULT_NAMED_FIRESTORE_DATABASE_ID)
+        }.getOrElse {
             FirebaseFirestore.getInstance()
         }
-    }.getOrElse {
-        FirebaseFirestore.getInstance()
     }
-    val cacheKey = cleanId.ifBlank { "(default)" }
+    val cacheKey = cleanId.ifBlank { DEFAULT_NAMED_FIRESTORE_DATABASE_ID }
     if (configuredFirestoreDatabases.putIfAbsent(cacheKey, true) == null) {
         val appliedPersistent = runCatching {
             val persistentCache = PersistentCacheSettings.newBuilder()
