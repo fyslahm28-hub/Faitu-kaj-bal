@@ -63,6 +63,36 @@ data class FailedMessageDraft(
     val timestampMs: Long = System.currentTimeMillis()
 )
 
+data class FailedPostDraft(
+    val postId: String,
+    val authorName: String,
+    val postType: String,
+    val title: String,
+    val district: String,
+    val upazilaOrLocation: String,
+    val designation: String,
+    val qualification: String,
+    val salaryOrExperience: String,
+    val deadlineOrPreferredDistricts: String,
+    val description: String,
+    val contactNumber: String,
+    val khedmotCategories: List<String> = emptyList(),
+    val customCategory: String = "",
+    val imageUrls: List<String> = emptyList(),
+    val timestampMs: Long = System.currentTimeMillis()
+)
+
+data class FailedApplicationDraft(
+    val submissionId: String,
+    val post: FeedPost,
+    val applicantName: String,
+    val applicantQualification: String,
+    val applicantExperience: String,
+    val applicantPhone: String,
+    val coverNote: String,
+    val timestampMs: Long = System.currentTimeMillis()
+)
+
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>
     data class Success<T>(val data: T) : UiState<T>
@@ -139,8 +169,22 @@ class QawmiViewModel(
     private val _failedMessageDraft = MutableStateFlow<FailedMessageDraft?>(null)
     val failedMessageDraft: StateFlow<FailedMessageDraft?> = _failedMessageDraft.asStateFlow()
 
+    private val _failedPostDraft = MutableStateFlow<FailedPostDraft?>(null)
+    val failedPostDraft: StateFlow<FailedPostDraft?> = _failedPostDraft.asStateFlow()
+
+    private val _failedApplicationDraft = MutableStateFlow<FailedApplicationDraft?>(null)
+    val failedApplicationDraft: StateFlow<FailedApplicationDraft?> = _failedApplicationDraft.asStateFlow()
+
     fun clearFailedMessageDraft() {
         _failedMessageDraft.value = null
+    }
+
+    fun clearFailedPostDraft() {
+        _failedPostDraft.value = null
+    }
+
+    fun clearFailedApplicationDraft() {
+        _failedApplicationDraft.value = null
     }
 
     fun cancelSubmittingIfStuck() {
@@ -325,6 +369,7 @@ class QawmiViewModel(
 
     private val _adminDataRefreshToken = MutableStateFlow(0)
     private val _localOptimisticPosts = MutableStateFlow<List<FeedPost>>(emptyList())
+    private val _rolledBackPostIds = MutableStateFlow<Set<String>>(emptySet())
     private val _localPostEngagementOverrides = MutableStateFlow<Map<String, PostEngagementOverride>>(emptyMap())
     private val _localAdminPostOverrides = MutableStateFlow<Map<String, AdminPostOverride>>(emptyMap())
     private val _localAdminMadrasaVerificationOverrides = MutableStateFlow<Map<String, Boolean>>(emptyMap())
@@ -333,6 +378,7 @@ class QawmiViewModel(
     private val _localOptimisticComments = MutableStateFlow<List<FeedComment>>(emptyList())
     private val _locallyDeletedCommentIds = MutableStateFlow<Set<String>>(emptySet())
     private val _localOptimisticSubmissions = MutableStateFlow<List<KhedmotSubmission>>(emptyList())
+    private val _rolledBackSubmissionIds = MutableStateFlow<Set<String>>(emptySet())
     private val _localOptimisticMessages = MutableStateFlow<List<DirectMessage>>(emptyList())
 
     private val _localIntelligenceConfigOverride = MutableStateFlow<IntelligenceConfig?>(null)
@@ -359,13 +405,15 @@ class QawmiViewModel(
     private val rawMergedFeedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
         repository.observePublicFeedPosts(),
         _localOptimisticPosts,
+        _rolledBackPostIds,
         _localPostEngagementOverrides,
         _localAdminPostOverrides
-    ) { remotePosts, optimisticPosts, engagementOverrides, adminOverrides ->
-        val remoteIds = remotePosts.map { it.id }.toSet()
+    ) { remotePosts, optimisticPosts, rolledBackIds, engagementOverrides, adminOverrides ->
+        val filteredRemotePosts = remotePosts.filterNot { it.id in rolledBackIds }
+        val remoteIds = filteredRemotePosts.map { it.id }.toSet()
         val optimisticById = optimisticPosts.associateBy { it.id }
-        val pendingOptimistic = optimisticPosts.filter { it.id.isNotBlank() && it.id !in remoteIds }
-        val mergedRemote = remotePosts.map { remote ->
+        val pendingOptimistic = optimisticPosts.filter { it.id.isNotBlank() && it.id !in remoteIds && it.id !in rolledBackIds }
+        val mergedRemote = filteredRemotePosts.map { remote ->
             val opt = optimisticById[remote.id]
             val optUpdatedMs = opt?.updatedAt?.toDate()?.time ?: 0L
             val remoteUpdatedMs = remote.updatedAt?.toDate()?.time ?: 0L
@@ -566,11 +614,13 @@ class QawmiViewModel(
             repository.observeMySentSubmissions(currentUserId)
         },
         _localOptimisticSubmissions,
+        _rolledBackSubmissionIds,
         _localAdminSubmissionStatusOverrides
-    ) { remoteList, optimisticList, statusOverrides ->
-        val remoteIds = remoteList.map { it.id }.toSet()
-        val pending = optimisticList.filter { it.id.isNotBlank() && it.id !in remoteIds }
-        val merged = (pending + remoteList)
+    ) { remoteList, optimisticList, rolledBackSubIds, statusOverrides ->
+        val filteredRemote = remoteList.filterNot { it.id in rolledBackSubIds }
+        val remoteIds = filteredRemote.map { it.id }.toSet()
+        val pending = optimisticList.filter { it.id.isNotBlank() && it.id !in remoteIds && it.id !in rolledBackSubIds }
+        val merged = (pending + filteredRemote)
             .distinctBy { it.id }
             .map { sub ->
                 val overrideStatus = statusOverrides[sub.id]
@@ -581,7 +631,7 @@ class QawmiViewModel(
     }
         .catch { e ->
             Log.w(TAG, "Error observing sent submissions", e)
-            val fallback = _localOptimisticSubmissions.value
+            val fallback = _localOptimisticSubmissions.value.filterNot { it.id in _rolledBackSubmissionIds.value }
             if (fallback.isNotEmpty()) {
                 emit(UiState.Success(fallback))
             } else {
@@ -656,7 +706,8 @@ class QawmiViewModel(
         _locallyReadMessageIds,
         _localOptimisticMessages
     ) { list, locallyReadIds, optimisticMsgs ->
-        val remoteIds = list.map { it.id }.toSet()
+        val remoteById = list.associateBy { it.id }
+        val remoteIds = remoteById.keys
         val optimisticById = optimisticMsgs.associateBy { it.id }
         val pendingOptimistic = optimisticMsgs.filter { it.id.isNotBlank() && it.id !in remoteIds }
         val combinedList = pendingOptimistic + list
@@ -669,26 +720,55 @@ class QawmiViewModel(
             }
             .distinctBy { it.id }
             .map { msg ->
-                val localOverrideState = optimisticById[msg.id]?.localDeliveryState.orEmpty()
-                val isDeliveredOrSeenRemotely = msg.id in remoteIds && (
+                val localOverrideState = optimisticById[msg.id]?.localDeliveryState.orEmpty().uppercase()
+                val remoteState = remoteById[msg.id]?.localDeliveryState.orEmpty().uppercase()
+                val isGroupMsg = msg.groupId.isNotBlank() || msg.receiverId.startsWith("GROUP:", ignoreCase = true)
+
+                val isReadRemotely = msg.id in remoteIds && (
                     msg.isRead ||
-                        msg.readByUserIds.any { it.isNotBlank() && it != currentUserId }
+                        remoteState == "READ" ||
+                        remoteState == "SEEN" ||
+                        if (isGroupMsg) {
+                            msg.readByUserIds.any { token ->
+                                token.isNotBlank() &&
+                                    token != currentUserId &&
+                                    !token.startsWith("DELIVERED:", ignoreCase = true)
+                            }
+                        } else {
+                            msg.receiverId.isNotBlank() && msg.readByUserIds.contains(msg.receiverId)
+                        }
                     )
-                val isSentByMe = msg.senderId == currentUserId
-                val isConfirmedOnServer = msg.id in remoteIds && msg.localDeliveryState != "SENDING"
+
+                val isDeliveredRemotely = msg.id in remoteIds && (
+                    remoteState == "DELIVERED" ||
+                        if (isGroupMsg) {
+                            msg.readByUserIds.any { token ->
+                                token.startsWith("DELIVERED:", ignoreCase = true) &&
+                                    !token.equals("DELIVERED:$currentUserId", ignoreCase = true)
+                            }
+                        } else {
+                            msg.receiverId.isNotBlank() && msg.readByUserIds.contains("DELIVERED:${msg.receiverId}")
+                        }
+                    )
+
+                val isConfirmedOnServer = msg.id in remoteIds &&
+                    remoteState != "SENDING" &&
+                    remoteState != "FAILED"
+
                 val resolvedState = when {
-                    localOverrideState == "FAILED" && !isDeliveredOrSeenRemotely && !isConfirmedOnServer -> "FAILED"
-                    isDeliveredOrSeenRemotely || localOverrideState == "DELIVERED" || (isSentByMe && isConfirmedOnServer) -> "DELIVERED"
-                    localOverrideState == "SENT" || msg.id in remoteIds -> "SENT"
-                    localOverrideState == "SENDING" -> "SENDING"
-                    else -> "SENT"
+                    localOverrideState == "FAILED" && !isReadRemotely && !isDeliveredRemotely && !isConfirmedOnServer -> "FAILED"
+                    isReadRemotely || localOverrideState == "READ" || localOverrideState == "SEEN" -> "READ"
+                    isDeliveredRemotely || localOverrideState == "DELIVERED" -> "DELIVERED"
+                    isConfirmedOnServer || localOverrideState == "SENT" -> "SENT"
+                    localOverrideState == "SENDING" || remoteState == "SENDING" -> "SENDING"
+                    else -> "SENDING"
                 }
                 if (locallyReadIds.contains(msg.id)) {
                     msg.copy(
                         isRead = true,
                         readByUserIds = (msg.readByUserIds + currentUserId).distinct()
                     ).apply {
-                        localDeliveryState = resolvedState
+                        localDeliveryState = if (msg.senderId == currentUserId) resolvedState else "READ"
                     }
                 } else {
                     msg.copy().apply {
@@ -896,6 +976,8 @@ class QawmiViewModel(
 
     private val acknowledgedDeliveredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val inFlightMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val inFlightPostIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val inFlightSubmissionIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val recoveredPendingSyncIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val pendingOutgoingQueue = java.util.concurrent.ConcurrentHashMap<String, FailedMessageDraft>()
 
@@ -922,10 +1004,13 @@ class QawmiViewModel(
             messagesState.collect { state ->
                 val list = (state as? UiState.Success)?.data ?: return@collect
 
-                // 1. Clean up local optimistic entries that are now confirmed and no longer in-flight
+                // 1. Clean up local optimistic entries that are now confirmed on server and no longer in-flight
                 val confirmedOwnIds = list.filter { msg ->
                     msg.senderId == currentUserId &&
-                        (msg.localDeliveryState == "SENT" || msg.localDeliveryState == "DELIVERED") &&
+                        (msg.localDeliveryState == "SENT" ||
+                            msg.localDeliveryState == "DELIVERED" ||
+                            msg.localDeliveryState == "READ" ||
+                            msg.localDeliveryState == "SEEN") &&
                         msg.id !in inFlightMessageIds
                 }.map { it.id }.toSet()
                 if (confirmedOwnIds.isNotEmpty()) {
@@ -957,8 +1042,12 @@ class QawmiViewModel(
                         !msg.readByUserIds.contains(deliveredToken)
                 }
                 if (unacknowledged.isNotEmpty()) {
-                    unacknowledged.forEach { acknowledgedDeliveredIds.add(it.id) }
-                    repository.acknowledgeMessagesDelivered(unacknowledged)
+                    val ackIds = unacknowledged.map { it.id }
+                    ackIds.forEach { acknowledgedDeliveredIds.add(it) }
+                    val ackRes = repository.acknowledgeMessagesDelivered(unacknowledged)
+                    if (ackRes.isFailure) {
+                        ackIds.forEach { acknowledgedDeliveredIds.remove(it) }
+                    }
                 }
             }
         }
@@ -1316,6 +1405,7 @@ class QawmiViewModel(
         khedmotCategories: List<String> = emptyList(),
         customCategory: String = "",
         imageUrls: List<String> = emptyList(),
+        existingPostId: String = "",
         onSuccessNavigate: () -> Unit = {}
     ) {
         if (KhedmotCategoryHelper.CAT_OTHER in khedmotCategories && customCategory.trim().isBlank()) {
@@ -1361,10 +1451,22 @@ class QawmiViewModel(
         val resolvedDeadline = deadlineOrPreferredDistricts.ifBlank { if (postType == "GENERAL_POST") "" else "চলমান" }
         val resolvedPhoto = resolveActorPhotoUrl()
 
-        val postId = runCatching { repository.generateFeedPostDocumentId() }
-            .getOrDefault("")
-            .ifBlank { "post_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        val postId = existingPostId.trim().ifBlank {
+            runCatching { repository.generateFeedPostDocumentId() }
+                .getOrDefault("")
+                .ifBlank { "post_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        }
+
+        // Prevent duplicate concurrent in-flight dispatches of the same postId
+        if (!inFlightPostIds.add(postId)) {
+            return
+        }
+
         val nowTimestamp = Timestamp.now()
+        _rolledBackPostIds.value = _rolledBackPostIds.value - postId
+        if (postType == "SEEKER_APPLICATION") {
+            _rolledBackSubmissionIds.value = _rolledBackSubmissionIds.value - "app_$postId"
+        }
 
         val optimisticPost = FeedPost(
             id = postId,
@@ -1389,8 +1491,25 @@ class QawmiViewModel(
             updatedAt = nowTimestamp
         )
 
-        // Immediately insert into feed state so the user sees their post right away (< 1 frame)
-        _localOptimisticPosts.value = (listOf(optimisticPost) + _localOptimisticPosts.value).distinctBy { it.id }
+        val postDraft = FailedPostDraft(
+            postId = postId,
+            authorName = resolvedAuthorName,
+            postType = postType,
+            title = resolvedTitle,
+            district = resolvedDistrict,
+            upazilaOrLocation = resolvedUpazila,
+            designation = resolvedDesignation,
+            qualification = qualification,
+            salaryOrExperience = resolvedSalary,
+            deadlineOrPreferredDistricts = resolvedDeadline,
+            description = description,
+            contactNumber = contactNumber,
+            khedmotCategories = khedmotCategories,
+            customCategory = customCategory,
+            imageUrls = cleanImageUrls
+        )
+
+        _localOptimisticPosts.value = (listOf(optimisticPost) + _localOptimisticPosts.value.filterNot { it.id == postId }).distinctBy { it.id }
 
         if (postType == "SEEKER_APPLICATION") {
             val optimisticSubmission = KhedmotSubmission(
@@ -1409,49 +1528,126 @@ class QawmiViewModel(
                 createdAt = nowTimestamp,
                 updatedAt = nowTimestamp
             )
-            _localOptimisticSubmissions.value = (listOf(optimisticSubmission) + _localOptimisticSubmissions.value).distinctBy { it.id }
+            _localOptimisticSubmissions.value = (listOf(optimisticSubmission) + _localOptimisticSubmissions.value.filterNot { it.id == "app_$postId" }).distinctBy { it.id }
         }
 
-        // Navigate to feed immediately before setting feedback banner so clearBanners() doesn't wipe it
+        _errorBanner.value = null
+        _feedbackBanner.value = null
         onSuccessNavigate()
-        _feedbackBanner.value = when (postType) {
-            "JOB_CIRCULAR" -> "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।"
-            "GENERAL_POST" -> "আলহামদুলিল্লাহ, আপনার দ্বীনি পোস্টটি ফিডে প্রকাশিত হয়েছে।"
-            else -> "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদনটি ফিডে প্রকাশিত হয়েছে।"
-        }
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val result = repository.createFeedPost(
-                authorName = resolvedAuthorName,
-                postType = postType,
-                title = resolvedTitle,
-                district = resolvedDistrict,
-                upazilaOrLocation = resolvedUpazila,
-                designation = resolvedDesignation,
-                qualification = qualification,
-                salaryOrExperience = resolvedSalary,
-                deadlineOrPreferredDistricts = resolvedDeadline,
-                description = description,
-                contactNumber = contactNumber,
-                authorPhotoUrl = resolvedPhoto,
-                khedmotCategories = khedmotCategories,
-                customCategory = customCategory,
-                imageUrls = cleanImageUrls,
-                preallocatedPostId = postId
-            )
-            result.onFailure { err ->
-                if (!isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+            try {
+                val result = repository.createFeedPost(
+                    authorName = resolvedAuthorName,
+                    postType = postType,
+                    title = resolvedTitle,
+                    district = resolvedDistrict,
+                    upazilaOrLocation = resolvedUpazila,
+                    designation = resolvedDesignation,
+                    qualification = qualification,
+                    salaryOrExperience = resolvedSalary,
+                    deadlineOrPreferredDistricts = resolvedDeadline,
+                    description = description,
+                    contactNumber = contactNumber,
+                    authorPhotoUrl = resolvedPhoto,
+                    khedmotCategories = khedmotCategories,
+                    customCategory = customCategory,
+                    imageUrls = cleanImageUrls,
+                    preallocatedPostId = postId
+                )
+                result.onSuccess {
+                    if (_failedPostDraft.value?.postId == postId) {
+                        _failedPostDraft.value = null
+                    }
+                    _feedbackBanner.value = when (postType) {
+                        "JOB_CIRCULAR" -> "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।"
+                        "GENERAL_POST" -> "আলহামদুলিল্লাহ, আপনার দ্বীনি পোস্টটি ফিডে প্রকাশিত হয়েছে।"
+                        else -> "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদনটি ফিডে প্রকাশিত হয়েছে।"
+                    }
+                }.onFailure { err ->
+                    _rolledBackPostIds.value = _rolledBackPostIds.value + postId
                     _localOptimisticPosts.value = _localOptimisticPosts.value.filterNot { it.id == postId }
                     if (postType == "SEEKER_APPLICATION") {
+                        _rolledBackSubmissionIds.value = _rolledBackSubmissionIds.value + "app_$postId"
                         _localOptimisticSubmissions.value = _localOptimisticSubmissions.value.filterNot { it.id == "app_$postId" }
                     }
-                    _errorBanner.value = err.localizedMessage ?: "প্রকাশ করতে সমস্যা হয়েছে।"
-                } else {
-                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
+                    _failedPostDraft.value = postDraft
+                    _feedbackBanner.value = null
+                    _errorBanner.value = err.localizedMessage ?: "পোস্ট প্রকাশ করতে সমস্যা হয়েছে। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _rolledBackPostIds.value = _rolledBackPostIds.value + postId
+                _localOptimisticPosts.value = _localOptimisticPosts.value.filterNot { it.id == postId }
+                if (postType == "SEEKER_APPLICATION") {
+                    _rolledBackSubmissionIds.value = _rolledBackSubmissionIds.value + "app_$postId"
+                    _localOptimisticSubmissions.value = _localOptimisticSubmissions.value.filterNot { it.id == "app_$postId" }
+                }
+                _failedPostDraft.value = postDraft
+                _feedbackBanner.value = null
+                _errorBanner.value = e.localizedMessage ?: "পোস্ট প্রকাশ করতে সমস্যা হয়েছে। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
+            } finally {
+                inFlightPostIds.remove(postId)
             }
         }
     }
+
+    /**
+     * Retries the last failed post idempotently using its original preallocated document ID
+     * so duplicate posts are never created.
+     */
+    fun retryLastFailedPost(onSuccessNavigate: () -> Unit = {}) {
+        val draft = _failedPostDraft.value ?: return
+        publishFeedPost(
+            authorName = draft.authorName,
+            postType = draft.postType,
+            title = draft.title,
+            district = draft.district,
+            upazilaOrLocation = draft.upazilaOrLocation,
+            designation = draft.designation,
+            qualification = draft.qualification,
+            salaryOrExperience = draft.salaryOrExperience,
+            deadlineOrPreferredDistricts = draft.deadlineOrPreferredDistricts,
+            description = draft.description,
+            contactNumber = draft.contactNumber,
+            khedmotCategories = draft.khedmotCategories,
+            customCategory = draft.customCategory,
+            imageUrls = draft.imageUrls,
+            existingPostId = draft.postId,
+            onSuccessNavigate = onSuccessNavigate
+        )
+    }
+
+    fun updateFeedPost(
+        post: FeedPost,
+        title: String,
+        district: String,
+        upazilaOrLocation: String,
+        designation: String,
+        qualification: String,
+        salaryOrExperience: String,
+        deadlineOrPreferredDistricts: String,
+        description: String,
+        contactNumber: String,
+        khedmotCategories: List<String> = post.khedmotCategories,
+        customCategory: String = post.customCategory,
+        imageUrls: List<String> = post.imageUrls
+    ) = updateOwnPost(
+        post = post,
+        title = title,
+        district = district,
+        upazilaOrLocation = upazilaOrLocation,
+        designation = designation,
+        qualification = qualification,
+        salaryOrExperience = salaryOrExperience,
+        deadlineOrPreferredDistricts = deadlineOrPreferredDistricts,
+        description = description,
+        contactNumber = contactNumber,
+        khedmotCategories = khedmotCategories,
+        customCategory = customCategory,
+        imageUrls = imageUrls
+    )
 
     fun updateOwnPost(
         post: FeedPost,
@@ -1477,6 +1673,9 @@ class QawmiViewModel(
             _errorBanner.value = "একটি পোস্টে সর্বোচ্চ ৫টি ছবি যুক্ত করা যাবে।"
             return
         }
+        if (!inFlightPostIds.add(post.id)) {
+            return
+        }
 
         val previousOptimisticList = _localOptimisticPosts.value
         val updatedPost = post.copy(
@@ -1496,31 +1695,41 @@ class QawmiViewModel(
             updatedAt = Timestamp.now()
         )
         _localOptimisticPosts.value = (listOf(updatedPost) + previousOptimisticList.filterNot { it.id == post.id }).distinctBy { it.id }
-        _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পোস্টটি সফলভাবে হালনাগাদ হয়েছে।"
+        _errorBanner.value = null
+        _feedbackBanner.value = null
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val res = repository.updateOwnFeedPost(
-                post = post,
-                title = title,
-                district = district,
-                upazilaOrLocation = upazilaOrLocation,
-                designation = designation,
-                qualification = qualification,
-                salaryOrExperience = salaryOrExperience,
-                deadlineOrPreferredDistricts = deadlineOrPreferredDistricts,
-                description = description,
-                contactNumber = contactNumber,
-                khedmotCategories = khedmotCategories,
-                customCategory = customCategory,
-                imageUrls = cleanImageUrls
-            )
-            res.onFailure { err ->
-                if (!isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+            try {
+                val res = repository.updateOwnFeedPost(
+                    post = post,
+                    title = title,
+                    district = district,
+                    upazilaOrLocation = upazilaOrLocation,
+                    designation = designation,
+                    qualification = qualification,
+                    salaryOrExperience = salaryOrExperience,
+                    deadlineOrPreferredDistricts = deadlineOrPreferredDistricts,
+                    description = description,
+                    contactNumber = contactNumber,
+                    khedmotCategories = khedmotCategories,
+                    customCategory = customCategory,
+                    imageUrls = cleanImageUrls
+                )
+                res.onSuccess {
+                    _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পোস্টটি সফলভাবে হালনাগাদ হয়েছে।"
+                }.onFailure { err ->
                     _localOptimisticPosts.value = previousOptimisticList
-                    _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ করা যায়নি।"
-                } else {
-                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
+                    _feedbackBanner.value = null
+                    _errorBanner.value = err.localizedMessage ?: "পোস্ট হালনাগাদ করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _localOptimisticPosts.value = previousOptimisticList
+                _feedbackBanner.value = null
+                _errorBanner.value = e.localizedMessage ?: "পোস্ট হালনাগাদ করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
+            } finally {
+                inFlightPostIds.remove(post.id)
             }
         }
     }
@@ -1678,6 +1887,8 @@ class QawmiViewModel(
         }
     }
 
+    fun shareFeedPostToFeed(post: FeedPost, caption: String = "") = sharePostInApp(post, caption)
+
     fun sharePostInApp(post: FeedPost, caption: String) {
         val sharerName = resolveActorDisplayName("সম্মানিত দ্বীনি ভাই")
         val sharerPhoto = ProfilePhotoHelper.compactSenderPhotoForMessage(resolveActorPhotoUrl())
@@ -1698,7 +1909,11 @@ class QawmiViewModel(
         val newSharedPostId = runCatching { repository.generateFeedPostDocumentId() }
             .getOrDefault("")
             .ifBlank { "share_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        if (!inFlightPostIds.add(newSharedPostId)) {
+            return
+        }
         val nowTimestamp = Timestamp.now()
+        _rolledBackPostIds.value = _rolledBackPostIds.value - newSharedPostId
 
         val optimisticSharedPost = FeedPost(
             id = newSharedPostId,
@@ -1728,38 +1943,64 @@ class QawmiViewModel(
             updatedAt = nowTimestamp
         )
 
-        _localOptimisticPosts.value = (listOf(optimisticSharedPost) + _localOptimisticPosts.value).distinctBy { it.id }
+        _localOptimisticPosts.value = (listOf(optimisticSharedPost) + _localOptimisticPosts.value.filterNot { it.id == newSharedPostId }).distinctBy { it.id }
 
-        val prevOverride = _localPostEngagementOverrides.value[post.id] ?: PostEngagementOverride()
-        val newExpectedShares = maxOf(post.shareCount + 1, prevOverride.minExpectedShareCount + 1)
+        val prevOverride = _localPostEngagementOverrides.value[post.id]
+        val baseOverride = prevOverride ?: PostEngagementOverride()
+        val newExpectedShares = maxOf(post.shareCount + 1, baseOverride.minExpectedShareCount + 1)
         _localPostEngagementOverrides.value = _localPostEngagementOverrides.value + (
-            post.id to prevOverride.copy(minExpectedShareCount = newExpectedShares)
+            post.id to baseOverride.copy(minExpectedShareCount = newExpectedShares)
             )
-        _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
+        _errorBanner.value = null
+        _feedbackBanner.value = null
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val res = repository.shareFeedPostInApp(
-                originalPost = post,
-                sharerName = sharerName,
-                sharerPhotoUrl = sharerPhoto,
-                sharerDistrict = sharerDistrict,
-                shareCaption = caption,
-                preallocatedPostId = newSharedPostId
-            )
-            res.onSuccess {
-                repository.recordVerifiedEngagementEvent(
-                    post = post,
-                    eventType = EngagementReceipt.EVENT_SHARE,
-                    currentConfig = intelligenceConfigState.value,
-                    currentAffinity = userAffinityState.value
+            try {
+                val res = repository.shareFeedPostInApp(
+                    originalPost = post,
+                    sharerName = sharerName,
+                    sharerPhotoUrl = sharerPhoto,
+                    sharerDistrict = sharerDistrict,
+                    shareCaption = caption,
+                    preallocatedPostId = newSharedPostId
                 )
-            }.onFailure { err ->
-                if (!isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+                res.onSuccess {
+                    _feedbackBanner.value = "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
+                    repository.recordVerifiedEngagementEvent(
+                        post = post,
+                        eventType = EngagementReceipt.EVENT_SHARE,
+                        currentConfig = intelligenceConfigState.value,
+                        currentAffinity = userAffinityState.value
+                    )
+                }.onFailure { err ->
+                    _rolledBackPostIds.value = _rolledBackPostIds.value + newSharedPostId
                     _localOptimisticPosts.value = _localOptimisticPosts.value.filterNot { it.id == newSharedPostId }
-                    _errorBanner.value = err.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি।"
-                } else {
-                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
+                    val rollbackMap = _localPostEngagementOverrides.value.toMutableMap()
+                    if (prevOverride == null) {
+                        rollbackMap.remove(post.id)
+                    } else {
+                        rollbackMap[post.id] = prevOverride
+                    }
+                    _localPostEngagementOverrides.value = rollbackMap
+                    _feedbackBanner.value = null
+                    _errorBanner.value = err.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _rolledBackPostIds.value = _rolledBackPostIds.value + newSharedPostId
+                _localOptimisticPosts.value = _localOptimisticPosts.value.filterNot { it.id == newSharedPostId }
+                val rollbackMap = _localPostEngagementOverrides.value.toMutableMap()
+                if (prevOverride == null) {
+                    rollbackMap.remove(post.id)
+                } else {
+                    rollbackMap[post.id] = prevOverride
+                }
+                _localPostEngagementOverrides.value = rollbackMap
+                _feedbackBanner.value = null
+                _errorBanner.value = e.localizedMessage ?: "পোস্ট শেয়ার করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
+            } finally {
+                inFlightPostIds.remove(newSharedPostId)
             }
         }
     }
@@ -1855,6 +2096,7 @@ class QawmiViewModel(
         applicantExperience: String,
         applicantPhone: String,
         coverNote: String,
+        existingSubmissionId: String = "",
         onComplete: () -> Unit = {}
     ) {
         if (applicantName.isBlank() || applicantPhone.isBlank()) {
@@ -1862,9 +2104,16 @@ class QawmiViewModel(
             return
         }
         clearBanners()
-        val submissionId = runCatching { repository.generateSubmissionDocumentId() }
-            .getOrDefault("")
-            .ifBlank { "sub_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        val submissionId = existingSubmissionId.trim().ifBlank {
+            runCatching { repository.generateSubmissionDocumentId() }
+                .getOrDefault("")
+                .ifBlank { "sub_${currentUserId.take(6)}_${System.currentTimeMillis()}" }
+        }
+        if (!inFlightSubmissionIds.add(submissionId)) {
+            return
+        }
+        _rolledBackSubmissionIds.value = _rolledBackSubmissionIds.value - submissionId
+
         val nowTs = Timestamp.now()
         val optimisticSub = KhedmotSubmission(
             id = submissionId,
@@ -1882,39 +2131,81 @@ class QawmiViewModel(
             createdAt = nowTs,
             updatedAt = nowTs
         )
-        _localOptimisticSubmissions.value = (listOf(optimisticSub) + _localOptimisticSubmissions.value).distinctBy { it.id }
+        val appDraft = FailedApplicationDraft(
+            submissionId = submissionId,
+            post = post,
+            applicantName = applicantName,
+            applicantQualification = applicantQualification,
+            applicantExperience = applicantExperience,
+            applicantPhone = applicantPhone,
+            coverNote = coverNote
+        )
+
+        _localOptimisticSubmissions.value = (listOf(optimisticSub) + _localOptimisticSubmissions.value.filterNot { it.id == submissionId }).distinctBy { it.id }
         _selectedPostForApply.value = null
         onComplete()
-        _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদন সংশ্লিষ্ট মাদরাসায় প্রেরিত হয়েছে।"
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val result = repository.submitApplicationToCircular(
-                post = post,
-                applicantName = applicantName,
-                applicantQualification = applicantQualification,
-                applicantExperience = applicantExperience,
-                applicantPhone = applicantPhone,
-                coverNote = coverNote,
-                preallocatedSubmissionId = submissionId
-            )
-            result.onSuccess {
-                runCatching {
-                    repository.recordVerifiedEngagementEvent(
-                        post = post,
-                        eventType = EngagementReceipt.EVENT_APPLY,
-                        currentConfig = intelligenceConfigState.value,
-                        currentAffinity = userAffinityState.value
-                    )
-                }
-            }.onFailure { err ->
-                if (!com.example.data.repository.isRetryableFirestoreMessageError(err) && err !is TimeoutCancellationException) {
+            try {
+                val result = repository.submitApplicationToCircular(
+                    post = post,
+                    applicantName = applicantName,
+                    applicantQualification = applicantQualification,
+                    applicantExperience = applicantExperience,
+                    applicantPhone = applicantPhone,
+                    coverNote = coverNote,
+                    preallocatedSubmissionId = submissionId
+                )
+                result.onSuccess {
+                    if (_failedApplicationDraft.value?.submissionId == submissionId) {
+                        _failedApplicationDraft.value = null
+                    }
+                    _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার খেদমতের আবেদন সংশ্লিষ্ট মাদরাসায় প্রেরিত হয়েছে।"
+                    runCatching {
+                        repository.recordVerifiedEngagementEvent(
+                            post = post,
+                            eventType = EngagementReceipt.EVENT_APPLY,
+                            currentConfig = intelligenceConfigState.value,
+                            currentAffinity = userAffinityState.value
+                        )
+                    }
+                }.onFailure { err ->
+                    _rolledBackSubmissionIds.value = _rolledBackSubmissionIds.value + submissionId
                     _localOptimisticSubmissions.value = _localOptimisticSubmissions.value.filterNot { it.id == submissionId }
-                    _errorBanner.value = err.localizedMessage ?: "আবেদন প্রেরণে ত্রুটি হয়েছে।"
-                } else {
-                    runCatching { repository.ensureLiveConnectionActive(forceTokenRefresh = false) }
+                    _failedApplicationDraft.value = appDraft
+                    _feedbackBanner.value = null
+                    _errorBanner.value = err.localizedMessage ?: "আবেদন প্রেরণে ত্রুটি হয়েছে। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _rolledBackSubmissionIds.value = _rolledBackSubmissionIds.value + submissionId
+                _localOptimisticSubmissions.value = _localOptimisticSubmissions.value.filterNot { it.id == submissionId }
+                _failedApplicationDraft.value = appDraft
+                _feedbackBanner.value = null
+                _errorBanner.value = e.localizedMessage ?: "আবেদন প্রেরণে ত্রুটি হয়েছে। অনুগ্রহ করে পুনরায় চেষ্টা করুন।"
+            } finally {
+                inFlightSubmissionIds.remove(submissionId)
             }
         }
+    }
+
+    /**
+     * Retries the last failed Khedmot application idempotently using its original preallocated
+     * submission document ID so duplicate applications are never created.
+     */
+    fun retryLastFailedApplication(onComplete: () -> Unit = {}) {
+        val draft = _failedApplicationDraft.value ?: return
+        submitKhedmotApplication(
+            post = draft.post,
+            applicantName = draft.applicantName,
+            applicantQualification = draft.applicantQualification,
+            applicantExperience = draft.applicantExperience,
+            applicantPhone = draft.applicantPhone,
+            coverNote = draft.coverNote,
+            existingSubmissionId = draft.submissionId,
+            onComplete = onComplete
+        )
     }
 
     fun updateReceivedSubmissionStatus(submission: KhedmotSubmission, newStatus: String) {
@@ -2016,7 +2307,7 @@ class QawmiViewModel(
             readByUserIds = initialReadBy,
             createdAt = existingCreatedAt
         ).apply {
-            localDeliveryState = "SENT"
+            localDeliveryState = "SENDING"
         }
 
         // Insert or update in-place by messageId so retrying NEVER duplicates the message
@@ -2059,10 +2350,7 @@ class QawmiViewModel(
                 )
 
                 val failure = sendResult.exceptionOrNull()
-                if (sendResult.isSuccess ||
-                    failure is TimeoutCancellationException ||
-                    com.example.data.repository.isRetryableFirestoreMessageError(failure)
-                ) {
+                if (sendResult.isSuccess) {
                     val finalId = sendResult.getOrNull()?.ifBlank { messageId } ?: messageId
                     inFlightMessageIds.remove(messageId)
                     inFlightMessageIds.remove(finalId)
@@ -2071,17 +2359,13 @@ class QawmiViewModel(
                     if (_failedMessageDraft.value?.messageId == finalId || _failedMessageDraft.value?.partnerId == receiverId) {
                         _failedMessageDraft.value = null
                     }
-                    val deliveredMsg = optimisticMsg.copy(id = finalId).apply {
-                        localDeliveryState = "DELIVERED"
+                    // Server write confirmed -> SENT (✓). Will transition to DELIVERED (✓✓) / READ only when recipient device acknowledges.
+                    val sentMsg = optimisticMsg.copy(id = finalId).apply {
+                        localDeliveryState = "SENT"
                     }
                     _localOptimisticMessages.value = (
-                        listOf(deliveredMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId || it.id == finalId }
+                        listOf(sentMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId || it.id == finalId }
                     ).distinctBy { it.id }
-
-                    if (failure != null) {
-                        // Wake Firestore gRPC stream silently in the background so queued offline write flushes right away
-                        repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "MESSAGE_SEND_FLUSH")
-                    }
                 } else {
                     inFlightMessageIds.remove(messageId)
                     pendingOutgoingQueue.remove(messageId)
@@ -2097,28 +2381,16 @@ class QawmiViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (com.example.data.repository.isRetryableFirestoreMessageError(e)) {
-                    inFlightMessageIds.remove(messageId)
-                    pendingOutgoingQueue.remove(messageId)
-                    val deliveredMsg = optimisticMsg.copy().apply {
-                        localDeliveryState = "DELIVERED"
-                    }
-                    _localOptimisticMessages.value = (
-                        listOf(deliveredMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
-                    ).distinctBy { it.id }
-                    repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "MESSAGE_SEND_FLUSH")
-                } else {
-                    inFlightMessageIds.remove(messageId)
-                    pendingOutgoingQueue.remove(messageId)
-                    val failedMsg = optimisticMsg.copy().apply {
-                        localDeliveryState = "FAILED"
-                    }
-                    _localOptimisticMessages.value = (
-                        listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
-                    ).distinctBy { it.id }
-                    _failedMessageDraft.value = queueDraft
-                    _errorBanner.value = e.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
+                inFlightMessageIds.remove(messageId)
+                pendingOutgoingQueue.remove(messageId)
+                val failedMsg = optimisticMsg.copy().apply {
+                    localDeliveryState = "FAILED"
                 }
+                _localOptimisticMessages.value = (
+                    listOf(failedMsg) + _localOptimisticMessages.value.filterNot { it.id == messageId }
+                ).distinctBy { it.id }
+                _failedMessageDraft.value = queueDraft
+                _errorBanner.value = e.localizedMessage ?: "পয়গাম পাঠানো যায়নি। পুনরায় চেষ্টা করুন।"
             } finally {
                 inFlightMessageIds.remove(messageId)
             }

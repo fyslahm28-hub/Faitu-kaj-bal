@@ -3353,6 +3353,30 @@ class QawmiRepository(
                 getTimestamp("createdAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
             }.getOrNull() ?: obj.createdAt ?: Timestamp.now()
             val hasPending = runCatching { metadata.hasPendingWrites() }.getOrDefault(false)
+            val isGroupMsg = resolvedGroupId.isNotBlank() || obj.receiverId.startsWith("GROUP:", ignoreCase = true)
+            val isReadByRecipient = resolvedIsRead || if (isGroupMsg) {
+                resolvedReadBy.any { token ->
+                    token.isNotBlank() &&
+                        token != obj.senderId &&
+                        !token.startsWith("DELIVERED:", ignoreCase = true)
+                }
+            } else {
+                obj.receiverId.isNotBlank() && resolvedReadBy.contains(obj.receiverId)
+            }
+            val isDeliveredToRecipient = if (isGroupMsg) {
+                resolvedReadBy.any { token ->
+                    token.startsWith("DELIVERED:", ignoreCase = true) &&
+                        !token.equals("DELIVERED:${obj.senderId}", ignoreCase = true)
+                }
+            } else {
+                obj.receiverId.isNotBlank() && resolvedReadBy.contains("DELIVERED:${obj.receiverId}")
+            }
+            val computedDeliveryState = when {
+                hasPending -> "SENDING"
+                isReadByRecipient -> "READ"
+                isDeliveredToRecipient -> "DELIVERED"
+                else -> "SENT"
+            }
             obj.copy(
                 id = id,
                 groupId = resolvedGroupId,
@@ -3372,7 +3396,7 @@ class QawmiRepository(
                 isDeletedForEveryone = resolvedDeletedForEveryone,
                 createdAt = resolvedCreatedAt
             ).apply {
-                localDeliveryState = if (hasPending) "SENDING" else "DELIVERED"
+                localDeliveryState = computedDeliveryState
             }
         } catch (_: Throwable) {
             null
@@ -3493,12 +3517,19 @@ class QawmiRepository(
                 }
             }
 
-            val uploadedImages = if (imageUrls.isEmpty()) {
+            val requestedImageItems = imageUrls.map { it.trim() }.filter { it.isNotBlank() }
+                .take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE)
+            val uploadedImages = if (requestedImageItems.isEmpty()) {
                 emptyList()
             } else {
                 ProfilePhotoHelper.uploadChatImagesToFirebaseStorage(
-                    imageItems = imageUrls.take(ProfilePhotoHelper.MAX_CHAT_IMAGES_PER_MESSAGE),
+                    imageItems = requestedImageItems,
                     senderId = uid
+                )
+            }
+            if (requestedImageItems.isNotEmpty() && uploadedImages.size < requestedImageItems.size) {
+                return Result.failure(
+                    IllegalArgumentException("স্থানীয় ফাইল বা অবৈধ ছবি সরাসরি সিঙ্ক করা সম্ভব নয়। অনুগ্রহ করে গ্যালারি থেকে বৈধ ছবি নির্বাচন করে পুনরায় চেষ্টা করুন।")
                 )
             }
             // Keep body strictly as the user's actual text (empty string when sending images without caption)
@@ -3540,12 +3571,23 @@ class QawmiRepository(
                 payload["groupMemberIds"] = finalGroupMembers
             }
 
+            val msgSizeValidation = ProfilePhotoHelper.validateFirestoreDocumentSizeBeforeWrite(
+                documentPath = docRef.path,
+                data = payload
+            )
+            if (msgSizeValidation.isFailure) {
+                return Result.failure(
+                    msgSizeValidation.exceptionOrNull()
+                        ?: IllegalArgumentException("মেসেজের সংযুক্ত ছবির আকার নির্ধারিত সীমা অতিক্রম করেছে। অনুগ্রহ করে কম সংখ্যক বা ছোট আকারের ছবি নির্বাচন করুন।")
+                )
+            }
+
             if (preallocatedMessageId.isNotBlank()) {
-                val cachedExisting = docRef.getFromCacheOnlyOrNull(60L)
-                if (cachedExisting != null &&
-                    cachedExisting.exists() &&
-                    !cachedExisting.metadata.hasPendingWrites() &&
-                    cachedExisting.getString("senderId") == uid
+                val existingSnap = docRef.getCacheFirstOrNull(1_500L)
+                if (existingSnap != null &&
+                    existingSnap.exists() &&
+                    !existingSnap.metadata.hasPendingWrites() &&
+                    existingSnap.getString("senderId") == uid
                 ) {
                     FirestoreConnectionMonitor.onSnapshotReceived(
                         path = "messages",
@@ -3663,10 +3705,9 @@ class QawmiRepository(
         return try {
             val batch = db.batch()
             for (msg in pendingDelivery) {
-                val updatedReadBy = (msg.readByUserIds + deliveredToken).distinct().take(50)
                 batch.update(
                     db.collection("messages").document(msg.id),
-                    mapOf("readByUserIds" to updatedReadBy)
+                    mapOf("readByUserIds" to FieldValue.arrayUnion(deliveredToken))
                 )
             }
             batch.commit().awaitWithTimeout(4_000L)
@@ -3683,12 +3724,32 @@ class QawmiRepository(
         if (messageId.isBlank()) return Result.success(Unit)
         val docRef = db.collection("messages").document(messageId)
         return try {
-            docRef.update(
-                mapOf(
-                    "isRead" to true,
-                    "readByUserIds" to FieldValue.arrayUnion(uid)
+            val snap = docRef.getCacheFirstOrNull(2_000L) ?: docRef.get().awaitWithTimeout(4_000L)
+            if (!snap.exists()) {
+                return Result.failure(IllegalStateException("মেসেজটি সার্ভারে পাওয়া যায়নি।"))
+            }
+            val senderId = snap.getString("senderId").orEmpty()
+            val receiverId = snap.getString("receiverId").orEmpty()
+            val groupMembers = (snap.get("groupMemberIds") as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
+            val isGroupMsg = !snap.getString("groupId").isNullOrBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
+            val isEligibleRecipient = senderId != uid && (if (isGroupMsg) uid in groupMembers else receiverId == uid)
+            if (!isEligibleRecipient) {
+                return Result.failure(
+                    IllegalAccessException("শুধু প্রাপক নিজেই নিজের মেসেজের Delivery বা Read স্ট্যাটাস আপডেট করতে পারবেন।")
                 )
-            ).awaitWithTimeout(6_000L)
+            }
+            if (isGroupMsg) {
+                docRef.update(
+                    mapOf("readByUserIds" to FieldValue.arrayUnion(uid))
+                ).awaitWithTimeout(6_000L)
+            } else {
+                docRef.update(
+                    mapOf(
+                        "isRead" to true,
+                        "readByUserIds" to FieldValue.arrayUnion(uid)
+                    )
+                ).awaitWithTimeout(6_000L)
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

@@ -500,6 +500,7 @@ service cloud.firestore {
                          'isVerified', 'createdAt', 'updatedAt'
                        ]) &&
                        (incoming().isVerified == false || isAdmin()) &&
+                       (incoming().get('accountType', 'khadim') != 'admin' || isAdmin()) &&
                        isValidUserProfile(incoming());
 
       allow update: if isSignedIn() &&
@@ -516,6 +517,9 @@ service cloud.firestore {
                           incoming().userId == existing().userId &&
                           incoming().createdAt == existing().createdAt &&
                           incoming().isVerified == existing().isVerified &&
+                          (incoming().get('accountType', 'khadim') == existing().get('accountType', 'khadim') ||
+                           incoming().get('accountType', 'khadim') != 'admin' ||
+                           isAdmin()) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'fullName', 'accountType', 'district', 'designation',
                             'qualification', 'experience', 'preferredDistricts', 'bio',
@@ -723,6 +727,9 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        isValidId(attachmentId) &&
                        incoming().authorId == request.auth.uid &&
+                       (!exists(/databases/$(database)/documents/feed_posts/$(incoming().postId)) ||
+                        get(/databases/$(database)/documents/feed_posts/$(incoming().postId)).data.authorId == request.auth.uid ||
+                        isAdmin()) &&
                        incoming().keys().hasAll([
                          'postId', 'authorId', 'attachmentType', 'mimeType',
                          'sizeBytes', 'visibility', 'createdAt', 'updatedAt'
@@ -739,12 +746,13 @@ service cloud.firestore {
                        isValidFeedPostExtendedAttachment(incoming()) &&
                        incoming().postId == existing().postId &&
                        incoming().authorId == existing().authorId &&
-                       incoming().createdAt == existing().createdAt && (
+                       (incoming().createdAt == existing().createdAt ||
+                        (request.auth.uid == existing().authorId && isValidTimestamp(incoming().createdAt))) && (
                          (request.auth.uid == existing().authorId &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'attachmentType', 'mimeType', 'fileName', 'downloadUrl',
                             'extendedText', 'mediaDataUrl', 'sizeBytes',
-                            'visibility', 'updatedAt'
+                            'visibility', 'createdAt', 'updatedAt'
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -880,6 +888,14 @@ service cloud.firestore {
                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
                          (request.auth.uid == existing().applicantId &&
                           incoming().applicantId == existing().applicantId &&
+                          incoming().postId == existing().postId &&
+                          incoming().recipientId == existing().recipientId &&
+                          incoming().status == existing().status &&
+                          incoming().createdAt == existing().createdAt &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'applicantName', 'applicantQualification', 'applicantExperience',
+                            'applicantPhone', 'coverNote', 'updatedAt'
+                          ]) &&
                           isValidKhedmotSubmission(incoming()))
                        );
 
@@ -922,6 +938,7 @@ service cloud.firestore {
                        isValidChatGroup(incoming()) &&
                        (incoming().get('groupId', groupId) == existing().get('groupId', groupId)) &&
                        incoming().creatorId == existing().creatorId &&
+                       (existing().creatorId in incoming().memberIds) &&
                        incoming().createdAt == existing().createdAt &&
                        (existing().creatorId == request.auth.uid ||
                         request.auth.uid in existing().memberIds) &&
@@ -942,6 +959,38 @@ service cloud.firestore {
                (groupMembers is list && request.auth.uid in groupMembers);
       }
 
+      function isVerifiedGroupParticipant(groupId) {
+        return groupId is string &&
+               groupId.size() >= 1 &&
+               groupId.size() <= 128 &&
+               exists(/databases/$(database)/documents/chat_groups/$(groupId)) &&
+               (get(/databases/$(database)/documents/chat_groups/$(groupId)).data.creatorId == request.auth.uid ||
+                request.auth.uid in get(/databases/$(database)/documents/chat_groups/$(groupId)).data.get('memberIds', []));
+      }
+
+      function isValidRecipientReadByUpdate(incReadBy, extReadBy) {
+        return incReadBy is list &&
+               extReadBy is list &&
+               incReadBy.size() <= 50 &&
+               incReadBy.hasAll(extReadBy) &&
+               incReadBy.removeAll(extReadBy).hasOnly([request.auth.uid, 'DELIVERED:' + request.auth.uid]);
+      }
+
+      function isValidSelfDeletedIdsUpdate(incDeletedIds, extDeletedIds) {
+        return incDeletedIds is list &&
+               extDeletedIds is list &&
+               incDeletedIds.size() <= 50 &&
+               incDeletedIds.hasAll(extDeletedIds) &&
+               incDeletedIds.removeAll(extDeletedIds).hasOnly([request.auth.uid]);
+      }
+
+      function isValidSelfReactionMapUpdate(incReactions, extReactions) {
+        let incMap = incReactions is map ? incReactions : {};
+        let extMap = extReactions is map ? extReactions : {};
+        return incMap.size() <= 50 &&
+               incMap.diff(extMap).affectedKeys().hasOnly([request.auth.uid]);
+      }
+
       allow get: if isSignedIn() && isValidId(messageId) && (resource == null || isMessageParticipant(existing()));
       allow list: if isSignedIn() && (
                     resource.data.senderId == request.auth.uid ||
@@ -953,9 +1002,11 @@ service cloud.firestore {
                        isValidId(messageId) &&
                        incoming().senderId == request.auth.uid &&
                        incoming().isRead == false &&
+                       incoming().get('readByUserIds', []).hasOnly([request.auth.uid]) &&
                        (
                          ((incoming().get('groupId', '') is string && incoming().get('groupId', '').size() >= 1) &&
-                          (incoming().get('groupMemberIds', []) is list && request.auth.uid in incoming().get('groupMemberIds', []))) ||
+                          (incoming().get('groupMemberIds', []) is list && request.auth.uid in incoming().get('groupMemberIds', [])) &&
+                          isVerifiedGroupParticipant(incoming().get('groupId', ''))) ||
                          (incoming().get('groupId', '') == '' &&
                           incoming().receiverId != request.auth.uid &&
                           !isBlockedBetween(incoming().senderId, incoming().receiverId))
@@ -976,10 +1027,15 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(messageId) &&
                        isMessageParticipant(existing()) &&
+                       (existing().get('groupId', '') == '' || isVerifiedGroupParticipant(existing().get('groupId', ''))) &&
                        incoming().get('senderId', '') == existing().get('senderId', '') &&
                        incoming().get('receiverId', '') == existing().get('receiverId', '') &&
+                       incoming().get('groupId', '') == existing().get('groupId', '') &&
                        (incoming().createdAt == existing().createdAt ||
-                        (request.auth.uid == existing().senderId && isValidTimestamp(incoming().createdAt))) &&
+                        (request.auth.uid == existing().senderId &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         incoming().body == existing().body &&
+                         incoming().get('subject', '') == existing().get('subject', ''))) &&
                        isValidReactionCode(incoming().get('senderReaction', '')) &&
                        isValidReactionCode(incoming().get('receiverReaction', '')) &&
                        (incoming().get('userReactions', {}) is map && incoming().get('userReactions', {}).size() <= 50) &&
@@ -992,6 +1048,13 @@ service cloud.firestore {
                        (incoming().get('isDeletedForEveryone', false) is bool) && (
                          (request.auth.uid != existing().senderId &&
                           incoming().isRead is bool &&
+                          (existing().get('isRead', false) == false || incoming().isRead == true) &&
+                          (!('readByUserIds' in incoming().diff(existing()).affectedKeys()) ||
+                           isValidRecipientReadByUpdate(incoming().get('readByUserIds', []), existing().get('readByUserIds', []))) &&
+                          (!('deletedForUserIds' in incoming().diff(existing()).affectedKeys()) ||
+                           isValidSelfDeletedIdsUpdate(incoming().get('deletedForUserIds', []), existing().get('deletedForUserIds', []))) &&
+                          (!('userReactions' in incoming().diff(existing()).affectedKeys()) ||
+                           isValidSelfReactionMapUpdate(incoming().get('userReactions', {}), existing().get('userReactions', {}))) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'isRead', 'readByUserIds', 'receiverReaction', 'userReactions',
                             'deletedForReceiver', 'deletedForUserIds'
@@ -999,16 +1062,25 @@ service cloud.firestore {
                          (request.auth.uid == existing().senderId &&
                           incoming().body is string &&
                           incoming().body.size() <= 1500 &&
+                          incoming().get('isRead', false) == existing().get('isRead', false) &&
+                          incoming().get('readByUserIds', []) == existing().get('readByUserIds', []) &&
+                          (incoming().body == existing().body ||
+                           (incoming().createdAt == existing().createdAt &&
+                            (incoming().get('isEdited', false) == true || incoming().get('isDeletedForEveryone', false) == true))) &&
+                          (!('deletedForUserIds' in incoming().diff(existing()).affectedKeys()) ||
+                           isValidSelfDeletedIdsUpdate(incoming().get('deletedForUserIds', []), existing().get('deletedForUserIds', []))) &&
+                          (!('userReactions' in incoming().diff(existing()).affectedKeys()) ||
+                           isValidSelfReactionMapUpdate(incoming().get('userReactions', {}), existing().get('userReactions', {}))) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'body', 'subject', 'senderName', 'senderPhotoUrl', 'receiverName',
-                            'groupId', 'groupName', 'groupMemberIds', 'imageUrls', 'isRead',
+                            'groupId', 'groupName', 'groupMemberIds', 'imageUrls',
                             'isEdited', 'editedAt', 'senderReaction', 'userReactions',
                             'deletedForSender', 'deletedForUserIds', 'isDeletedForEveryone',
-                            'readByUserIds', 'createdAt'
+                            'createdAt'
                           ]))
                        );
 
-      allow delete: if isSignedIn() && isValidId(messageId) && isMessageParticipant(existing());
+      allow delete: if isSignedIn() && isValidId(messageId) && (existing().senderId == request.auth.uid || isAdmin());
     }
 
     // App Notifications (ব্যক্তিগত ও কমিউনিটি ব্রডকাস্ট নোটিফিকেশন)

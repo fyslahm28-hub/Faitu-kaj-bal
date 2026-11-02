@@ -407,7 +407,21 @@ class ExampleUnitTest {
         val imageWithSendingLabel = imageOnlyMsg.copy(body = "ছবি মেসেজ পাঠানো হচ্ছে")
         assertEquals("", imageWithSendingLabel.cleanDisplayBody())
 
-        // 3. Delivered status (✓✓) when recipient device acknowledges delivery ("DELIVERED:user_b") or recipient is online
+        // 3. Online partner profile alone must NEVER falsely upgrade SENT to DELIVERED without recipient device acknowledgement
+        val onlinePartner = com.example.data.model.UserProfile(
+            id = "user_b",
+            userId = "user_b",
+            fullName = "মাওলানা আব্দুল্লাহ",
+            isOnline = true,
+            lastSeenAt = com.google.firebase.Timestamp(nowMs / 1000L, 0)
+        )
+        assertEquals(
+            "Online status alone must not fake DELIVERED before recipient device acknowledges",
+            com.example.data.model.MessageDeliveryStatus.SENT,
+            plainTextMsg.resolveDeliveryStatus(partnerProfile = onlinePartner, nowMillis = nowMs)
+        )
+
+        // 4. Delivered status (✓✓) ONLY when recipient device acknowledges delivery ("DELIVERED:user_b")
         val deliveredMsg = plainTextMsg.copy(
             readByUserIds = listOf("user_a", "DELIVERED:user_b")
         )
@@ -417,7 +431,7 @@ class ExampleUnitTest {
             deliveredMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
         )
 
-        // 4. Seen/Read status (colored ✓✓) when recipient opens conversation
+        // 5. Seen/Read status (colored ✓✓) when recipient opens conversation or localDeliveryState is READ/SEEN
         val seenMsg = plainTextMsg.copy(
             isRead = true,
             readByUserIds = listOf("user_a", "user_b")
@@ -426,20 +440,44 @@ class ExampleUnitTest {
             com.example.data.model.MessageDeliveryStatus.SEEN,
             seenMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
         )
+        val readOverrideMsg = plainTextMsg.copy().apply { localDeliveryState = "READ" }
+        assertEquals(
+            com.example.data.model.MessageDeliveryStatus.SEEN,
+            readOverrideMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+        )
 
-        // 5. Failed status (!) and Sending status
+        // 6. Failed status (!) and Sending status
         val failedMsg = plainTextMsg.copy().apply { localDeliveryState = "FAILED" }
         assertEquals(
             com.example.data.model.MessageDeliveryStatus.FAILED,
-            failedMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+            failedMsg.resolveDeliveryStatus(partnerProfile = onlinePartner, nowMillis = nowMs)
         )
         val sendingMsg = plainTextMsg.copy().apply { localDeliveryState = "SENDING" }
         assertEquals(
             com.example.data.model.MessageDeliveryStatus.SENDING,
-            sendingMsg.resolveDeliveryStatus(partnerProfile = null, nowMillis = nowMs)
+            sendingMsg.resolveDeliveryStatus(partnerProfile = onlinePartner, nowMillis = nowMs)
         )
 
-        // 6. Media attachment category detection for Image, Video, Audio, Document
+        // 7. ProfilePhotoHelper Storage flag & 1 MiB Firestore document size guard
+        assertFalse(
+            "Unprovisioned Firebase Storage must be disabled to prevent retry loops",
+            com.example.ui.util.ProfilePhotoHelper.IS_FIREBASE_STORAGE_PROVISIONED
+        )
+        val validDocPayload = mapOf("title" to "ছোট পোস্ট", "description" to "স্বাভাবিক বিবরণ")
+        val validCheck = com.example.ui.util.ProfilePhotoHelper.validateFirestoreDocumentSizeBeforeWrite(
+            "feed_posts/test_post_1",
+            validDocPayload
+        )
+        assertTrue("Valid payload must pass 1 MiB document size guard", validCheck.isSuccess)
+
+        val oversizedDocPayload = mapOf("hugeData" to "A".repeat(950_000))
+        val oversizedCheck = com.example.ui.util.ProfilePhotoHelper.validateFirestoreDocumentSizeBeforeWrite(
+            "feed_posts/test_post_2",
+            oversizedDocPayload
+        )
+        assertTrue("Expected 1 MiB guard to reject >900KB Firestore document payload", oversizedCheck.isFailure)
+
+        // 8. Media attachment category detection for Image, Video, Audio, Document
         assertEquals(
             com.example.ui.screens.AttachmentMediaCategory.IMAGE,
             com.example.ui.screens.detectAttachmentMediaCategory("https://example.com/photo.jpg")

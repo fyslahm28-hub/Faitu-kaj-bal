@@ -89,7 +89,8 @@ object ProfilePhotoHelper {
         }
         val dataUrl = withTimeoutOrNull(6000L) {
             try {
-                val db = firestoreInstance ?: Firebase.firestore(FIRESTORE_DATABASE_ID)
+                val db = firestoreInstance
+                    ?: com.example.data.repository.getConfiguredFirestoreInstance(FIRESTORE_DATABASE_ID)
                 val snap = db.collection("feed_post_attachments")
                     .document(attachmentDocId)
                     .get()
@@ -224,13 +225,15 @@ object ProfilePhotoHelper {
         }
     }
 
-    // Cooldown timestamp when Firebase Storage is unprovisioned/unreachable so multi-image posts & chats never stall repeatedly
-    private val storageUnavailableUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
+    // Firebase Storage is not provisioned on this project backend (only Firestore and Auth are provisioned).
+    // Keep this false so media uploads never stall on unprovisioned Storage bucket retries or fake Storage upload success.
+    const val IS_FIREBASE_STORAGE_PROVISIONED = false
+    private val storageUnavailableUntilMs = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
 
     /**
-     * Attempts to upload raw bytes to Firebase Storage across default and project-specific bucket URLs.
-     * Returns the public/authenticated download URL if Firebase Storage is provisioned and reachable,
-     * or `null` immediately if Firebase Storage is offline/unprovisioned.
+     * Attempts to upload raw bytes to Firebase Storage only when [IS_FIREBASE_STORAGE_PROVISIONED] is enabled.
+     * Returns `null` immediately when Firebase Storage is not provisioned so callers use bounded
+     * `/feed_post_attachments` Firestore documents without network retry delays.
      */
     private suspend fun tryUploadBytesToFirebaseStorage(
         storagePath: String,
@@ -238,7 +241,7 @@ object ProfilePhotoHelper {
         mimeType: String,
         customMetadata: Map<String, String> = emptyMap()
     ): String? {
-        if (bytes.isEmpty()) return null
+        if (!IS_FIREBASE_STORAGE_PROVISIONED || bytes.isEmpty()) return null
         val now = System.currentTimeMillis()
         if (now < storageUnavailableUntilMs.get()) {
             return null
@@ -486,6 +489,13 @@ object ProfilePhotoHelper {
             }
 
             // 3. Local URI (content:// or file://)
+            // When Firebase Storage is not provisioned, never store raw device-local content:// or file:// URIs
+            // into Firestore because other devices cannot access them and Firestore rules reject non-HTTP/non-data URLs.
+            if (!IS_FIREBASE_STORAGE_PROVISIONED) {
+                return Result.failure(
+                    IllegalArgumentException("স্থানীয় ফাইল সরাসরি সিঙ্ক করা সম্ভব নয়। অনুগ্রহ করে গ্যালারি থেকে ছবি নির্বাচন করে পুনরায় চেষ্টা করুন।")
+                )
+            }
             val lowerUri = item.lowercase()
             val isVideoUri = lowerUri.contains("video") || lowerUri.endsWith(".mp4") || lowerUri.endsWith(".mov")
             val mediaType = if (isVideoUri) "VIDEO" else "IMAGE"
@@ -493,36 +503,37 @@ object ProfilePhotoHelper {
             val ext = if (isVideoUri) "mp4" else "jpg"
             val fileName = "media_${index}_${System.currentTimeMillis()}.$ext"
             val storagePath = "feed_posts/$safeAuthor/$safePostId/$fileName"
-            val uploadedFromUri = if (!isVideoUri || System.currentTimeMillis() < storageUnavailableUntilMs.get()) {
-                null
-            } else {
-                try {
-                    withTimeoutOrNull(2200L) {
-                        try {
-                            val storage = FirebaseStorage.getInstance()
-                            storage.maxUploadRetryTimeMillis = 1800L
-                            storage.maxOperationRetryTimeMillis = 1800L
-                            val storageRef = storage.reference.child(storagePath)
-                            val metadata = StorageMetadata.Builder()
-                                .setContentType(mimeType)
-                                .setCustomMetadata("authorId", safeAuthor)
-                                .setCustomMetadata("postId", safePostId)
-                                .setCustomMetadata("mediaType", mediaType)
-                                .build()
-                            val task = storageRef.putFile(Uri.parse(item), metadata)
-                            task.await()
-                            storageRef.downloadUrl.await()?.toString()
-                        } catch (_: Throwable) {
-                            null
-                        }
+            val uploadedFromUri = try {
+                withTimeoutOrNull(2200L) {
+                    try {
+                        val storage = FirebaseStorage.getInstance()
+                        storage.maxUploadRetryTimeMillis = 1800L
+                        storage.maxOperationRetryTimeMillis = 1800L
+                        val storageRef = storage.reference.child(storagePath)
+                        val metadata = StorageMetadata.Builder()
+                            .setContentType(mimeType)
+                            .setCustomMetadata("authorId", safeAuthor)
+                            .setCustomMetadata("postId", safePostId)
+                            .setCustomMetadata("mediaType", mediaType)
+                            .build()
+                        val task = storageRef.putFile(Uri.parse(item), metadata)
+                        task.await()
+                        storageRef.downloadUrl.await()?.toString()
+                    } catch (_: Throwable) {
+                        null
                     }
-                } catch (_: Throwable) {
-                    null
                 }
+            } catch (_: Throwable) {
+                null
+            }
+            if (uploadedFromUri.isNullOrBlank()) {
+                return Result.failure(
+                    IllegalArgumentException("ফাইলটি ক্লাউড স্টোরেজে আপলোড করা যায়নি। অনুগ্রহ করে পুনরায় চেষ্টা করুন।")
+                )
             }
             results.add(
                 UploadedFeedMediaItem(
-                    url = uploadedFromUri ?: item.take(1000),
+                    url = uploadedFromUri,
                     mediaType = mediaType,
                     mimeType = mimeType,
                     sizeBytes = itemUtf8Bytes,
@@ -670,13 +681,23 @@ object ProfilePhotoHelper {
         coroutineScope {
             capped.map { item ->
                 async {
-                    if (!item.startsWith("data:image", ignoreCase = true)) {
-                        item
-                    } else {
-                        ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
+                    when {
+                        item.startsWith("content://", ignoreCase = true) ||
+                            item.startsWith("file://", ignoreCase = true) -> {
+                            ""
+                        }
+                        item.startsWith("data:image", ignoreCase = true) -> {
+                            ensureDataUrlFitsBudget(item, maxBase64CharsPerImage)
+                        }
+                        item.startsWith("https://", ignoreCase = true) ||
+                            item.startsWith("http://", ignoreCase = true) ||
+                            item.startsWith("preset:", ignoreCase = true) -> {
+                            item
+                        }
+                        else -> ""
                     }
                 }
-            }.map { it.await() }
+            }.map { it.await() }.filter { it.isNotBlank() }
         }
     }
 

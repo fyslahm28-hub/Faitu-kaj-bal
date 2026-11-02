@@ -450,8 +450,8 @@ data class DirectMessage(
      * - [MessageDeliveryStatus.SENT]: written to server (`✓`)
      */
     fun resolveDeliveryStatus(
-        partnerProfile: UserProfile? = null,
-        nowMillis: Long = System.currentTimeMillis()
+        @Suppress("UNUSED_PARAMETER") partnerProfile: UserProfile? = null,
+        @Suppress("UNUSED_PARAMETER") nowMillis: Long = System.currentTimeMillis()
     ): MessageDeliveryStatus {
         val stateUpper = localDeliveryState.trim().uppercase()
         if (stateUpper == "FAILED") return MessageDeliveryStatus.FAILED
@@ -460,7 +460,7 @@ data class DirectMessage(
         val isGroupMsg = groupId.isNotBlank() || receiverId.startsWith("GROUP:", ignoreCase = true)
 
         // 1. Check SEEN / READ
-        if (stateUpper == "SEEN" || isRead) {
+        if (stateUpper == "SEEN" || stateUpper == "READ" || isRead) {
             return MessageDeliveryStatus.SEEN
         }
         if (isGroupMsg) {
@@ -474,7 +474,7 @@ data class DirectMessage(
             return MessageDeliveryStatus.SEEN
         }
 
-        // 2. Check DELIVERED (✓✓)
+        // 2. Check DELIVERED (✓✓) — strictly requires recipient device delivery acknowledgement
         if (stateUpper == "DELIVERED") {
             return MessageDeliveryStatus.DELIVERED
         }
@@ -488,19 +488,9 @@ data class DirectMessage(
             if (receiverId.isNotBlank() && readByUserIds.contains("DELIVERED:$receiverId")) {
                 return MessageDeliveryStatus.DELIVERED
             }
-            if (partnerProfile != null) {
-                if (partnerProfile.isCurrentlyOnline(nowMillis)) {
-                    return MessageDeliveryStatus.DELIVERED
-                }
-                val partnerLastSeenMs = partnerProfile.effectiveLastSeenTimestamp()?.toDate()?.time ?: 0L
-                val msgCreatedMs = createdAt?.toDate()?.time ?: 0L
-                if (partnerLastSeenMs > 0L && msgCreatedMs > 0L && partnerLastSeenMs >= msgCreatedMs) {
-                    return MessageDeliveryStatus.DELIVERED
-                }
-            }
         }
 
-        // 3. Default: SENT (✓)
+        // 3. Default once server write is confirmed: SENT (✓)
         return MessageDeliveryStatus.SENT
     }
 

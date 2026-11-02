@@ -1486,8 +1486,10 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         )
         assertTrue("publishFeedPost must navigate immediately", navigatedAfterSeekerPost)
 
-        // 2. Phone A publishes a JOB_CIRCULAR post via QawmiViewModel.publishFeedPost
+        // 2. Phone A publishes an Image + Text JOB_CIRCULAR post (using data:image/jpeg;base64,... which QawmiRepository offloads to /feed_post_attachments)
         val uniqueGeneralTitle = "নিয়োগ বিজ্ঞপ্তি ডিভাইস টেস্ট ${UUID.randomUUID().toString().take(8)}"
+        val sampleBase64Image = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
+
         viewModelA.publishFeedPost(
             authorName = "মাওলানা ফয়সাল আহমাদ",
             postType = "JOB_CIRCULAR",
@@ -1500,6 +1502,7 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
             deadlineOrPreferredDistricts = "চলমান",
             description = "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ, মাদরাসায় একজন অভিজ্ঞ মুহাদ্দিস আবশ্যক।",
             contactNumber = "01700112233",
+            imageUrls = listOf(sampleBase64Image),
             onSuccessNavigate = {}
         )
 
@@ -1536,13 +1539,141 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
                         .awaitWithTimeout(2_000L)
                 }
             }.getOrNull()
+            val msgsInVmA = (viewModelA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val sentMsgInVmA = msgsInVmA.firstOrNull { it.body == uniqueMessageBody }
             (serverPosts?.documents?.any { it.getString("title") == uniqueSeekerTitle } == true) &&
                 (serverPosts.documents.any { it.getString("title") == uniqueGeneralTitle }) &&
-                (serverMsgs?.documents?.any { it.getString("body") == uniqueMessageBody && it.getString("receiverId") == userBUid } == true)
+                (serverMsgs?.documents?.any { it.getString("body") == uniqueMessageBody && it.getString("receiverId") == userBUid } == true) &&
+                (sentMsgInVmA != null && sentMsgInVmA.localDeliveryState == "SENT") &&
+                (viewModelA.feedbackBanner.value == "আলহামদুলিল্লাহ, খেদমতের নিয়োগ বিজ্ঞপ্তিটি ফিডে প্রকাশিত হয়েছে।")
         }
         org.junit.Assert.assertNull("Phone A must have no errorBanner", viewModelA.errorBanner.value)
+        org.junit.Assert.assertNotNull("Phone A must show feedbackBanner ONLY after server write succeeds", viewModelA.feedbackBanner.value)
 
-        // 4. Switch to Phone B (User B) and verify Phone B receives both posts AND the message from the database!
+        // PHASE 2 VERIFICATION 1: Before Phone B opens the app, Phone A's message MUST be SENT (✓) and NEVER DELIVERED (✓✓)!
+        val msgsOnABeforeB = (viewModelA.messagesState.value as com.example.ui.viewmodel.UiState.Success).data
+        val sentMsgBeforeB = msgsOnABeforeB.first { it.body == uniqueMessageBody }
+        org.junit.Assert.assertEquals("Before recipient device receives message, state must be SENT", "SENT", sentMsgBeforeB.localDeliveryState)
+        org.junit.Assert.assertEquals(
+            "Before recipient device receives message, resolveDeliveryStatus must be SENT",
+            com.example.data.model.MessageDeliveryStatus.SENT,
+            sentMsgBeforeB.resolveDeliveryStatus(partnerProfile = null)
+        )
+
+        // PHASE 2 VERIFICATION 2: Only the recipient can update their own Delivery/Read status; Sender A is blocked from marking own sent message as delivered/read
+        val senderReadAttempt = repoA.markMessageAsRead(sentMsgBeforeB.id)
+        assertTrue("Sender A must be blocked from marking own sent message as read", senderReadAttempt.isFailure)
+        repoA.acknowledgeMessagesDelivered(listOf(sentMsgBeforeB))
+        val docAfterSenderAckAttempt = firestore.collection("messages").document(sentMsgBeforeB.id)
+            .get(com.google.firebase.firestore.Source.SERVER)
+            .awaitWithTimeout(3_000L)
+        val readByAfterSenderAttempt = (docAfterSenderAckAttempt.get("readByUserIds") as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
+        org.junit.Assert.assertFalse(
+            "Sender A must never be able to write DELIVERED:$userBUid into readByUserIds",
+            readByAfterSenderAttempt.contains("DELIVERED:$userBUid")
+        )
+        org.junit.Assert.assertFalse(
+            "Sender A must never be able to write DELIVERED:$userAUid into readByUserIds",
+            readByAfterSenderAttempt.contains("DELIVERED:$userAUid")
+        )
+
+        // PHASE 2 VERIFICATION 3: Failed post & failed message rollback, FAILED status (never DELIVERED), and idempotent retry without duplicates
+        viewModelA.clearBanners()
+        val failedPostTitle = "অবৈধ ফাইল পোস্ট পরীক্ষা ${UUID.randomUUID().toString().take(6)}"
+        viewModelA.publishFeedPost(
+            authorName = "মাওলানা ফয়সাল আহমাদ",
+            postType = "GENERAL_POST",
+            title = failedPostTitle,
+            district = "ঢাকা",
+            upazilaOrLocation = "সদর",
+            designation = "মুদাররিস",
+            qualification = "দাওরায়ে হাদীস",
+            salaryOrExperience = "আলোচনা সাপেক্ষে",
+            deadlineOrPreferredDistricts = "ঢাকা",
+            description = "স্থানীয় ফাইল পরীক্ষার পোস্ট",
+            contactNumber = "01700112233",
+            imageUrls = listOf("content://local/unencoded_post_photo.jpg"),
+            onSuccessNavigate = {}
+        )
+        awaitMainLooperCondition(5_000L, "Waiting for failed post rollback") {
+            viewModelA.errorBanner.value != null
+        }
+        org.junit.Assert.assertNull("Failed post must NEVER show feedbackBanner", viewModelA.feedbackBanner.value)
+        val feedAfterFailedPost = (viewModelA.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+        org.junit.Assert.assertFalse("Rolled back failed post must not remain in feedPostsState", feedAfterFailedPost.any { it.title == failedPostTitle })
+
+        viewModelA.clearBanners()
+        val retryableMsgBody = "পুনরায় প্রেরণযোগ্য পয়গাম পরীক্ষা ${UUID.randomUUID().toString().take(6)}"
+        viewModelA.sendMessage(
+            receiverId = userBUid,
+            receiverName = "মাওলানা আব্দুল্লাহ (ফোন বি)",
+            subject = "ব্যর্থ মেসেজ পরীক্ষা",
+            body = retryableMsgBody,
+            imageUrls = listOf("content://local/unencoded_chat_photo.jpg")
+        )
+        awaitMainLooperCondition(5_000L, "Waiting for failed message FAILED state") {
+            val list = (viewModelA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            list.any { it.body == retryableMsgBody && it.localDeliveryState == "FAILED" }
+        }
+        val failedMsgInVmA = (viewModelA.messagesState.value as com.example.ui.viewmodel.UiState.Success).data.first { it.body == retryableMsgBody }
+        org.junit.Assert.assertEquals("Failed message must have FAILED state, never DELIVERED", "FAILED", failedMsgInVmA.localDeliveryState)
+        org.junit.Assert.assertEquals(
+            com.example.data.model.MessageDeliveryStatus.FAILED,
+            failedMsgInVmA.resolveDeliveryStatus(partnerProfile = null)
+        )
+        // Retry the failed message with valid payload using the exact same messageId -> must transition to SENT without creating duplicates
+        viewModelA.retryFailedMessage(failedMsgInVmA.copy(imageUrls = emptyList()))
+        awaitMainLooperCondition(5_000L, "Waiting for retried message to transition to SENT") {
+            val list = (viewModelA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            list.count { it.body == retryableMsgBody } == 1 &&
+                list.first { it.body == retryableMsgBody }.id == failedMsgInVmA.id &&
+                list.first { it.body == retryableMsgBody }.localDeliveryState == "SENT"
+        }
+        viewModelA.clearBanners()
+
+        // PHASE 2 VERIFICATION 4: updateFeedPost and shareFeedPostToFeed on Phone A
+        val publishedCircularOnA = (viewModelA.feedPostsState.value as com.example.ui.viewmodel.UiState.Success).data.first { it.title == uniqueGeneralTitle }
+        val updatedSalary = "১৮,০০০ টাকা (আপডেটেড)"
+        viewModelA.clearBanners()
+        viewModelA.updateFeedPost(
+            post = publishedCircularOnA,
+            title = uniqueGeneralTitle,
+            designation = "মুহাদ্দিস",
+            district = "ময়মনসিংহ",
+            upazilaOrLocation = "সদর",
+            qualification = "দাওরায়ে হাদীস",
+            salaryOrExperience = updatedSalary,
+            deadlineOrPreferredDistricts = "চলমান",
+            contactNumber = "01700112233",
+            description = publishedCircularOnA.description
+        )
+        awaitMainLooperCondition(
+            8_000L,
+            { "Waiting for updateFeedPost on Phone A; feedback=${viewModelA.feedbackBanner.value}, error=${viewModelA.errorBanner.value}" }
+        ) {
+            viewModelA.feedbackBanner.value == "আলহামদুলিল্লাহ, আপনার পোস্টটি সফলভাবে হালনাগাদ হয়েছে।"
+        }
+        viewModelA.clearBanners()
+        viewModelA.shareFeedPostToFeed(publishedCircularOnA.copy(salaryOrExperience = updatedSalary), "জরুরি নিয়োগ বিজ্ঞপ্তি শেয়ার করা হলো")
+        awaitMainLooperCondition(
+            8_000L,
+            { "Waiting for shareFeedPostToFeed on Phone A; feedback=${viewModelA.feedbackBanner.value}, error=${viewModelA.errorBanner.value}" }
+        ) {
+            viewModelA.feedbackBanner.value == "আলহামদুলিল্লাহ, পোস্টটি আপনার পরিচয়ে ফিডে শেয়ার করা হয়েছে।"
+        }
+        awaitMainLooperCondition(8_000L, "Waiting for server state of updateFeedPost and shareFeedPostToFeed on Phone A") {
+            val serverDoc = runCatching {
+                kotlinx.coroutines.runBlocking {
+                    firestore.collection("feed_posts").document(publishedCircularOnA.id)
+                        .get(com.google.firebase.firestore.Source.SERVER)
+                        .awaitWithTimeout(2_000L)
+                }
+            }.getOrNull()
+            serverDoc?.getString("salaryOrExperience") == updatedSalary &&
+                (serverDoc.getLong("shareCount") ?: 0L) >= 1L
+        }
+
+        // 4. Switch to Phone B (User B) and verify Phone B receives posts (including image attachment & updated salary) AND message, and automatically sends DELIVERED acknowledgement!
         signInTestUser(phoneBEmail)
         val repoB = QawmiRepository(firestore, auth)
         val viewModelB = com.example.ui.viewmodel.QawmiViewModel(
@@ -1558,15 +1689,25 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         ) {
             val feedOnB = (viewModelB.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
             val msgsOnB = (viewModelB.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val ackedOnServer = runCatching {
+                kotlinx.coroutines.runBlocking {
+                    val doc = firestore.collection("messages").document(sentMsgBeforeB.id)
+                        .get(com.google.firebase.firestore.Source.SERVER)
+                        .awaitWithTimeout(2_000L)
+                    val readBy = (doc.get("readByUserIds") as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
+                    readBy.contains("DELIVERED:$userBUid")
+                }
+            }.getOrDefault(false)
             feedOnB.any { it.title == uniqueSeekerTitle && it.authorId == userAUid } &&
-                feedOnB.any { it.title == uniqueGeneralTitle && it.authorId == userAUid } &&
-                msgsOnB.any { it.body == uniqueMessageBody && it.senderId == userAUid && it.receiverId == userBUid }
+                feedOnB.any { it.title == uniqueGeneralTitle && it.authorId == userAUid && it.imageUrls.isNotEmpty() } &&
+                msgsOnB.any { it.body == uniqueMessageBody && it.senderId == userAUid && it.receiverId == userBUid } &&
+                ackedOnServer
         }
 
         val feedOnPhoneB = (viewModelB.feedPostsState.value as com.example.ui.viewmodel.UiState.Success).data
         val msgsOnPhoneB = (viewModelB.messagesState.value as com.example.ui.viewmodel.UiState.Success).data
         assertTrue("Phone B must receive User A's Seeker Application post", feedOnPhoneB.any { it.title == uniqueSeekerTitle })
-        assertTrue("Phone B must receive User A's Circular post", feedOnPhoneB.any { it.title == uniqueGeneralTitle })
+        assertTrue("Phone B must receive User A's Image Circular post", feedOnPhoneB.any { it.title == uniqueGeneralTitle && it.imageUrls.isNotEmpty() })
         assertTrue("Phone B must receive User A's Direct Message", msgsOnPhoneB.any { it.body == uniqueMessageBody })
 
         // 5. Phone B submits a Khedmot Application to Phone A's circular AND replies with a message to Phone A
@@ -1617,7 +1758,9 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         org.junit.Assert.assertNull("Phone B must have no errorBanner", viewModelB.errorBanner.value)
 
-        // 6. Switch back to Phone A (User A) and verify Phone A receives Phone B's application AND reply message!
+        // 6. Switch back to Phone A (User A) and verify:
+        //    - Phone A's sent message is now DELIVERED (✓✓) after Phone B's recipient acknowledgement!
+        //    - Phone A receives Phone B's Khedmot application AND reply message!
         signInTestUser(phoneAEmail)
         viewModelA.onAuthSessionRefreshed()
         awaitMainLooperCondition(
@@ -1626,8 +1769,474 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         ) {
             val receivedSubsOnA = (viewModelA.receivedSubmissionsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
             val msgsOnA = (viewModelA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val originalSentOnA = msgsOnA.firstOrNull { it.id == sentMsgBeforeB.id }
             receivedSubsOnA.any { it.postId == circularPostOnB.id && it.applicantId == userBUid } &&
-                msgsOnA.any { it.body == replyBodyFromB && it.senderId == userBUid && it.receiverId == userAUid }
+                msgsOnA.any { it.body == replyBodyFromB && it.senderId == userBUid && it.receiverId == userAUid } &&
+                originalSentOnA?.resolveDeliveryStatus(partnerProfile = null) == com.example.data.model.MessageDeliveryStatus.DELIVERED
+        }
+
+        // 7. Phone B marks User A's message as READ -> Phone A observes READ/SEEN status!
+        signInTestUser(phoneBEmail)
+        repoB.markMessageAsRead(sentMsgBeforeB.id).getOrThrow()
+        signInTestUser(phoneAEmail)
+        viewModelA.onAuthSessionRefreshed()
+        awaitMainLooperCondition(8_000L, "Waiting for Phone A to observe READ/SEEN status after Phone B reads message") {
+            val msgsOnA = (viewModelA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val originalSentOnA = msgsOnA.firstOrNull { it.id == sentMsgBeforeB.id }
+            originalSentOnA?.resolveDeliveryStatus(partnerProfile = null) == com.example.data.model.MessageDeliveryStatus.SEEN
+        }
+
+        // 8. Network Disconnect & Reconnect verification via FirestoreConnectionMonitor and viewModelA.onNetworkRestored()
+        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(false)
+        org.junit.Assert.assertFalse(FirestoreConnectionMonitor.isNetworkAvailable.value)
+        org.junit.Assert.assertFalse(FirestoreConnectionMonitor.isServerConnected.value)
+        FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+        viewModelA.onNetworkRestored()
+        awaitMainLooperCondition(5_000L, "Waiting for network reconnect to restore network availability") {
+            FirestoreConnectionMonitor.isNetworkAvailable.value
+        }
+    }
+
+    private suspend fun assertPermissionDenied(message: String, block: suspend () -> Unit) {
+        try {
+            block()
+            fail("$message (Expected PERMISSION_DENIED, but operation succeeded)")
+        } catch (e: Throwable) {
+            val fsEx = findFirestoreException(e)
+            assertEquals(
+                "$message (Expected PERMISSION_DENIED, got: $e)",
+                FirebaseFirestoreException.Code.PERMISSION_DENIED,
+                fsEx?.code
+            )
+        }
+    }
+
+    @Test
+    fun phase3SecurityAudit_allTenPositiveAndNegativeScenarios_enforcedByEmulator() = runBlocking {
+        val senderEmail = "p3_sender_${UUID.randomUUID()}@test.com"
+        val receiverEmail = "p3_receiver_${UUID.randomUUID()}@test.com"
+        val strangerEmail = "p3_stranger_${UUID.randomUUID()}@test.com"
+
+        val strangerUid = signInTestUser(strangerEmail)
+        val receiverUid = signInTestUser(receiverEmail)
+        val senderUid = signInTestUser(senderEmail)
+        val repo = QawmiRepository(firestore, auth)
+
+        // =========================================================================
+        // Scenario 8 (Positive): Valid user's normal Profile, Post, Message & Application succeed
+        // =========================================================================
+        val profileSaveRes = withTimeout(5000L) {
+            repo.saveUserProfile(
+                UserProfile(
+                    id = senderUid,
+                    userId = senderUid,
+                    fullName = "মাওলানা সাদিকুর রহমান",
+                    accountType = "muhtamim",
+                    district = "ঢাকা",
+                    designation = "মুহতামিম",
+                    qualification = "দাওরায়ে হাদীস",
+                    experience = "১০ বছর",
+                    preferredDistricts = "ঢাকা",
+                    bio = "জামিয়া ইসলামিয়া ঢাকা",
+                    contactInfo = "01711223344",
+                    contactEmail = senderEmail,
+                    phonePrivacy = "PUBLIC",
+                    emailPrivacy = "ONLY_ME",
+                    madrasaName = "জামিয়া ইসলামিয়া ঢাকা",
+                    photoUrl = "preset:madrasa_dome"
+                )
+            )
+        }
+        assertTrue("Valid user profile creation should succeed: ${profileSaveRes.exceptionOrNull()}", profileSaveRes.isSuccess)
+
+        val postCreateRes = withTimeout(5000L) {
+            repo.createFeedPost(
+                authorName = "মাওলানা সাদিকুর রহমান",
+                postType = "JOB_CIRCULAR",
+                title = "মুহাদ্দিস আবশ্যক (Phase 3 Test)",
+                district = "ঢাকা",
+                upazilaOrLocation = "মিরপুর",
+                designation = "মুহাদ্দিস",
+                qualification = "দাওরায়ে হাদীস ও ইফতা",
+                salaryOrExperience = "১৮,০০০ টাকা",
+                deadlineOrPreferredDistricts = "৩০ শে শাওয়াল",
+                description = "সহীহ বুখারী ও তিরমিযী শরীফ পাঠদানে অভিজ্ঞ মুহাদ্দিস আবশ্যক।",
+                contactNumber = "01711223344",
+                madrasaId = senderUid,
+                isVerifiedMadrasa = false
+            )
+        }
+        assertTrue("Valid post creation should succeed: ${postCreateRes.exceptionOrNull()}", postCreateRes.isSuccess)
+        val postId = postCreateRes.getOrThrow()
+
+        val preallocatedMsgId = "msg_p3_${UUID.randomUUID().toString().replace("-", "").take(16)}"
+        val msgCreateRes = withTimeout(5000L) {
+            repo.sendDirectMessage(
+                senderName = "মাওলানা সাদিকুর রহমান",
+                receiverId = receiverUid,
+                receiverName = "মাওলানা ইউসুফ",
+                subject = "খেদমত প্রসঙ্গে",
+                body = "আসসালামু আলাইকুম, আপনার আবেদনটি বিবেচনাধীন আছে।",
+                preallocatedMessageId = preallocatedMsgId
+            )
+        }
+        assertTrue("Valid message creation should succeed: ${msgCreateRes.exceptionOrNull()}", msgCreateRes.isSuccess)
+        val messageId = msgCreateRes.getOrThrow()
+        assertEquals(preallocatedMsgId, messageId)
+
+        // =========================================================================
+        // Scenario 1 (Negative): Sender trying to mark own message as Read -> Blocked
+        // =========================================================================
+        assertPermissionDenied("Scenario 1a: Sender directly updating isRead=true on own message must be denied") {
+            firestore.collection("messages").document(messageId)
+                .update("isRead", true)
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 1b: Sender adding receiverUid to readByUserIds on own message must be denied") {
+            firestore.collection("messages").document(messageId)
+                .update("readByUserIds", listOf(senderUid, receiverUid))
+                .awaitWithTimeout()
+        }
+
+        // =========================================================================
+        // Scenario 2 (Negative): Sender trying to mark own message as Delivered -> Blocked
+        // =========================================================================
+        assertPermissionDenied("Scenario 2a: Sender directly updating readByUserIds with DELIVERED:<receiverUid> must be denied") {
+            firestore.collection("messages").document(messageId)
+                .update("readByUserIds", listOf(senderUid, "DELIVERED:$receiverUid"))
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 2b: Sender creating a new message pre-populated with DELIVERED:<receiverUid> must be denied") {
+            val forgedMsgId = "forged_${UUID.randomUUID().toString().take(12)}"
+            firestore.collection("messages").document(forgedMsgId).set(
+                mapOf(
+                    "senderId" to senderUid,
+                    "senderName" to "মাওলানা সাদিকুর রহমান",
+                    "receiverId" to receiverUid,
+                    "receiverName" to "মাওলানা ইউসুফ",
+                    "subject" to "Forged Delivery",
+                    "body" to "Testing forged delivery on create",
+                    "isRead" to false,
+                    "readByUserIds" to listOf(senderUid, "DELIVERED:$receiverUid"),
+                    "createdAt" to com.google.firebase.Timestamp.now()
+                )
+            ).awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 2c: Sender modifying message body without isEdited=true must be denied") {
+            firestore.collection("messages").document(messageId)
+                .update("body", "চুপিসারে পরিবর্তিত মেসেজ")
+                .awaitWithTimeout()
+        }
+
+        // =========================================================================
+        // Scenario 9 (Positive): Valid retry with same Message ID -> Succeeds without duplicate or data corruption
+        // =========================================================================
+        val retryRawPayload = mapOf(
+            "senderId" to senderUid,
+            "senderName" to "মাওলানা সাদিকুর রহমান",
+            "senderPhotoUrl" to "",
+            "receiverId" to receiverUid,
+            "receiverName" to "মাওলানা ইউসুফ",
+            "groupMemberIds" to emptyList<String>(),
+            "subject" to "খেদমত প্রসঙ্গে",
+            "body" to "আসসালামু আলাইকুম, আপনার আবেদনটি বিবেচনাধীন আছে।",
+            "isRead" to false,
+            "readByUserIds" to listOf(senderUid),
+            "createdAt" to com.google.firebase.Timestamp.now()
+        )
+        withTimeout(5000L) {
+            firestore.collection("messages").document(messageId).set(retryRawPayload).awaitWithTimeout()
+        }
+        val repoRetryRes = withTimeout(5000L) {
+            repo.sendDirectMessage(
+                senderName = "মাওলানা সাদিকুর রহমান",
+                receiverId = receiverUid,
+                receiverName = "মাওলানা ইউসুফ",
+                subject = "খেদমত প্রসঙ্গে",
+                body = "আসসালামু আলাইকুম, আপনার আবেদনটি বিবেচনাধীন আছে।",
+                preallocatedMessageId = preallocatedMsgId
+            )
+        }
+        assertTrue("Idempotent retry with same preallocatedMessageId should succeed", repoRetryRes.isSuccess)
+        assertEquals(preallocatedMsgId, repoRetryRes.getOrThrow())
+
+        // =========================================================================
+        // Scenario 3 (Negative): Receiver trying to add another Receiver's UID -> Blocked
+        // =========================================================================
+        signInTestUser(receiverEmail)
+        val receiverRepo = QawmiRepository(firestore, auth)
+
+        assertPermissionDenied("Scenario 3a: Receiver adding DELIVERED:<strangerUid> must be denied") {
+            firestore.collection("messages").document(messageId)
+                .update("readByUserIds", listOf(senderUid, "DELIVERED:$strangerUid"))
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 3b: Receiver adding another user's read UID must be denied") {
+            firestore.collection("messages").document(messageId)
+                .update("readByUserIds", listOf(senderUid, strangerUid))
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 3c: Receiver removing existing senderUid from readByUserIds must be denied") {
+            firestore.collection("messages").document(messageId)
+                .update("readByUserIds", listOf("DELIVERED:$receiverUid"))
+                .awaitWithTimeout()
+        }
+
+        // Positive check for Receiver: Receiver adding their OWN DELIVERED and READ status succeeds
+        withTimeout(5000L) {
+            firestore.collection("messages").document(messageId)
+                .update("readByUserIds", listOf(senderUid, "DELIVERED:$receiverUid"))
+                .awaitWithTimeout()
+        }
+        val receiverMarkReadRes = withTimeout(5000L) {
+            receiverRepo.markMessageAsRead(messageId)
+        }
+        assertTrue("Receiver marking own received message as read should succeed", receiverMarkReadRes.isSuccess)
+
+        // Receiver submits a valid Khedmot Application to Sender's post (part of Scenario 8)
+        val observedPostsForReceiver = withTimeout(5000L) {
+            receiverRepo.observePublicFeedPosts().first { list -> list.any { it.id == postId } }
+        }
+        val circularPostForReceiver = observedPostsForReceiver.first { it.id == postId }
+        val submitAppRes = withTimeout(5000L) {
+            receiverRepo.submitApplicationToCircular(
+                post = circularPostForReceiver,
+                applicantName = "মাওলানা ইউসুফ",
+                applicantQualification = "দাওরায়ে হাদীস",
+                applicantExperience = "৫ বছর",
+                applicantPhone = "01811223344",
+                coverNote = "আমি উক্ত পদে খেদমতে আগ্রহী।"
+            )
+        }
+        assertTrue("Valid application submission should succeed: ${submitAppRes.exceptionOrNull()}", submitAppRes.isSuccess)
+        val submissionId = submitAppRes.getOrThrow()
+
+        // =========================================================================
+        // Scenario 6a (Negative): Applicant trying to self-accept own application -> Blocked
+        // =========================================================================
+        assertPermissionDenied("Scenario 6a: Applicant trying to update own application status to ACCEPTED must be denied") {
+            firestore.collection("khedmot_submissions").document(submissionId)
+                .update(
+                    mapOf(
+                        "status" to "ACCEPTED",
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+
+        // =========================================================================
+        // Switch to Stranger (Unrelated 3rd-party User) for Scenarios 4, 5, 6b, 7
+        // =========================================================================
+        signInTestUser(strangerEmail)
+
+        // =========================================================================
+        // Scenario 4 (Negative): Stranger trying to read a message -> Blocked
+        // =========================================================================
+        assertPermissionDenied("Scenario 4: Stranger reading private conversation message must be denied") {
+            firestore.collection("messages").document(messageId)
+                .get(com.google.firebase.firestore.Source.SERVER)
+                .awaitWithTimeout()
+        }
+
+        // =========================================================================
+        // Scenario 5 (Negative): Stranger trying to edit/delete a post or attach to someone else's post -> Blocked
+        // =========================================================================
+        assertPermissionDenied("Scenario 5a: Stranger editing another user's post title/description must be denied") {
+            firestore.collection("feed_posts").document(postId)
+                .update(
+                    mapOf(
+                        "title" to "হ্যাকড টাইটেল",
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 5b: Stranger deleting another user's post must be denied") {
+            firestore.collection("feed_posts").document(postId)
+                .delete()
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 5c: Stranger creating feed_post_attachments linked to another user's postId must be denied") {
+            firestore.collection("feed_post_attachments").document("att_forged_${UUID.randomUUID().toString().take(8)}")
+                .set(
+                    mapOf(
+                        "postId" to postId,
+                        "authorId" to strangerUid,
+                        "attachmentType" to "IMAGE_DATA_URL",
+                        "mimeType" to "image/jpeg",
+                        "mediaDataUrl" to "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/",
+                        "sizeBytes" to 64,
+                        "visibility" to "PUBLIC",
+                        "createdAt" to com.google.firebase.Timestamp.now(),
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+
+        // =========================================================================
+        // Scenario 6b (Negative): Unauthorized user trying to read or modify an application -> Blocked
+        // =========================================================================
+        assertPermissionDenied("Scenario 6b: Stranger reading another user's khedmot_submission must be denied") {
+            firestore.collection("khedmot_submissions").document(submissionId)
+                .get(com.google.firebase.firestore.Source.SERVER)
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 6c: Stranger modifying another user's khedmot_submission status must be denied") {
+            firestore.collection("khedmot_submissions").document(submissionId)
+                .update(
+                    mapOf(
+                        "status" to "REJECTED",
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+
+        // =========================================================================
+        // Scenario 7 (Negative): Regular user trying to modify Admin Permission -> Blocked
+        // =========================================================================
+        assertPermissionDenied("Scenario 7a: Regular user writing to /admins/{uid} must be denied") {
+            firestore.collection("admins").document(strangerUid)
+                .set(
+                    mapOf(
+                        "uid" to strangerUid,
+                        "email" to strangerEmail,
+                        "role" to "SUPER_ADMIN",
+                        "grantedBy" to strangerUid,
+                        "createdAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 7b: Regular user creating profile with accountType='admin' must be denied") {
+            firestore.collection("users").document(strangerUid)
+                .set(
+                    mapOf(
+                        "userId" to strangerUid,
+                        "fullName" to "Fake Admin",
+                        "accountType" to "admin",
+                        "district" to "ঢাকা",
+                        "designation" to "প্রশাসক",
+                        "qualification" to "দাওরায়ে হাদীস",
+                        "experience" to "৫ বছর",
+                        "preferredDistricts" to "ঢাকা",
+                        "bio" to "Fake admin bio",
+                        "contactInfo" to "01911223344",
+                        "madrasaName" to "",
+                        "isVerified" to false,
+                        "createdAt" to com.google.firebase.Timestamp.now(),
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 7c: Regular user creating profile with isVerified=true must be denied") {
+            firestore.collection("users").document(strangerUid)
+                .set(
+                    mapOf(
+                        "userId" to strangerUid,
+                        "fullName" to "Fake Verified",
+                        "accountType" to "khadim",
+                        "district" to "ঢাকা",
+                        "designation" to "মুহাদ্দিস",
+                        "qualification" to "দাওরায়ে হাদীস",
+                        "experience" to "৫ বছর",
+                        "preferredDistricts" to "ঢাকা",
+                        "bio" to "Fake verified bio",
+                        "contactInfo" to "01911223344",
+                        "madrasaName" to "",
+                        "isVerified" to true,
+                        "createdAt" to com.google.firebase.Timestamp.now(),
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 7d: Regular user boosting a post must be denied") {
+            firestore.collection("feed_posts").document(postId)
+                .update(
+                    mapOf(
+                        "isBoosted" to true,
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+
+        // =========================================================================
+        // Scenario 10 (Positive & Negative): Group Conversation authorized members vs non-members
+        // =========================================================================
+        signInTestUser(senderEmail)
+        val groupCreateRes = withTimeout(5000L) {
+            repo.createChatGroup(
+                name = "শুরা কমিটি ফোরাম",
+                photoUrl = "preset:madrasa_dome",
+                creatorName = "মাওলানা সাদিকুর রহমান",
+                memberIds = listOf(receiverUid),
+                memberNames = mapOf(receiverUid to "মাওলানা ইউসুফ")
+            )
+        }
+        assertTrue("Group creation by authorized creator should succeed: ${groupCreateRes.exceptionOrNull()}", groupCreateRes.isSuccess)
+        val groupId = groupCreateRes.getOrThrow()
+
+        // Recipient Madrasa (senderUid) legitimately shortlists/accepts the application (Scenario 8 positive completion)
+        val receivedSubsForSender = withTimeout(5000L) {
+            repo.observeReceivedSubmissions(senderUid).first { list -> list.any { it.id == submissionId } }
+        }
+        val targetReceivedSub = receivedSubsForSender.first { it.id == submissionId }
+        val acceptSubRes = withTimeout(5000L) {
+            repo.updateSubmissionStatus(
+                submission = targetReceivedSub,
+                newStatus = "ACCEPTED",
+                actorName = "মাওলানা সাদিকুর রহমান"
+            )
+        }
+        assertTrue("Recipient Madrasa accepting submission should succeed: ${acceptSubRes.exceptionOrNull()}", acceptSubRes.isSuccess)
+
+        // Authorized member (receiverUid) sends a group message -> Succeeds
+        signInTestUser(receiverEmail)
+        val memberGroupMsgRes = withTimeout(5000L) {
+            receiverRepo.sendDirectMessage(
+                senderName = "মাওলানা ইউসুফ",
+                receiverId = "GROUP:$groupId",
+                receiverName = "শুরা কমিটি ফোরাম",
+                subject = "শুরা বৈঠক",
+                body = "আগামীকাল সকাল ১০টায় বৈঠক অনুষ্ঠিত হবে ইনশাআল্লাহ।",
+                groupId = groupId,
+                groupName = "শুরা কমিটি ফোরাম",
+                groupMemberIds = listOf(senderUid, receiverUid)
+            )
+        }
+        assertTrue("Authorized group member sending group message should succeed: ${memberGroupMsgRes.exceptionOrNull()}", memberGroupMsgRes.isSuccess)
+
+        // Stranger (non-member) trying to read group or forge a message into the group -> Blocked
+        signInTestUser(strangerEmail)
+        assertPermissionDenied("Scenario 10a: Non-member reading chat_group must be denied") {
+            firestore.collection("chat_groups").document(groupId)
+                .get(com.google.firebase.firestore.Source.SERVER)
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 10b: Non-member forging group message by injecting own UID in groupMemberIds must be denied") {
+            firestore.collection("messages").document("forged_grp_${UUID.randomUUID().toString().take(8)}")
+                .set(
+                    mapOf(
+                        "senderId" to strangerUid,
+                        "senderName" to "অনাহূত ব্যক্তি",
+                        "receiverId" to "GROUP:$groupId",
+                        "receiverName" to "শুরা কমিটি ফোরাম",
+                        "groupId" to groupId,
+                        "groupName" to "শুরা কমিটি ফোরাম",
+                        "groupMemberIds" to listOf(senderUid, receiverUid, strangerUid),
+                        "subject" to "Forged Group Message",
+                        "body" to "আমি গ্রুপের সদস্য না হয়েও মেসেজ পাঠাচ্ছি",
+                        "isRead" to false,
+                        "readByUserIds" to listOf(strangerUid),
+                        "createdAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
         }
     }
 
