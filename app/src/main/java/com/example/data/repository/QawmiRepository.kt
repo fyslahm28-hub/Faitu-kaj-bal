@@ -481,19 +481,16 @@ class QawmiRepository(
                                 }
                             }
 
-                            // Stop infinite retry loops on deterministic permission/index errors so gRPC streams are not disrupted
+                            // Use a longer bounded backoff on permission/index errors while keeping automatic listener reconnection active
                             val isDeterministicQueryError =
                                 error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                     error.code == FirebaseFirestoreException.Code.FAILED_PRECONDITION ||
                                     error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
-                            if (isDeterministicQueryError && attempt >= 2) {
-                                if (!hasEmittedAny.get()) {
-                                    tryEmitSafe(emptyList(), fromListener = false, isServerData = false)
-                                }
-                                return@launch
+                            val backoffMs = if (isDeterministicQueryError && attempt >= 2) {
+                                8_000L
+                            } else {
+                                minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             }
-
-                            val backoffMs = minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
 
@@ -739,13 +736,14 @@ class QawmiRepository(
                                     trySend(defaultValueOnError)
                                 }
                             }
-                            if ((error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
-                                    error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT) &&
-                                attempt >= 2
-                            ) {
-                                return@launch
+                            val isDeterministicDocError =
+                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                    error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
+                            val backoffMs = if (isDeterministicDocError && attempt >= 2) {
+                                8_000L
+                            } else {
+                                minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             }
-                            val backoffMs = minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
                             if (attempt == 1 && (
@@ -3395,16 +3393,36 @@ class QawmiRepository(
     }
 
     private fun DocumentSnapshot.toDirectMessageOrNull(): DirectMessage? {
+        if (!exists()) return null
         return try {
-            val obj = safeToObject(DirectMessage::class.java) ?: return null
+            val obj = safeToObject(DirectMessage::class.java) ?: DirectMessage(id = id)
+            val resolvedSenderId = runCatching { getString("senderId") }.getOrNull() ?: obj.senderId
+            val resolvedSenderName = runCatching { getString("senderName") }.getOrNull() ?: obj.senderName
+            val resolvedSenderPhotoUrl = runCatching { getString("senderPhotoUrl") }.getOrNull() ?: obj.senderPhotoUrl
+            val resolvedReceiverId = runCatching { getString("receiverId") }.getOrNull() ?: obj.receiverId
+            val resolvedReceiverName = runCatching { getString("receiverName") }.getOrNull() ?: obj.receiverName
+            val resolvedSubject = runCatching { getString("subject") }.getOrNull() ?: obj.subject
+            val resolvedBody = runCatching { getString("body") ?: getString("text") ?: getString("message") }.getOrNull() ?: obj.body
             val resolvedIsRead = runCatching { getBoolean("isRead") ?: getBoolean("read") }.getOrNull() ?: obj.isRead
             val resolvedSenderReaction = runCatching { getString("senderReaction") }.getOrNull() ?: obj.senderReaction
             val resolvedReceiverReaction = runCatching { getString("receiverReaction") }.getOrNull() ?: obj.receiverReaction
-            val resolvedIsEdited = runCatching { getBoolean("isEdited") }.getOrNull() ?: obj.isEdited
-            val resolvedEditedAt = runCatching { getTimestamp("editedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }.getOrNull() ?: obj.editedAt
+            val resolvedIsEdited = runCatching { getBoolean("isEdited") ?: getBoolean("edited") }.getOrNull() ?: obj.isEdited
+            val resolvedEditedAt = runCatching {
+                getTimestamp("editedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            }.getOrNull() ?: runCatching {
+                when (val raw = get("editedAt")) {
+                    is Timestamp -> raw
+                    is java.util.Date -> Timestamp(raw)
+                    is Number -> {
+                        val ms = raw.toLong()
+                        if (ms > 0L) Timestamp(java.util.Date(ms)) else null
+                    }
+                    else -> null
+                }
+            }.getOrNull() ?: obj.editedAt
             val resolvedDeletedForSender = runCatching { getBoolean("deletedForSender") }.getOrNull() ?: obj.deletedForSender
             val resolvedDeletedForReceiver = runCatching { getBoolean("deletedForReceiver") }.getOrNull() ?: obj.deletedForReceiver
-            val resolvedDeletedForEveryone = runCatching { getBoolean("isDeletedForEveryone") }.getOrNull() ?: obj.isDeletedForEveryone
+            val resolvedDeletedForEveryone = runCatching { getBoolean("isDeletedForEveryone") ?: getBoolean("deletedForEveryone") }.getOrNull() ?: obj.isDeletedForEveryone
             val resolvedGroupId = runCatching { getString("groupId") }.getOrNull() ?: obj.groupId
             val resolvedGroupName = runCatching { getString("groupName") }.getOrNull() ?: obj.groupName
             val resolvedGroupMembers = (runCatching { get("groupMemberIds") }.getOrNull() as? List<*>)?.mapNotNull { it as? String } ?: obj.groupMemberIds
@@ -3421,25 +3439,40 @@ class QawmiRepository(
                 ?.toMap() ?: obj.userReactions
             val resolvedCreatedAt = runCatching {
                 getTimestamp("createdAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            }.getOrNull() ?: runCatching {
+                when (val raw = get("createdAt")) {
+                    is Timestamp -> raw
+                    is java.util.Date -> Timestamp(raw)
+                    is Number -> {
+                        val ms = raw.toLong()
+                        if (ms > 0L) Timestamp(java.util.Date(ms)) else null
+                    }
+                    else -> null
+                }
             }.getOrNull() ?: obj.createdAt ?: Timestamp.now()
+
+            if (resolvedSenderId.isBlank() && resolvedReceiverId.isBlank() && resolvedGroupId.isBlank()) {
+                return null
+            }
+
             val hasPending = runCatching { metadata.hasPendingWrites() }.getOrDefault(false)
-            val isGroupMsg = resolvedGroupId.isNotBlank() || obj.receiverId.startsWith("GROUP:", ignoreCase = true)
+            val isGroupMsg = resolvedGroupId.isNotBlank() || resolvedReceiverId.startsWith("GROUP:", ignoreCase = true)
             val isReadByRecipient = resolvedIsRead || if (isGroupMsg) {
                 resolvedReadBy.any { token ->
                     token.isNotBlank() &&
-                        token != obj.senderId &&
+                        token != resolvedSenderId &&
                         !token.startsWith("DELIVERED:", ignoreCase = true)
                 }
             } else {
-                obj.receiverId.isNotBlank() && resolvedReadBy.contains(obj.receiverId)
+                resolvedReceiverId.isNotBlank() && resolvedReadBy.contains(resolvedReceiverId)
             }
             val isDeliveredToRecipient = if (isGroupMsg) {
                 resolvedReadBy.any { token ->
                     token.startsWith("DELIVERED:", ignoreCase = true) &&
-                        !token.equals("DELIVERED:${obj.senderId}", ignoreCase = true)
+                        !token.equals("DELIVERED:$resolvedSenderId", ignoreCase = true)
                 }
             } else {
-                obj.receiverId.isNotBlank() && resolvedReadBy.contains("DELIVERED:${obj.receiverId}")
+                resolvedReceiverId.isNotBlank() && resolvedReadBy.contains("DELIVERED:$resolvedReceiverId")
             }
             val computedDeliveryState = when {
                 hasPending -> "SENDING"
@@ -3449,9 +3482,16 @@ class QawmiRepository(
             }
             obj.copy(
                 id = id,
+                senderId = resolvedSenderId,
+                senderName = resolvedSenderName,
+                senderPhotoUrl = resolvedSenderPhotoUrl,
+                receiverId = resolvedReceiverId,
+                receiverName = resolvedReceiverName,
                 groupId = resolvedGroupId,
                 groupName = resolvedGroupName,
                 groupMemberIds = resolvedGroupMembers,
+                subject = resolvedSubject,
+                body = resolvedBody,
                 imageUrls = resolvedImageUrls,
                 isRead = resolvedIsRead,
                 readByUserIds = resolvedReadBy,

@@ -413,6 +413,7 @@ data class DirectMessage(
     @set:PropertyName("isDeletedForEveryone")
     var isDeletedForEveryone: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
+    @field:Exclude
     @get:Exclude
     @set:Exclude
     var localDeliveryState: String = ""
