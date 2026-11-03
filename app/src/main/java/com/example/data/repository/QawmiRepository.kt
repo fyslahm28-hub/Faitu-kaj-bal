@@ -317,6 +317,12 @@ class QawmiRepository(
                         }
                         jobs += async {
                             syncQueryFromServerIfNeeded(
+                                db.collection("messages").whereArrayContains("groupMemberIds", effectiveUid),
+                                "messages/group/$effectiveUid"
+                            )
+                        }
+                        jobs += async {
+                            syncQueryFromServerIfNeeded(
                                 db.collection("chat_groups").whereArrayContains("memberIds", effectiveUid),
                                 "chat_groups/$effectiveUid"
                             )
@@ -342,6 +348,48 @@ class QawmiRepository(
             }
         } finally {
             FirestoreConnectionMonitor.onFullSyncFinished()
+        }
+    }
+
+    /**
+     * Explicitly synchronizes the user's sent, received, and group messages from the Firestore server
+     * (falling back to default/cache source if offline or timed out) and delivers snapshots directly
+     * to active message query observers so historical messages are guaranteed to load when entering chat.
+     */
+    suspend fun syncUserMessagesFromServer(userId: String) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val effectiveUid = resolveEffectiveUserId(userId)
+        if (effectiveUid.isBlank()) return@withContext
+
+        val queries = listOf(
+            "messages/received/$effectiveUid" to db.collection("messages").whereEqualTo("receiverId", effectiveUid),
+            "messages/sent/$effectiveUid" to db.collection("messages").whereEqualTo("senderId", effectiveUid),
+            "messages/group/$effectiveUid" to db.collection("messages").whereArrayContains("groupMemberIds", effectiveUid)
+        )
+
+        coroutineScope {
+            queries.map { (path, query) ->
+                async {
+                    val snap = if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                        withTimeoutOrNull(2_500L) {
+                            runCatching { query.get(Source.SERVER).await() }.getOrNull()
+                        } ?: withTimeoutOrNull(1_500L) {
+                            runCatching { query.get().await() }.getOrNull()
+                        }
+                    } else {
+                        withTimeoutOrNull(400L) {
+                            runCatching { query.get(Source.CACHE).await() }.getOrNull()
+                        }
+                    }
+                    if (snap != null) {
+                        FirestoreConnectionMonitor.onSnapshotReceived(
+                            path = path,
+                            isFromCache = snap.metadata.isFromCache,
+                            hasPendingWrites = snap.metadata.hasPendingWrites()
+                        )
+                        activeQueryServerCallbacks[path]?.invoke(snap)
+                    }
+                }
+            }.forEach { it.await() }
         }
     }
 
@@ -404,15 +452,17 @@ class QawmiRepository(
                         detachCurrentRegistration()
                         val currentUser = runCatching { auth.currentUser }.getOrNull()
                         if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED && currentUser == null) {
-                            close(error)
+                            if (!hasEmittedAny.get()) {
+                                tryEmitSafe(emptyList(), fromListener = false, isServerData = false)
+                            }
                             return@addSnapshotListener
                         }
 
                         recoveryJob?.cancel()
                         recoveryJob = launch(Dispatchers.IO) {
                             val attempt = retryAttempt.incrementAndGet()
-                            // Serve local cache fallback if nothing emitted yet, explicitly marked as cache
-                            if (!hasEmittedAny.get() && runCatching { auth.currentUser }.getOrNull() != null) {
+                            // Serve local cache fallback if nothing emitted yet, or emit emptyList so UI never hangs on Loading
+                            if (!hasEmittedAny.get()) {
                                 val cachedFallback = withTimeoutOrNull(200L) {
                                     runCatching { query.get(Source.CACHE).await() }.getOrNull()
                                 }
@@ -431,12 +481,26 @@ class QawmiRepository(
                                 }
                             }
 
+                            // Stop infinite retry loops on deterministic permission/index errors so gRPC streams are not disrupted
+                            val isDeterministicQueryError =
+                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                    error.code == FirebaseFirestoreException.Code.FAILED_PRECONDITION ||
+                                    error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
+                            if (isDeterministicQueryError && attempt >= 2) {
+                                if (!hasEmittedAny.get()) {
+                                    tryEmitSafe(emptyList(), fromListener = false, isServerData = false)
+                                }
+                                return@launch
+                            }
+
                             val backoffMs = minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
 
-                            if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
-                                error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
+                            if (attempt == 1 && (
+                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                    error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
+                                )
                             ) {
                                 runCatching {
                                     withTimeoutOrNull(2_000L) {
@@ -500,7 +564,6 @@ class QawmiRepository(
         // 2. Instant zero-delay local cache seed on Dispatchers.IO (< 100ms) so UI shows cached data immediately
         launch(Dispatchers.IO) {
             if (listenerHasEmitted.get() || hasEmittedAny.get()) return@launch
-            if (runCatching { auth.currentUser }.getOrNull() == null) return@launch
             val cachedSnap = withTimeoutOrNull(200L) {
                 runCatching { query.get(Source.CACHE).await() }.getOrNull()
             }
@@ -533,7 +596,7 @@ class QawmiRepository(
                 } else if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
                     delay(180L)
                     if (!isActive) return@collect
-                    val freshSnap = withTimeoutOrNull(1_500L) {
+                    val freshSnap = withTimeoutOrNull(1_800L) {
                         runCatching { query.get(Source.SERVER).await() }.getOrNull()
                     }
                     if (freshSnap != null && isActive) {
@@ -551,7 +614,7 @@ class QawmiRepository(
             }
         }
 
-        // 4. Bounded fast server sync (< 2s total startup budget) if this flow's watch stream hasn't confirmed yet
+        // 4. Bounded fast server sync (< 2.5s total startup budget) if this flow's watch stream hasn't confirmed yet
         launch(Dispatchers.IO) {
             delay(initialServerTimeoutMs)
             if (hasReceivedServerSnapshot.get()) {
@@ -559,10 +622,13 @@ class QawmiRepository(
             }
             var serverErr: Throwable? = null
             val serverSnap = if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
-                withTimeoutOrNull(1_200L) {
+                withTimeoutOrNull(2_000L) {
                     runCatching { query.get(Source.SERVER).await() }
-                        .recoverCatching { query.get().await() }
                         .onFailure { serverErr = it }
+                        .getOrNull()
+                } ?: withTimeoutOrNull(1_200L) {
+                    runCatching { query.get().await() }
+                        .onFailure { if (serverErr == null) serverErr = it }
                         .getOrNull()
                 }
             } else {
@@ -578,21 +644,14 @@ class QawmiRepository(
                 if (!hasReceivedServerSnapshot.get()) {
                     tryEmitSafe(mapped, fromListener = false, isServerData = !serverSnap.metadata.isFromCache)
                 }
-            } else if (!hasEmittedAny.get() && !listenerHasEmitted.get()) {
+            } else if (!hasEmittedAny.get()) {
                 val fsErr = serverErr as? FirebaseFirestoreException
-                if (fsErr != null &&
-                    fsErr.code == FirebaseFirestoreException.Code.PERMISSION_DENIED &&
-                    runCatching { auth.currentUser }.getOrNull() == null
-                ) {
+                if (fsErr != null) {
                     handleFirestoreError(fsErr, OperationType.LIST, path)
-                    close(fsErr)
-                    return@launch
                 }
-                val fallbackCache = if (runCatching { auth.currentUser }.getOrNull() != null) {
-                    withTimeoutOrNull(200L) {
-                        runCatching { query.get(Source.CACHE).await() }.getOrNull()
-                    }
-                } else null
+                val fallbackCache = withTimeoutOrNull(250L) {
+                    runCatching { query.get(Source.CACHE).await() }.getOrNull()
+                }
                 val fallbackList = if (fallbackCache != null) {
                     FirestoreConnectionMonitor.onSnapshotReceived(
                         path = path,
@@ -603,7 +662,7 @@ class QawmiRepository(
                 } else {
                     emptyList()
                 }
-                if (!hasEmittedAny.get() && !listenerHasEmitted.get()) {
+                if (!hasEmittedAny.get()) {
                     tryEmitSafe(fallbackList, fromListener = false, isServerData = false)
                 }
             }
@@ -654,7 +713,10 @@ class QawmiRepository(
                         detachCurrentRegistration()
                         val currentUser = runCatching { auth.currentUser }.getOrNull()
                         if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED && currentUser == null) {
-                            close(error)
+                            if (!hasEmittedAny.get()) {
+                                hasEmittedAny.set(true)
+                                trySend(defaultValueOnError)
+                            }
                             return@addSnapshotListener
                         }
                         recoveryJob?.cancel()
@@ -677,11 +739,19 @@ class QawmiRepository(
                                     trySend(defaultValueOnError)
                                 }
                             }
+                            if ((error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                    error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT) &&
+                                attempt >= 2
+                            ) {
+                                return@launch
+                            }
                             val backoffMs = minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             delay(backoffMs)
                             if (!isActive) return@launch
-                            if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
-                                error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
+                            if (attempt == 1 && (
+                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                    error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
+                                )
                             ) {
                                 runCatching {
                                     withTimeoutOrNull(2_000L) {
@@ -3412,35 +3482,104 @@ class QawmiRepository(
             query = db.collection(collectionName).whereEqualTo("senderId", effectiveUid),
             path = "messages/sent/$effectiveUid",
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 700L
+            initialServerTimeoutMs = 500L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
-        }
+        }.catch { emit(emptyList()) }
 
         val receivedFlow = observeQueryWithFastInitialAndFallback(
             query = db.collection(collectionName).whereEqualTo("receiverId", effectiveUid),
             path = "messages/received/$effectiveUid",
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 700L
+            initialServerTimeoutMs = 500L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
-        }
+        }.catch { emit(emptyList()) }
 
         val groupMessagesFlow = observeQueryWithFastInitialAndFallback(
             query = db.collection(collectionName).whereArrayContains("groupMemberIds", effectiveUid),
             path = "messages/group/$effectiveUid",
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 700L
+            initialServerTimeoutMs = 500L
         ) { snapshot ->
             snapshot.documents.mapNotNull { it.toDirectMessageOrNull() }
-        }
+        }.catch { emit(emptyList()) }
 
-        return combine(sentFlow, receivedFlow, groupMessagesFlow) { sent, received, groupMsgs ->
-            // Merge received and group messages first so read/reaction state is authoritative, and deduplicate strictly by document id
-            (received + groupMsgs + sent)
-                .filter { it.id.isNotBlank() }
-                .distinctBy { it.id }
-                .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+        return channelFlow {
+            val stateLock = Any()
+            var sentList: List<DirectMessage> = emptyList()
+            var receivedList: List<DirectMessage> = emptyList()
+            var groupList: List<DirectMessage> = emptyList()
+            var sentEmitted = false
+            var receivedEmitted = false
+            var groupEmitted = false
+            val hasEmittedInitial = AtomicBoolean(false)
+
+            fun emitMergedIfReady(forceEmit: Boolean = false) {
+                val merged: List<DirectMessage>? = synchronized(stateLock) {
+                    val hasAnyNonEmpty = sentList.isNotEmpty() || receivedList.isNotEmpty() || groupList.isNotEmpty()
+                    val directQueriesReady = sentEmitted && receivedEmitted
+                    val allQueriesReady = directQueriesReady && groupEmitted
+                    if (forceEmit || hasAnyNonEmpty || directQueriesReady || allQueriesReady || hasEmittedInitial.get()) {
+                        hasEmittedInitial.set(true)
+                        // Merge received and group messages first so read/reaction state is authoritative, and deduplicate strictly by document id
+                        (receivedList + groupList + sentList)
+                            .filter { it.id.isNotBlank() }
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    } else {
+                        null
+                    }
+                }
+                if (merged != null) {
+                    trySend(merged)
+                }
+            }
+
+            launch {
+                sentFlow.collect { list ->
+                    synchronized(stateLock) {
+                        sentList = list
+                        sentEmitted = true
+                    }
+                    emitMergedIfReady()
+                }
+            }
+
+            launch {
+                receivedFlow.collect { list ->
+                    synchronized(stateLock) {
+                        receivedList = list
+                        receivedEmitted = true
+                    }
+                    emitMergedIfReady()
+                }
+            }
+
+            launch {
+                groupMessagesFlow.collect { list ->
+                    synchronized(stateLock) {
+                        groupList = list
+                        groupEmitted = true
+                    }
+                    emitMergedIfReady()
+                }
+            }
+
+            // Actively fetch historical messages from server in parallel
+            launch(Dispatchers.IO) {
+                runCatching { syncUserMessagesFromServer(effectiveUid) }
+            }
+
+            // Bounded safety timeout so Permission Denied, Query Error, Timeout, or Empty Result never leaves UI stuck on Loading
+            launch(Dispatchers.IO) {
+                delay(900L)
+                if (!hasEmittedInitial.get()) {
+                    emitMergedIfReady(forceEmit = true)
+                }
+            }
+
+            awaitClose { }
         }
     }
 

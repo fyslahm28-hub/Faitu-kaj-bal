@@ -2218,7 +2218,17 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
                 .get(com.google.firebase.firestore.Source.SERVER)
                 .awaitWithTimeout()
         }
-        assertPermissionDenied("Scenario 10b: Non-member forging group message by injecting own UID in groupMemberIds must be denied") {
+        assertPermissionDenied("Scenario 10b: Non-member adding themselves to chat_group memberIds must be denied") {
+            firestore.collection("chat_groups").document(groupId)
+                .update(
+                    mapOf(
+                        "memberIds" to listOf(senderUid, receiverUid, strangerUid),
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Scenario 10c: Non-member forging group message by injecting own UID in groupMemberIds must be denied") {
             firestore.collection("messages").document("forged_grp_${UUID.randomUUID().toString().take(8)}")
                 .set(
                     mapOf(
@@ -2236,6 +2246,64 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
                         "createdAt" to com.google.firebase.Timestamp.now()
                     )
                 )
+                .awaitWithTimeout()
+        }
+
+        // Notification Access & Anti-Spoofing + Profile Privacy Verification
+        assertPermissionDenied("Notification Spoofing 1: Forging another user's senderId in /notifications must be denied") {
+            firestore.collection("notifications").document("forged_notif_1_${UUID.randomUUID().toString().take(6)}")
+                .set(
+                    mapOf(
+                        "recipientId" to receiverUid,
+                        "senderId" to senderUid,
+                        "senderName" to "ভুয়া প্রেরক",
+                        "title" to "জাল নোটিফিকেশন",
+                        "message" to "অন্যের পরিচয়ে পাঠানো জাল বার্তা",
+                        "type" to "APPLICATION",
+                        "referenceId" to postId,
+                        "isRead" to false,
+                        "createdAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Notification Spoofing 2: Regular user forging VERIFICATION notification must be denied") {
+            firestore.collection("notifications").document("forged_notif_2_${UUID.randomUUID().toString().take(6)}")
+                .set(
+                    mapOf(
+                        "recipientId" to receiverUid,
+                        "senderId" to strangerUid,
+                        "senderName" to "ভুয়া অ্যাডমিন",
+                        "title" to "ভুয়া ভেরিফিকেশন",
+                        "message" to "আপনার মাদরাসা ভেরিফাইড হয়েছে",
+                        "type" to "VERIFICATION",
+                        "referenceId" to postId,
+                        "isRead" to false,
+                        "createdAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Profile Privacy 1: Stranger updating another user's profile in /users/{uid} must be denied") {
+            firestore.collection("users").document(senderUid)
+                .update(
+                    mapOf(
+                        "contactInfo" to "01000000000",
+                        "updatedAt" to com.google.firebase.Timestamp.now()
+                    )
+                )
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Profile Privacy 2: Stranger reading another user's private bookmarks subcollection must be denied") {
+            firestore.collection("users").document(senderUid)
+                .collection("bookmarks")
+                .get(com.google.firebase.firestore.Source.SERVER)
+                .awaitWithTimeout()
+        }
+        assertPermissionDenied("Profile Privacy 3: Stranger reading another user's private notification_reads subcollection must be denied") {
+            firestore.collection("users").document(senderUid)
+                .collection("notification_reads")
+                .get(com.google.firebase.firestore.Source.SERVER)
                 .awaitWithTimeout()
         }
     }

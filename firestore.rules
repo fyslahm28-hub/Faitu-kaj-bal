@@ -995,6 +995,7 @@ service cloud.firestore {
       allow list: if isSignedIn() && (
                     resource.data.senderId == request.auth.uid ||
                     resource.data.receiverId == request.auth.uid ||
+                    request.auth.uid in resource.data.groupMemberIds ||
                     request.auth.uid in resource.data.get('groupMemberIds', [])
                   );
 
@@ -1031,11 +1032,11 @@ service cloud.firestore {
                        incoming().get('senderId', '') == existing().get('senderId', '') &&
                        incoming().get('receiverId', '') == existing().get('receiverId', '') &&
                        incoming().get('groupId', '') == existing().get('groupId', '') &&
+                       incoming().get('subject', '') == existing().get('subject', '') &&
                        (incoming().createdAt == existing().createdAt ||
                         (request.auth.uid == existing().senderId &&
                          isValidTimestamp(incoming().createdAt) &&
-                         incoming().body == existing().body &&
-                         incoming().get('subject', '') == existing().get('subject', ''))) &&
+                         incoming().body == existing().body)) &&
                        isValidReactionCode(incoming().get('senderReaction', '')) &&
                        isValidReactionCode(incoming().get('receiverReaction', '')) &&
                        (incoming().get('userReactions', {}) is map && incoming().get('userReactions', {}).size() <= 50) &&
@@ -1070,6 +1071,7 @@ service cloud.firestore {
                           (!('deletedForUserIds' in incoming().diff(existing()).affectedKeys()) ||
                            isValidSelfDeletedIdsUpdate(incoming().get('deletedForUserIds', []), existing().get('deletedForUserIds', []))) &&
                           (!('userReactions' in incoming().diff(existing()).affectedKeys()) ||
+                           (incoming().get('isDeletedForEveryone', false) == true && incoming().get('userReactions', {}).size() == 0) ||
                            isValidSelfReactionMapUpdate(incoming().get('userReactions', {}), existing().get('userReactions', {}))) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'body', 'subject', 'senderName', 'senderPhotoUrl', 'receiverName',
@@ -1095,6 +1097,7 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        isValidId(notificationId) &&
                        incoming().senderId == request.auth.uid &&
+                       incoming().recipientId != request.auth.uid &&
                        incoming().isRead == false &&
                        incoming().keys().hasAll([
                          'recipientId', 'senderId', 'senderName', 'title',
@@ -1106,6 +1109,9 @@ service cloud.firestore {
                        ]) &&
                        (incoming().type != 'ANNOUNCEMENT' || isAdmin()) &&
                        (incoming().type != 'BOOST' || isAdmin()) &&
+                       (incoming().type != 'VERIFICATION' || isAdmin()) &&
+                       (incoming().recipientId != 'ALL_USERS' || incoming().type in ['NEW_CIRCULAR', 'NEW_APPLICATION'] || isAdmin()) &&
+                       (incoming().recipientId == 'ALL_USERS' || !isBlockedBetween(incoming().senderId, incoming().recipientId)) &&
                        isValidAppNotification(incoming());
 
       allow update: if isSignedIn() &&

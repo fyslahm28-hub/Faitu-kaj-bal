@@ -1096,6 +1096,11 @@ class QawmiViewModel(
             _navigationStack.addLast(_currentDestination.value)
             _currentDestination.value = destination
         }
+        if (destination == MainDestination.MESSAGES && currentUserId.isNotBlank()) {
+            viewModelScope.launch {
+                runCatching { repository.syncUserMessagesFromServer(currentUserId) }
+            }
+        }
     }
 
     fun navigateBottomTab(destination: MainDestination) {
@@ -1104,6 +1109,11 @@ class QawmiViewModel(
         }
         _navigationStack.clear()
         _currentDestination.value = destination
+        if (destination == MainDestination.MESSAGES && currentUserId.isNotBlank()) {
+            viewModelScope.launch {
+                runCatching { repository.syncUserMessagesFromServer(currentUserId) }
+            }
+        }
     }
 
     fun navigateBack(): Boolean {
@@ -1283,6 +1293,11 @@ class QawmiViewModel(
         _messageTargetUser.value = userId to userName
         navigateTo(MainDestination.MESSAGES)
         markConversationRead(userId)
+        if (currentUserId.isNotBlank()) {
+            viewModelScope.launch {
+                runCatching { repository.syncUserMessagesFromServer(currentUserId) }
+            }
+        }
     }
 
     fun clearMessageTarget() {
