@@ -106,11 +106,10 @@ class QawmiRepository(
             FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
 
             val currentUser = runCatching { auth.currentUser }.getOrNull()
-            if (currentUser != null) {
-                val shouldRefreshToken = forceTokenRefresh || !FirestoreConnectionMonitor.isServerConnected.value
+            if (currentUser != null && forceTokenRefresh) {
                 runCatching {
                     withTimeoutOrNull(1_800L) {
-                        currentUser.getIdToken(shouldRefreshToken).await()
+                        currentUser.getIdToken(true).await()
                     }
                 }
             }
@@ -121,7 +120,7 @@ class QawmiRepository(
                 }
             }
 
-            if (reason != "APP_STARTUP") {
+            if (reason != "APP_STARTUP" && reason != "AUTH_TOKEN_REFRESHED") {
                 FirestoreConnectionMonitor.triggerGlobalReconnect(reason)
             }
 
@@ -360,6 +359,68 @@ class QawmiRepository(
         val effectiveUid = resolveEffectiveUserId(userId)
         if (effectiveUid.isBlank()) return@withContext
 
+        runCatching { db.enableNetwork() }
+
+        // Automatically flush and re-commit any cached outgoing messages stuck with hasPendingWrites() == true
+        runCatching {
+            val cachedSent = withTimeoutOrNull(800L) {
+                db.collection("messages")
+                    .whereEqualTo("senderId", effectiveUid)
+                    .get(Source.CACHE)
+                    .await()
+            }
+            val pendingDocs = cachedSent?.documents?.filter { doc ->
+                runCatching { doc.metadata.hasPendingWrites() }.getOrDefault(false)
+            }.orEmpty()
+            if (pendingDocs.isNotEmpty()) {
+                pendingDocs.forEach { doc ->
+                    runCatching {
+                        val rawMap = doc.data ?: return@forEach
+                        val senderIdVal = (rawMap["senderId"] as? String)?.trim().orEmpty().ifBlank { effectiveUid }
+                        val receiverIdVal = (rawMap["receiverId"] as? String)?.trim().orEmpty()
+                        val bodyVal = (rawMap["body"] as? String)?.trim().orEmpty()
+                        val imagesVal = (rawMap["imageUrls"] as? List<*>)
+                            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                            ?.take(5)
+                            .orEmpty()
+                        if (senderIdVal == effectiveUid && receiverIdVal.isNotBlank() && (bodyVal.isNotBlank() || imagesVal.isNotEmpty())) {
+                            val groupIdVal = (rawMap["groupId"] as? String)?.trim().orEmpty()
+                            val isGrp = groupIdVal.isNotBlank() || receiverIdVal.startsWith("GROUP:", ignoreCase = true)
+                            val cleanPayload = mutableMapOf<String, Any>(
+                                "senderId" to effectiveUid,
+                                "senderName" to ((rawMap["senderName"] as? String)?.trim().orEmpty().ifBlank { "সম্মানিত দ্বীনি ভাই" }.take(145)),
+                                "senderPhotoUrl" to ((rawMap["senderPhotoUrl"] as? String)?.trim().orEmpty().take(240_000)),
+                                "receiverId" to receiverIdVal.take(120),
+                                "receiverName" to ((rawMap["receiverName"] as? String)?.trim().orEmpty().ifBlank { "সম্মানিত প্রাপক" }.take(145)),
+                                "groupMemberIds" to emptyList<String>(),
+                                "subject" to ((rawMap["subject"] as? String)?.trim().orEmpty().ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }.take(195)),
+                                "body" to bodyVal.take(1450),
+                                "isRead" to false,
+                                "readByUserIds" to listOf(effectiveUid),
+                                "createdAt" to (rawMap["createdAt"] as? Timestamp ?: FieldValue.serverTimestamp())
+                            )
+                            if (imagesVal.isNotEmpty()) {
+                                cleanPayload["imageUrls"] = imagesVal
+                            }
+                            if (isGrp) {
+                                val resolvedGrpId = groupIdVal.ifBlank { receiverIdVal.substringAfter(":", receiverIdVal).trim() }.take(120)
+                                val grpMembers = ((rawMap["groupMemberIds"] as? List<*>)
+                                    ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                                    .orEmpty() + effectiveUid).distinct().take(50)
+                                cleanPayload["groupId"] = resolvedGrpId
+                                cleanPayload["groupName"] = ((rawMap["groupName"] as? String)?.trim().orEmpty().ifBlank { "গ্রুপ কথোপকথন" }.take(145))
+                                cleanPayload["groupMemberIds"] = grpMembers
+                            }
+                            doc.reference.set(cleanPayload)
+                        }
+                    }
+                }
+                withTimeoutOrNull(2_000L) {
+                    runCatching { db.waitForPendingWrites().await() }
+                }
+            }
+        }
+
         val queries = listOf(
             "messages/received/$effectiveUid" to db.collection("messages").whereEqualTo("receiverId", effectiveUid),
             "messages/sent/$effectiveUid" to db.collection("messages").whereEqualTo("senderId", effectiveUid),
@@ -418,6 +479,7 @@ class QawmiRepository(
         val activeRegistration = AtomicReference<ListenerRegistration?>(null)
         val isCountedAttached = AtomicBoolean(false)
         val retryAttempt = AtomicInteger(0)
+        val hasDeterministicError = AtomicBoolean(false)
         var recoveryJob: Job? = null
 
         fun tryEmitSafe(items: List<T>, fromListener: Boolean = false, isServerData: Boolean = false) {
@@ -452,9 +514,7 @@ class QawmiRepository(
                         detachCurrentRegistration()
                         val currentUser = runCatching { auth.currentUser }.getOrNull()
                         if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED && currentUser == null) {
-                            if (!hasEmittedAny.get()) {
-                                tryEmitSafe(emptyList(), fromListener = false, isServerData = false)
-                            }
+                            close(error)
                             return@addSnapshotListener
                         }
 
@@ -481,24 +541,23 @@ class QawmiRepository(
                                 }
                             }
 
-                            // Use a longer bounded backoff on permission/index errors while keeping automatic listener reconnection active
                             val isDeterministicQueryError =
                                 error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                     error.code == FirebaseFirestoreException.Code.FAILED_PRECONDITION ||
                                     error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
-                            val backoffMs = if (isDeterministicQueryError && attempt >= 2) {
-                                8_000L
+                            if (isDeterministicQueryError && attempt >= 2) {
+                                hasDeterministicError.set(true)
+                                return@launch
+                            }
+                            val backoffMs = if (isDeterministicQueryError) {
+                                4_000L
                             } else {
                                 minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             }
                             delay(backoffMs)
                             if (!isActive) return@launch
 
-                            if (attempt == 1 && (
-                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
-                                    error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
-                                )
-                            ) {
+                            if (attempt == 1 && error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED) {
                                 runCatching {
                                     withTimeoutOrNull(2_000L) {
                                         auth.currentUser?.getIdToken(true)?.await()
@@ -514,6 +573,7 @@ class QawmiRepository(
 
                     if (snapshot != null) {
                         retryAttempt.set(0)
+                        hasDeterministicError.set(false)
                         val isFromCache = snapshot.metadata.isFromCache
                         val hasPending = snapshot.metadata.hasPendingWrites()
                         FirestoreConnectionMonitor.onSnapshotReceived(
@@ -584,13 +644,13 @@ class QawmiRepository(
         launch(Dispatchers.IO) {
             FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
                 if (!isActive) return@collect
-                if (activeRegistration.get() == null) {
+                if (activeRegistration.get() == null && !hasDeterministicError.get()) {
                     recoveryJob?.cancel()
                     retryAttempt.set(0)
                     runCatching { db.enableNetwork() }
                     FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
                     attachSnapshotListener()
-                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value && !hasDeterministicError.get()) {
                     delay(180L)
                     if (!isActive) return@collect
                     val freshSnap = withTimeoutOrNull(1_800L) {
@@ -688,6 +748,7 @@ class QawmiRepository(
         val activeRegistration = AtomicReference<ListenerRegistration?>(null)
         val isCountedAttached = AtomicBoolean(false)
         val retryAttempt = AtomicInteger(0)
+        val hasDeterministicError = AtomicBoolean(false)
         var recoveryJob: Job? = null
 
         fun detachCurrentRegistration() {
@@ -739,18 +800,18 @@ class QawmiRepository(
                             val isDeterministicDocError =
                                 error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                     error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
-                            val backoffMs = if (isDeterministicDocError && attempt >= 2) {
-                                8_000L
+                            if (isDeterministicDocError && attempt >= 2) {
+                                hasDeterministicError.set(true)
+                                return@launch
+                            }
+                            val backoffMs = if (isDeterministicDocError) {
+                                4_000L
                             } else {
                                 minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
                             }
                             delay(backoffMs)
                             if (!isActive) return@launch
-                            if (attempt == 1 && (
-                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
-                                    error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
-                                )
-                            ) {
+                            if (attempt == 1 && error.code == FirebaseFirestoreException.Code.UNAUTHENTICATED) {
                                 runCatching {
                                     withTimeoutOrNull(2_000L) {
                                         auth.currentUser?.getIdToken(true)?.await()
@@ -766,6 +827,7 @@ class QawmiRepository(
 
                     if (snapshot != null) {
                         retryAttempt.set(0)
+                        hasDeterministicError.set(false)
                         val isFromCache = snapshot.metadata.isFromCache
                         val hasPending = snapshot.metadata.hasPendingWrites()
                         FirestoreConnectionMonitor.onSnapshotReceived(
@@ -870,13 +932,13 @@ class QawmiRepository(
         launch(Dispatchers.IO) {
             FirestoreConnectionMonitor.recoveryGeneration.drop(1).collect {
                 if (!isActive) return@collect
-                if (activeRegistration.get() == null) {
+                if (activeRegistration.get() == null && !hasDeterministicError.get()) {
                     recoveryJob?.cancel()
                     retryAttempt.set(0)
                     runCatching { db.enableNetwork() }
                     FirestoreConnectionMonitor.onListenerReattached(path, 1, "GLOBAL_RECONNECT")
                     attachDocListener()
-                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                } else if (FirestoreConnectionMonitor.isNetworkAvailable.value && !hasDeterministicError.get()) {
                     delay(180L)
                     if (!isActive) return@collect
                     val freshDoc = withTimeoutOrNull(1_500L) {
@@ -3475,7 +3537,6 @@ class QawmiRepository(
                 resolvedReceiverId.isNotBlank() && resolvedReadBy.contains("DELIVERED:$resolvedReceiverId")
             }
             val computedDeliveryState = when {
-                hasPending -> "SENDING"
                 isReadByRecipient -> "READ"
                 isDeliveredToRecipient -> "DELIVERED"
                 else -> "SENT"

@@ -34,7 +34,7 @@ service cloud.firestore {
       return isValidId(blockerUid) &&
              isValidId(targetUid) &&
              exists(path) &&
-             (get(path).data.get('blockedUserIds', null) is list) &&
+             (get(path).data.get('blockedUserIds', []) is list) &&
              (targetUid in get(path).data.get('blockedUserIds', []));
     }
 
@@ -260,15 +260,7 @@ service cloud.firestore {
     }
 
     function isValidReactionCode(code) {
-      return code is string && code.size() <= 40 && (
-        code == '' ||
-        code == 'DUA' ||
-        code == 'MUHABBAT' ||
-        code == 'HILAL' ||
-        code == 'SUNDOR' ||
-        code == 'DEENI_PRERONA' ||
-        code == 'SAMMATI'
-      );
+      return code is string && code.size() <= 40;
     }
 
     function isValidChatGroup(data) {
@@ -969,19 +961,19 @@ service cloud.firestore {
       }
 
       function isValidRecipientReadByUpdate(incReadBy, extReadBy) {
-        return incReadBy is list &&
-               extReadBy is list &&
-               incReadBy.size() <= 50 &&
-               incReadBy.hasAll(extReadBy) &&
-               incReadBy.removeAll(extReadBy).hasOnly([request.auth.uid, 'DELIVERED:' + request.auth.uid]);
+        let incList = incReadBy is list ? incReadBy : [];
+        let extList = extReadBy is list ? extReadBy : [];
+        return incList.size() <= 50 &&
+               incList.hasAll(extList) &&
+               incList.removeAll(extList).hasOnly([request.auth.uid, 'DELIVERED:' + request.auth.uid]);
       }
 
       function isValidSelfDeletedIdsUpdate(incDeletedIds, extDeletedIds) {
-        return incDeletedIds is list &&
-               extDeletedIds is list &&
-               incDeletedIds.size() <= 50 &&
-               incDeletedIds.hasAll(extDeletedIds) &&
-               incDeletedIds.removeAll(extDeletedIds).hasOnly([request.auth.uid]);
+        let incList = incDeletedIds is list ? incDeletedIds : [];
+        let extList = extDeletedIds is list ? extDeletedIds : [];
+        return incList.size() <= 50 &&
+               incList.hasAll(extList) &&
+               incList.removeAll(extList).hasOnly([request.auth.uid]);
       }
 
       function isValidSelfReactionMapUpdate(incReactions, extReactions) {
@@ -995,8 +987,7 @@ service cloud.firestore {
       allow list: if isSignedIn() && (
                     resource.data.senderId == request.auth.uid ||
                     resource.data.receiverId == request.auth.uid ||
-                    request.auth.uid in resource.data.groupMemberIds ||
-                    request.auth.uid in resource.data.get('groupMemberIds', [])
+                    request.auth.uid in resource.data.groupMemberIds
                   );
 
       allow create: if isSignedIn() &&
@@ -1048,8 +1039,8 @@ service cloud.firestore {
                        (incoming().get('readByUserIds', []) is list && incoming().get('readByUserIds', []).size() <= 50) &&
                        (incoming().get('isDeletedForEveryone', false) is bool) && (
                          (request.auth.uid != existing().senderId &&
-                          incoming().isRead is bool &&
-                          (existing().get('isRead', false) == false || incoming().isRead == true) &&
+                          (incoming().get('isRead', false) is bool) &&
+                          (existing().get('isRead', false) == false || incoming().get('isRead', false) == true) &&
                           (!('readByUserIds' in incoming().diff(existing()).affectedKeys()) ||
                            isValidRecipientReadByUpdate(incoming().get('readByUserIds', []), existing().get('readByUserIds', []))) &&
                           (!('deletedForUserIds' in incoming().diff(existing()).affectedKeys()) ||

@@ -381,6 +381,13 @@ class QawmiViewModel(
     private val _rolledBackSubmissionIds = MutableStateFlow<Set<String>>(emptySet())
     private val _localOptimisticMessages = MutableStateFlow<List<DirectMessage>>(emptyList())
 
+    private val acknowledgedDeliveredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val inFlightMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val inFlightPostIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val inFlightSubmissionIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val recoveredPendingSyncIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val pendingOutgoingQueue = java.util.concurrent.ConcurrentHashMap<String, FailedMessageDraft>()
+
     private val _localIntelligenceConfigOverride = MutableStateFlow<IntelligenceConfig?>(null)
     private val _localPostMetricsOverrides = MutableStateFlow<Map<String, PostIntelligenceMetrics>>(emptyMap())
 
@@ -751,17 +758,19 @@ class QawmiViewModel(
                         }
                     )
 
+                val isActivelyInFlight = msg.id in inFlightMessageIds
                 val isConfirmedOnServer = msg.id in remoteIds &&
-                    remoteState != "SENDING" &&
+                    !isActivelyInFlight &&
                     remoteState != "FAILED"
 
                 val resolvedState = when {
-                    localOverrideState == "FAILED" && !isReadRemotely && !isDeliveredRemotely && !isConfirmedOnServer -> "FAILED"
+                    isActivelyInFlight -> "SENDING"
+                    localOverrideState == "FAILED" && !isReadRemotely && !isDeliveredRemotely -> "FAILED"
                     isReadRemotely || localOverrideState == "READ" || localOverrideState == "SEEN" -> "READ"
                     isDeliveredRemotely || localOverrideState == "DELIVERED" -> "DELIVERED"
-                    isConfirmedOnServer || localOverrideState == "SENT" -> "SENT"
-                    localOverrideState == "SENDING" || remoteState == "SENDING" -> "SENDING"
-                    else -> "SENDING"
+                    isConfirmedOnServer || localOverrideState == "SENT" || msg.id in remoteIds -> "SENT"
+                    localOverrideState == "SENDING" -> "SENDING"
+                    else -> "SENT"
                 }
                 if (locallyReadIds.contains(msg.id)) {
                     msg.copy(
@@ -973,13 +982,6 @@ class QawmiViewModel(
             config = config
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, AlgorithmPerformanceSummary())
-
-    private val acknowledgedDeliveredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-    private val inFlightMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-    private val inFlightPostIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-    private val inFlightSubmissionIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-    private val recoveredPendingSyncIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-    private val pendingOutgoingQueue = java.util.concurrent.ConcurrentHashMap<String, FailedMessageDraft>()
 
     private val lastForegroundSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val lastNetworkSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
@@ -1200,19 +1202,7 @@ class QawmiViewModel(
      * without tearing down active snapshot listeners.
      */
     fun onAuthSessionRefreshed() {
-        val now = System.currentTimeMillis()
-        val prev = lastNetworkSyncEpochMs.get()
-        if ((now - prev) < 1_500L) {
-            verifyAndSyncAdminIdentity()
-            return
-        }
-        lastNetworkSyncEpochMs.set(now)
-
-        viewModelScope.launch {
-            repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "AUTH_TOKEN_REFRESHED")
-            repository.refreshCriticalDataInParallel(currentUserId)
-            verifyAndSyncAdminIdentity()
-        }
+        verifyAndSyncAdminIdentity()
     }
 
     private fun retryPendingFailedMessagesAutomatically() {
