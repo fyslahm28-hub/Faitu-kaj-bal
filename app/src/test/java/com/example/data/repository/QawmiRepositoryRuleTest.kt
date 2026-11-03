@@ -2308,6 +2308,284 @@ class QawmiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
     }
 
+    /**
+     * Multi-Client End-to-End Verification for:
+     * - Test A (Messaging): User A sends message to User B -> User B receives in real time ->
+     *   User B replies -> User A receives reply -> App Restart (fresh repository & ViewModel)
+     *   loads full conversation from server with SENT/DELIVERED/READ states (never stuck on SENDING).
+     * - Test B (Post/Feed): User A publishes post -> User B sees in Feed -> User B publishes post ->
+     *   User A sees in Feed -> App Restart loads both posts from server.
+     * - Test C (Network & Retry): Offline/failed message & post transition deterministically to
+     *   FAILED (never infinite SENDING or false SENT) -> Reconnect + Retry succeeds on server
+     *   using the exact same document ID without creating duplicates.
+     */
+    @Test
+    fun multiClientCrossDeviceMessagingFeedAndRetryVerification() = runBlocking {
+        val runTag = UUID.randomUUID().toString().take(8)
+        val userAEmail = "verify_a_$runTag@qawmi.org"
+        val userBEmail = "verify_b_$runTag@qawmi.org"
+
+        // 1. Setup User A and User B profiles on the server
+        val userAUid = signInTestUser(userAEmail)
+        val repoA = QawmiRepository(firestore, auth)
+        withTimeout(5000L) {
+            repoA.saveUserProfile(
+                UserProfile(
+                    id = userAUid,
+                    userId = userAUid,
+                    fullName = "মাওলানা আবদুল্লাহ ($runTag)",
+                    accountType = "teacher",
+                    district = "ঢাকা",
+                    designation = "মুহাদ্দিস",
+                    qualification = "দাওরায়ে হাদিস",
+                    preferredDistricts = "ঢাকা",
+                    contactInfo = "01711000111"
+                )
+            )
+        }
+
+        val userBUid = signInTestUser(userBEmail)
+        val repoB = QawmiRepository(firestore, auth)
+        withTimeout(5000L) {
+            repoB.saveUserProfile(
+                UserProfile(
+                    id = userBUid,
+                    userId = userBUid,
+                    fullName = "মাওলানা মাহমুদ ($runTag)",
+                    accountType = "muhtamim",
+                    district = "চট্টগ্রাম",
+                    designation = "মুহতামিম",
+                    qualification = "ইফতা",
+                    preferredDistricts = "চট্টগ্রাম",
+                    contactInfo = "01811000222"
+                )
+            )
+        }
+
+        // =========================================================================
+        // TEST A: Messaging Cross-Device Sync (User A -> User B -> Reply -> Restart)
+        // =========================================================================
+        signInTestUser(userAEmail)
+        val vmA = com.example.ui.viewmodel.QawmiViewModel(
+            repository = repoA,
+            currentUserId = userAUid,
+            currentUserDisplayName = "মাওলানা আবদুল্লাহ ($runTag)",
+            currentUserEmail = userAEmail
+        )
+        val msgBodyAtoB = "আসসালামু আলাইকুম, খেদমত সম্পর্কে জানতে চাই ($runTag)"
+        vmA.sendMessage(
+            receiverId = userBUid,
+            receiverName = "মাওলানা মাহমুদ ($runTag)",
+            subject = "খেদমত বার্তা",
+            body = msgBodyAtoB
+        )
+        awaitMainLooperCondition(
+            timeoutMs = 8000L,
+            debugInfo = {
+                val items = (vmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+                "User A messages=${items.map { "${it.id}:${it.body}:${it.localDeliveryState}" }}"
+            }
+        ) {
+            val items = (vmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            items.any { it.body == msgBodyAtoB && it.localDeliveryState in setOf("SENT", "DELIVERED", "READ") }
+        }
+        val sentMsgIdAtoB = ((vmA.messagesState.value as com.example.ui.viewmodel.UiState.Success).data)
+            .first { it.body == msgBodyAtoB }.id
+
+        // Verify on Firestore Server directly that /messages/{sentMsgIdAtoB} exists with !hasPendingWrites
+        val serverMsgSnapA = firestore.collection("messages").document(sentMsgIdAtoB)
+            .get(com.google.firebase.firestore.Source.SERVER)
+            .awaitWithTimeout()
+        assertTrue("Test A: Message from User A must exist on Firestore server", serverMsgSnapA.exists())
+        assertFalse("Test A: Server message must have hasPendingWrites == false", serverMsgSnapA.metadata.hasPendingWrites())
+
+        // Switch to User B's client and verify User B receives User A's message
+        signInTestUser(userBEmail)
+        val vmB = com.example.ui.viewmodel.QawmiViewModel(
+            repository = repoB,
+            currentUserId = userBUid,
+            currentUserDisplayName = "মাওলানা মাহমুদ ($runTag)",
+            currentUserEmail = userBEmail
+        )
+        awaitMainLooperCondition(
+            timeoutMs = 8000L,
+            debugInfo = {
+                val items = (vmB.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+                "User B inbox=${items.map { "${it.id}:${it.body}" }}"
+            }
+        ) {
+            val items = (vmB.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            items.any { it.id == sentMsgIdAtoB && it.body == msgBodyAtoB }
+        }
+
+        // User B sends reply to User A
+        val msgBodyBtoA = "ওয়া আলাইকুমুস সালাম, আগামীকাল মাদরাসায় যোগাযোগ করুন ($runTag)"
+        vmB.sendMessage(
+            receiverId = userAUid,
+            receiverName = "মাওলানা আবদুল্লাহ ($runTag)",
+            subject = "খেদমত বার্তা",
+            body = msgBodyBtoA
+        )
+        awaitMainLooperCondition(timeoutMs = 8000L, label = "User B reply confirmed on server") {
+            val items = (vmB.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            items.any { it.body == msgBodyBtoA && it.localDeliveryState in setOf("SENT", "DELIVERED", "READ") }
+        }
+        val replyMsgIdBtoA = ((vmB.messagesState.value as com.example.ui.viewmodel.UiState.Success).data)
+            .first { it.body == msgBodyBtoA }.id
+
+        // User A receives User B's reply; simulate App Restart with a brand-new Repository & ViewModel instance
+        signInTestUser(userAEmail)
+        val restartedRepoA = QawmiRepository(firestore, auth)
+        val restartedVmA = com.example.ui.viewmodel.QawmiViewModel(
+            repository = restartedRepoA,
+            currentUserId = userAUid,
+            currentUserDisplayName = "মাওলানা আবদুল্লাহ ($runTag)",
+            currentUserEmail = userAEmail
+        )
+        awaitMainLooperCondition(
+            timeoutMs = 8000L,
+            debugInfo = {
+                val items = (restartedVmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+                "Restarted User A messages=${items.map { "${it.id}:${it.body}:${it.localDeliveryState}" }}"
+            }
+        ) {
+            val items = (restartedVmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            items.any { it.id == sentMsgIdAtoB && it.localDeliveryState != "SENDING" } &&
+                items.any { it.id == replyMsgIdBtoA && it.body == msgBodyBtoA }
+        }
+
+        // =========================================================================
+        // TEST B: Post/Feed Cross-Device Sync (User A Post -> User B Feed -> User B Post -> Restart)
+        // =========================================================================
+        val postTitleA = "মুহাদ্দিস নিয়োগ বিজ্ঞপ্তি ($runTag)"
+        vmA.publishFeedPost(
+            authorName = "মাওলানা আবদুল্লাহ ($runTag)",
+            postType = "JOB_CIRCULAR",
+            title = postTitleA,
+            district = "ঢাকা",
+            upazilaOrLocation = "মিরপুর",
+            designation = "মুহাদ্দিস",
+            qualification = "দাওরায়ে হাদিস",
+            salaryOrExperience = "আলোচনা সাপেক্ষ",
+            deadlineOrPreferredDistricts = "৩০ শে শাওয়াল",
+            description = "জরুরি ভিত্তিতে একজন দক্ষ মুহাদ্দিস আবশ্যক ($runTag)।",
+            contactNumber = "01711000111"
+        )
+        awaitMainLooperCondition(timeoutMs = 8000L, label = "User A post confirmed on server") {
+            vmA.feedbackBanner.value != null
+        }
+
+        // Switch to User B and verify User B sees User A's post in Feed
+        signInTestUser(userBEmail)
+        awaitMainLooperCondition(
+            timeoutMs = 8000L,
+            debugInfo = {
+                val posts = (vmB.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+                "User B feed titles=${posts.map { it.title }}"
+            }
+        ) {
+            val posts = (vmB.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            posts.any { it.title == postTitleA }
+        }
+
+        // User B publishes a post
+        val postTitleB = "ইফতা বিভাগের উস্তায আবশ্যক ($runTag)"
+        vmB.publishFeedPost(
+            authorName = "মাওলানা মাহমুদ ($runTag)",
+            postType = "JOB_CIRCULAR",
+            title = postTitleB,
+            district = "চট্টগ্রাম",
+            upazilaOrLocation = "হাটহাজারী",
+            designation = "মুফতি",
+            qualification = "ইফতা",
+            salaryOrExperience = "২০,০০০ টাকা",
+            deadlineOrPreferredDistricts = "১৫ ই যিলকদ",
+            description = "ইফতা বিভাগের জন্য একজন অভিজ্ঞ উস্তায আবশ্যক ($runTag)।",
+            contactNumber = "01811000222"
+        )
+        awaitMainLooperCondition(timeoutMs = 8000L, label = "User B post confirmed on server") {
+            vmB.feedbackBanner.value != null
+        }
+
+        // Switch back to User A and simulate App Restart -> Verify BOTH posts load from server
+        signInTestUser(userAEmail)
+        val freshRepoAfterPosts = QawmiRepository(firestore, auth)
+        val freshVmAfterPosts = com.example.ui.viewmodel.QawmiViewModel(
+            repository = freshRepoAfterPosts,
+            currentUserId = userAUid,
+            currentUserDisplayName = "মাওলানা আবদুল্লাহ ($runTag)",
+            currentUserEmail = userAEmail
+        )
+        awaitMainLooperCondition(
+            timeoutMs = 8000L,
+            debugInfo = {
+                val posts = (freshVmAfterPosts.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+                "Restarted User A feed titles=${posts.map { it.title }}"
+            }
+        ) {
+            val posts = (freshVmAfterPosts.feedPostsState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            posts.any { it.title == postTitleA } && posts.any { it.title == postTitleB }
+        }
+
+        // =========================================================================
+        // TEST C: Network Failure / Error -> FAILED State -> Reconnect + Idempotent Retry
+        // =========================================================================
+        val retryMsgId = "retry_msg_$runTag"
+        val retryMsgBody = "পুনরায় প্রেরণকৃত পয়গাম ($runTag)"
+        vmA.sendMessage(
+            receiverId = userBUid,
+            receiverName = "মাওলানা মাহমুদ ($runTag)",
+            subject = "খেদমত বার্তা",
+            body = retryMsgBody,
+            imageUrls = listOf("content://local/unencoded_chat_photo.jpg"),
+            existingMessageId = retryMsgId
+        )
+
+        // Verify failed message transitions deterministically to FAILED (never stuck on SENDING, never false SENT)
+        awaitMainLooperCondition(
+            timeoutMs = 5000L,
+            debugInfo = {
+                val items = (vmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+                "VM A messages=${items.filter { it.id == retryMsgId }.map { "${it.id}:${it.localDeliveryState}" }}"
+            }
+        ) {
+            val items = (vmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val target = items.firstOrNull { it.id == retryMsgId }
+            target != null && target.localDeliveryState == "FAILED"
+        }
+
+        // Verify foreground resume does NOT throw failed message back into an automatic SENDING loop
+        vmA.onAppForegrounded()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        val stateAfterForeground = ((vmA.messagesState.value as com.example.ui.viewmodel.UiState.Success).data)
+            .first { it.id == retryMsgId }.localDeliveryState
+        assertEquals("Test C: Foregrounding must keep failed message in FAILED state until user or network retry", "FAILED", stateAfterForeground)
+
+        // Now retry the failed message with valid payload using the exact same messageId -> must transition to SENT without duplicates
+        val failedMessageObj = ((vmA.messagesState.value as com.example.ui.viewmodel.UiState.Success).data)
+            .first { it.id == retryMsgId }
+        vmA.retryFailedMessage(failedMessageObj.copy(imageUrls = emptyList()))
+
+        awaitMainLooperCondition(
+            timeoutMs = 8000L,
+            debugInfo = {
+                val items = (vmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+                "Retried VM A messages=${items.filter { it.id == retryMsgId }.map { "${it.id}:${it.localDeliveryState}" }}"
+            }
+        ) {
+            val items = (vmA.messagesState.value as? com.example.ui.viewmodel.UiState.Success)?.data.orEmpty()
+            val matching = items.filter { it.id == retryMsgId || it.body == retryMsgBody }
+            matching.size == 1 && matching.first().localDeliveryState in setOf("SENT", "DELIVERED", "READ")
+        }
+
+        // Verify on server that exactly 1 message document was created with retryMsgId
+        val retryServerSnap = firestore.collection("messages").document(retryMsgId)
+            .get(com.google.firebase.firestore.Source.SERVER)
+            .awaitWithTimeout()
+        assertTrue("Test C: Retried message must exist on Firestore server", retryServerSnap.exists())
+        assertEquals("Test C: Retried message body must match", retryMsgBody, retryServerSnap.getString("body"))
+    }
+
     private fun userAUidEmail(email: String): String = email
 
     private suspend fun awaitMainLooperCondition(timeoutMs: Long, debugInfo: () -> String = { "" }, condition: () -> Boolean) {

@@ -289,10 +289,9 @@ object FirestoreConnectionMonitor {
 const val DEFAULT_NAMED_FIRESTORE_DATABASE_ID = "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c"
 
 /**
- * Returns a [FirebaseFirestore] instance configured with native SQLite [PersistentCacheSettings]
- * (100 MB disk cache) before its first operation so cached Feed, Profile, Notification, and
- * Application snapshots load within < 1 second across app restarts and offline sessions, while
- * falling back safely to [MemoryCacheSettings] if disk cache initialization is unavailable.
+ * Returns a [FirebaseFirestore] instance configured with [MemoryCacheSettings] after purging any
+ * wedged on-disk SQLite mutation queues from prior sessions so uncommitted/failed local writes
+ * never block the Firestore WriteStream or reappear as phantom published data after app restarts.
  */
 fun getConfiguredFirestoreInstance(databaseId: String = DEFAULT_NAMED_FIRESTORE_DATABASE_ID): FirebaseFirestore {
     val cleanId = databaseId.trim().let { raw ->
@@ -313,24 +312,12 @@ fun getConfiguredFirestoreInstance(databaseId: String = DEFAULT_NAMED_FIRESTORE_
     }
     val cacheKey = cleanId.ifBlank { DEFAULT_NAMED_FIRESTORE_DATABASE_ID }
     if (configuredFirestoreDatabases.putIfAbsent(cacheKey, true) == null) {
-        val appliedPersistent = runCatching {
-            val persistentCache = PersistentCacheSettings.newBuilder()
-                .setSizeBytes(100L * 1024L * 1024L)
+        runCatching { db.clearPersistence() }
+        runCatching {
+            val memorySettings = FirebaseFirestoreSettings.Builder()
+                .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
                 .build()
-            val settings = FirebaseFirestoreSettings.Builder()
-                .setLocalCacheSettings(persistentCache)
-                .build()
-            db.firestoreSettings = settings
-            true
-        }.getOrDefault(false)
-
-        if (!appliedPersistent) {
-            runCatching {
-                val fallbackSettings = FirebaseFirestoreSettings.Builder()
-                    .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
-                    .build()
-                db.firestoreSettings = fallbackSettings
-            }
+            db.firestoreSettings = memorySettings
         }
     }
     return db

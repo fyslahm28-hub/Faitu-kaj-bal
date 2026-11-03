@@ -761,16 +761,24 @@ class QawmiViewModel(
                 val isActivelyInFlight = msg.id in inFlightMessageIds
                 val isConfirmedOnServer = msg.id in remoteIds &&
                     !isActivelyInFlight &&
-                    remoteState != "FAILED"
+                    remoteState != "FAILED" &&
+                    remoteState != "PENDING" &&
+                    remoteState != "SENDING"
 
                 val resolvedState = when {
+                    msg.senderId != currentUserId -> {
+                        when {
+                            isReadRemotely || localOverrideState == "READ" || localOverrideState == "SEEN" -> "READ"
+                            isDeliveredRemotely || localOverrideState == "DELIVERED" -> "DELIVERED"
+                            else -> "SENT"
+                        }
+                    }
                     isActivelyInFlight -> "SENDING"
-                    localOverrideState == "FAILED" && !isReadRemotely && !isDeliveredRemotely -> "FAILED"
                     isReadRemotely || localOverrideState == "READ" || localOverrideState == "SEEN" -> "READ"
                     isDeliveredRemotely || localOverrideState == "DELIVERED" -> "DELIVERED"
-                    isConfirmedOnServer || localOverrideState == "SENT" || msg.id in remoteIds -> "SENT"
-                    localOverrideState == "SENDING" -> "SENDING"
-                    else -> "SENT"
+                    localOverrideState == "FAILED" && !isConfirmedOnServer -> "FAILED"
+                    isConfirmedOnServer || localOverrideState == "SENT" -> "SENT"
+                    else -> "FAILED"
                 }
                 if (locallyReadIds.contains(msg.id)) {
                     msg.copy(
@@ -1168,7 +1176,6 @@ class QawmiViewModel(
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "APP_FOREGROUND")
             repository.refreshCriticalDataInParallel(currentUserId)
             setUserOnlineStatus(true)
-            retryPendingFailedMessagesAutomatically()
         }
     }
 
@@ -1205,12 +1212,15 @@ class QawmiViewModel(
         verifyAndSyncAdminIdentity()
     }
 
+    private val autoRetriedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     private fun retryPendingFailedMessagesAutomatically() {
         if (!com.example.data.repository.FirestoreConnectionMonitor.isNetworkAvailable.value) return
         val failedList = _localOptimisticMessages.value.filter { msg ->
             msg.id.isNotBlank() &&
                 msg.localDeliveryState == "FAILED" &&
-                msg.id !in inFlightMessageIds
+                msg.id !in inFlightMessageIds &&
+                autoRetriedMessageIds.add(msg.id)
         }
         failedList.forEach { msg ->
             retryFailedMessage(msg)
@@ -2407,6 +2417,7 @@ class QawmiViewModel(
      */
     fun retryFailedMessage(message: DirectMessage) {
         if (message.id.isBlank()) return
+        autoRetriedMessageIds.remove(message.id)
         val cleanBody = message.cleanDisplayBody()
         sendMessage(
             receiverId = message.receiverId,
