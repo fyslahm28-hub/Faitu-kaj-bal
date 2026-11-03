@@ -5,6 +5,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import com.example.ui.quran.HafeziQuranHubDialog
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -155,6 +156,7 @@ fun IslamicAndEssentialServicesSection(
     onNavigate: (MainDestination) -> Unit
 ) {
     var selectedInfoItem by remember { mutableStateOf<IslamicServiceGridItem?>(null) }
+    var showHafeziQuranHub by rememberSaveable { mutableStateOf(false) }
 
     val ilmAndAmolItems = remember {
         listOf(
@@ -204,6 +206,7 @@ fun IslamicAndEssentialServicesSection(
 
     fun handleServiceClick(item: IslamicServiceGridItem) {
         when (item.id) {
+            "quran", "quran_learning", "tilawat" -> showHafeziQuranHub = true
             "prayer_times", "islamic_calendar" -> onOpenPrayerTimes()
             "bookmarks" -> onNavigate(MainDestination.BOOKMARKS)
             "support" -> onNavigate(MainDestination.HELP_AND_SUPPORT)
@@ -287,6 +290,12 @@ fun IslamicAndEssentialServicesSection(
                 onItemClick = ::handleServiceClick
             )
         }
+    }
+
+    if (showHafeziQuranHub) {
+        HafeziQuranHubDialog(
+            onDismiss = { showHafeziQuranHub = false }
+        )
     }
 
     if (selectedInfoItem != null) {

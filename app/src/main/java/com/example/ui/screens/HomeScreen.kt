@@ -288,15 +288,64 @@ fun HomeScreen(
             }
         }
 
-        // 5B. নতুন ইসলামিক ও প্রয়োজনীয় সেবাসমূহ (ইলম ও আমল -> নামাজের সময়)
+        // 6. Today's Date Card (১. আজকের তারিখ)
         item {
-            IslamicAndEssentialServicesSection(
-                onOpenPrayerTimes = { onNavigate(MainDestination.PRAYER_SCHEDULE) },
-                onNavigate = onNavigate
-            )
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp))
+                    .testTag("home_todays_date_card"),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.CalendarMonth,
+                            contentDescription = null,
+                            tint = QawmiDeepGreen,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "আজকের তারিখ",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = QawmiTextSecondary
+                            )
+                            Text(
+                                text = hijriDate,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = QawmiTextDark,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = gregorianDate,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = QawmiTextDark,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = banglaDay,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = QawmiTextSecondary
+                        )
+                    }
+                }
+            }
         }
 
-        // 6. Dark Emerald Prayer Times Card: নামাজের সময়সূচী (নির্বাচিত/পিন করা জেলা)
+        // 7. Dark Emerald Prayer Times Card (২. নামাজের সময়সূচি)
         item {
             Card(
                 modifier = Modifier
@@ -577,63 +626,7 @@ fun HomeScreen(
             }
         }
 
-        // 7. Today's Date Card (আজকের তারিখ)
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, QawmiMintBorder, RoundedCornerShape(14.dp)),
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.CalendarMonth,
-                            contentDescription = null,
-                            tint = QawmiDeepGreen,
-                            modifier = Modifier.size(28.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "আজকের তারিখ",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = QawmiTextSecondary
-                            )
-                            Text(
-                                text = hijriDate,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = QawmiTextDark,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(
-                            text = gregorianDate,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = QawmiTextDark,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = banglaDay,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = QawmiTextSecondary
-                        )
-                    }
-                }
-            }
-        }
-
-        // 8. Daily Islamic Reminder Card (আজকের স্মরণ)
+        // 8. Daily Islamic Reminder Card (৩. আজকের স্মরণ)
         item {
             Card(
                 modifier = Modifier
@@ -708,6 +701,14 @@ fun HomeScreen(
                     )
                 }
             }
+        }
+
+        // 8B. ইসলামিক ও প্রয়োজনীয় সেবাসমূহ (৪. ইসলামিক ও প্রয়োজনীয় সেবাসমূহ)
+        item {
+            IslamicAndEssentialServicesSection(
+                onOpenPrayerTimes = { onNavigate(MainDestination.PRAYER_SCHEDULE) },
+                onNavigate = onNavigate
+            )
         }
 
         // 9. Bottom Banner Card ("খেদমতই আমাদের লক্ষ্য")
