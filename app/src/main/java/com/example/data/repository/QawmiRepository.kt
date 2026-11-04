@@ -100,11 +100,6 @@ class QawmiRepository(
      */
     suspend fun ensureLiveConnectionActive(forceTokenRefresh: Boolean = false, reason: String = "ENSURE_LIVE") =
         kotlinx.coroutines.withContext(Dispatchers.IO) {
-            if (!FirestoreConnectionMonitor.isNetworkAvailable.value && reason != "NETWORK_RESTORED") {
-                return@withContext
-            }
-            FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
-
             val currentUser = runCatching { auth.currentUser }.getOrNull()
             if (currentUser != null && forceTokenRefresh) {
                 runCatching {
@@ -118,6 +113,10 @@ class QawmiRepository(
                 withTimeoutOrNull(1_500L) {
                     db.enableNetwork().await()
                 }
+            }
+
+            if (reason == "NETWORK_RESTORED") {
+                FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
             }
 
             if (reason != "APP_STARTUP" && reason != "AUTH_TOKEN_REFRESHED") {
@@ -163,15 +162,25 @@ class QawmiRepository(
         path: String
     ) {
         if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return
-        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 5_000L)) return
-        if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0 &&
-            FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 20_000L)
-        ) {
-            return
+        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L)) return
+
+        // If an active snapshot listener is already attached for this path, give it a brief window
+        // (up to 350ms) to deliver its server snapshot over the shared gRPC stream so we avoid duplicate reads.
+        if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0) {
+            repeat(7) {
+                delay(50L)
+                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L) ||
+                    !FirestoreConnectionMonitor.isNetworkAvailable.value
+                ) {
+                    return
+                }
+            }
         }
 
-        val snap = withTimeoutOrNull(1_800L) {
+        val snap = withTimeoutOrNull(2_200L) {
             runCatching { query.get(Source.SERVER).await() }.getOrNull()
+        } ?: withTimeoutOrNull(1_200L) {
+            runCatching { query.get().await() }.getOrNull()
         }
 
         if (snap != null) {
@@ -189,15 +198,23 @@ class QawmiRepository(
         path: String
     ) {
         if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return
-        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 5_000L)) return
-        if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0 &&
-            FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 20_000L)
-        ) {
-            return
+        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L)) return
+
+        if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0) {
+            repeat(7) {
+                delay(50L)
+                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L) ||
+                    !FirestoreConnectionMonitor.isNetworkAvailable.value
+                ) {
+                    return
+                }
+            }
         }
 
-        val snap = withTimeoutOrNull(1_800L) {
+        val snap = withTimeoutOrNull(2_200L) {
             runCatching { docRef.get(Source.SERVER).await() }.getOrNull()
+        } ?: withTimeoutOrNull(1_200L) {
+            runCatching { docRef.get().await() }.getOrNull()
         }
 
         if (snap != null) {
@@ -621,11 +638,11 @@ class QawmiRepository(
             }
             var serverErr: Throwable? = null
             val serverSnap = if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
-                withTimeoutOrNull(2_000L) {
+                withTimeoutOrNull(2_800L) {
                     runCatching { query.get(Source.SERVER).await() }
                         .onFailure { serverErr = it }
                         .getOrNull()
-                } ?: withTimeoutOrNull(1_200L) {
+                } ?: withTimeoutOrNull(1_800L) {
                     runCatching { query.get().await() }
                         .onFailure { if (serverErr == null) serverErr = it }
                         .getOrNull()
@@ -645,10 +662,14 @@ class QawmiRepository(
                 }
             } else if (!hasEmittedAny.get()) {
                 val fsErr = serverErr as? FirebaseFirestoreException
-                if (fsErr != null) {
+                if (fsErr != null &&
+                    (fsErr.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                        fsErr.code == FirebaseFirestoreException.Code.FAILED_PRECONDITION ||
+                        fsErr.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT)
+                ) {
                     handleFirestoreError(fsErr, OperationType.LIST, path)
                 }
-                val fallbackCache = withTimeoutOrNull(250L) {
+                val fallbackCache = withTimeoutOrNull(300L) {
                     runCatching { query.get(Source.CACHE).await() }.getOrNull()
                 }
                 val fallbackList = if (fallbackCache != null) {
@@ -1553,19 +1574,14 @@ class QawmiRepository(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = true,
-            initialServerTimeoutMs = 1_500L
+            initialServerTimeoutMs = 900L
         ) { snapshot ->
             val currentUid = resolveEffectiveUserId("")
             snapshot.documents
                 .mapNotNull { doc ->
                     val docPending = runCatching { doc.metadata.hasPendingWrites() }.getOrDefault(false)
-                    val docFromCache = runCatching { doc.metadata.isFromCache }.getOrDefault(false)
                     if (!docPending && doc.id.isNotBlank()) {
                         confirmedServerPostIds.add(doc.id)
-                    }
-                    // Exclude uncommitted local-only writes that are neither actively in-flight nor confirmed on server
-                    if (docFromCache && docPending && doc.id !in confirmedServerPostIds && doc.id !in inFlightServerPostIds) {
-                        return@mapNotNull null
                     }
                     doc.toFeedPostOrNull()
                 }

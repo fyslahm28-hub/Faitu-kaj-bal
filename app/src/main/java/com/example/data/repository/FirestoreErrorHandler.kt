@@ -144,7 +144,8 @@ object FirestoreConnectionMonitor {
             lastServerConfirmedEpochMs.set(now)
             val cleanPath = path.ifBlank { "unknown" }
             lastServerConfirmedByPath[cleanPath] = now
-            _isServerConnected.value = _isNetworkAvailable.value
+            _isNetworkAvailable.value = true
+            _isServerConnected.value = true
             _isServingFromCache.value = false
             _isReconnecting.value = false
         } else {
@@ -180,8 +181,12 @@ object FirestoreConnectionMonitor {
                 FirebaseFirestoreException.Code.ABORTED,
                 FirebaseFirestoreException.Code.INTERNAL,
                 FirebaseFirestoreException.Code.UNAUTHENTICATED -> {
-                    _isServerConnected.value = false
-                    _isServingFromCache.value = true
+                    val recentlyConfirmedServer = _isNetworkAvailable.value &&
+                        (System.currentTimeMillis() - lastServerConfirmedEpochMs.get()) in 0L..10_000L
+                    if (!recentlyConfirmedServer) {
+                        _isServerConnected.value = false
+                        _isServingFromCache.value = true
+                    }
                 }
                 else -> Unit
             }
@@ -289,9 +294,10 @@ object FirestoreConnectionMonitor {
 const val DEFAULT_NAMED_FIRESTORE_DATABASE_ID = "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c"
 
 /**
- * Returns a [FirebaseFirestore] instance configured with [MemoryCacheSettings] after purging any
- * wedged on-disk SQLite mutation queues from prior sessions so uncommitted/failed local writes
- * never block the Firestore WriteStream or reappear as phantom published data after app restarts.
+ * Returns a [FirebaseFirestore] instance configured with native SQLite [PersistentCacheSettings]
+ * (100 MB disk cache) before its first operation so cached Feed, Profile, Notification, Message, and
+ * Application snapshots load immediately across app restarts and offline sessions, while falling back
+ * safely to [MemoryCacheSettings] if disk cache initialization is unavailable.
  */
 fun getConfiguredFirestoreInstance(databaseId: String = DEFAULT_NAMED_FIRESTORE_DATABASE_ID): FirebaseFirestore {
     val cleanId = databaseId.trim().let { raw ->
@@ -312,12 +318,24 @@ fun getConfiguredFirestoreInstance(databaseId: String = DEFAULT_NAMED_FIRESTORE_
     }
     val cacheKey = cleanId.ifBlank { DEFAULT_NAMED_FIRESTORE_DATABASE_ID }
     if (configuredFirestoreDatabases.putIfAbsent(cacheKey, true) == null) {
-        runCatching { db.clearPersistence() }
-        runCatching {
-            val memorySettings = FirebaseFirestoreSettings.Builder()
-                .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
+        val appliedPersistent = runCatching {
+            val persistentCache = PersistentCacheSettings.newBuilder()
+                .setSizeBytes(100L * 1024L * 1024L)
                 .build()
-            db.firestoreSettings = memorySettings
+            val settings = FirebaseFirestoreSettings.Builder()
+                .setLocalCacheSettings(persistentCache)
+                .build()
+            db.firestoreSettings = settings
+            true
+        }.getOrDefault(false)
+
+        if (!appliedPersistent) {
+            runCatching {
+                val fallbackSettings = FirebaseFirestoreSettings.Builder()
+                    .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
+                    .build()
+                db.firestoreSettings = fallbackSettings
+            }
         }
     }
     return db

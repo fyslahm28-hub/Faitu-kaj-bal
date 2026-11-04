@@ -431,24 +431,41 @@ fun AppNavigation(
                 context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
             }.getOrNull()
 
+            @Suppress("DEPRECATION")
             fun resolveNetworkStatus(
                 cm: android.net.ConnectivityManager?,
                 specificNetwork: android.net.Network? = null
             ): Pair<Boolean, String> {
                 if (cm == null) return true to "ONLINE"
-                val activeNet = specificNetwork ?: runCatching { cm.activeNetwork }.getOrNull()
-                    ?: return false to "NONE"
-                val caps = runCatching { cm.getNetworkCapabilities(activeNet) }.getOrNull()
-                    ?: return false to "NONE"
-                val hasInternet = caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                if (!hasInternet) return false to "NONE"
-                val transport = when {
-                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
-                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
-                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
-                    else -> "ONLINE"
+                val candidateNetworks = buildList {
+                    if (specificNetwork != null) add(specificNetwork)
+                    runCatching { cm.activeNetwork }?.getOrNull()?.let { add(it) }
+                    runCatching { cm.allNetworks }?.getOrNull()?.forEach { net ->
+                        if (net != null && net !in this) add(net)
+                    }
                 }
-                return true to transport
+                for (net in candidateNetworks) {
+                    val caps = runCatching { cm.getNetworkCapabilities(net) }.getOrNull() ?: continue
+                    val hasInternet = caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+                        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+                        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) ||
+                        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                    if (hasInternet) {
+                        val transport = when {
+                            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+                            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+                            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
+                            else -> "ONLINE"
+                        }
+                        return true to transport
+                    }
+                }
+                val legacyConnected = runCatching { cm.activeNetworkInfo?.isConnectedOrConnecting == true }.getOrDefault(false)
+                if (legacyConnected) {
+                    return true to "ONLINE"
+                }
+                return false to "NONE"
             }
 
             // Initialize real connectivity state immediately on startup
