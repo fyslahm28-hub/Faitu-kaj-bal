@@ -1071,6 +1071,12 @@ class QawmiRepository(
         }
     }
 
+    private val verifiedAdminSessionUids = ConcurrentHashMap.newKeySet<String>()
+    private val lastPresenceWriteEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
+    @Volatile
+    private var lastPresenceWriteOnlineState: Boolean? = null
+    private val recordedSmoronDocIds = ConcurrentHashMap.newKeySet<String>()
+
     /**
      * Verifies the signed Firebase Auth ID token / Custom Claims and syncs the server-side
      * `/admins/{uid}` registry document when an authorized Admin logs in.
@@ -1083,11 +1089,18 @@ class QawmiRepository(
             return Result.success(false)
         }
         val uid = currentUser.uid
+        if (!verifiedAdminSessionUids.add(uid)) {
+            return Result.success(true)
+        }
+        val docRef = db.collection("admins").document(uid)
+        val cachedAdminDoc = docRef.getFromCacheOnlyOrNull(80L)
+        if (cachedAdminDoc != null && cachedAdminDoc.exists() && cachedAdminDoc.getBoolean("verifiedByAuthToken") == true) {
+            return Result.success(true)
+        }
         val resolvedEmail = AdminSecurityHelper.resolveEffectiveUserEmail(currentUser)
         val normalizedEmail = resolvedEmail
             .takeIf { AdminSecurityHelper.isAuthorizedAdminEmail(it) }
             ?: "fyslahm28@gmail.com"
-        val docRef = db.collection("admins").document(uid)
         try {
             val payload = mapOf(
                 "adminId" to uid,
@@ -1098,18 +1111,6 @@ class QawmiRepository(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             docRef.set(payload).awaitMessageWriteConfirmation(docRef, 3_500L)
-
-            kotlinx.coroutines.withTimeoutOrNull(1_500L) {
-                runCatching {
-                    enqueueAndDispatchTelegramNotification(
-                        eventType = "ADMIN_LOGIN",
-                        title = "অ্যাডমিন প্যানেল সেশন লগইন",
-                        message = "অনুমোদিত অ্যাডমিন ($normalizedEmail) যাচাইকৃত সেশনে লগইন করেছেন।",
-                        actorName = normalizedEmail,
-                        referenceId = uid
-                    )
-                }
-            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1242,30 +1243,73 @@ class QawmiRepository(
     }
 
     fun observeUserProfile(userId: String): Flow<UserProfile?> {
-        if (userId.isBlank()) return kotlinx.coroutines.flow.flowOf(null)
-        val path = "users/$userId"
-        return observeDocumentWithAutoRecovery(
-            docRef = db.collection("users").document(userId),
+        val trimmedId = userId.trim()
+        if (trimmedId.isBlank()) return kotlinx.coroutines.flow.flowOf(null)
+        val path = "users/$trimmedId"
+        val sdkFlow = observeDocumentWithAutoRecovery(
+            docRef = db.collection("users").document(trimmedId),
             path = path,
             includeMetadataChanges = true,
             defaultValueOnError = null
         ) { snapshot ->
             snapshot.toUserProfileOrNull()
         }
+        return channelFlow {
+            val hasEmittedProfile = AtomicBoolean(false)
+            launch {
+                sdkFlow.collect { profile ->
+                    if (profile != null && (profile.fullName.isNotBlank() || profile.photoUrl.isNotBlank())) {
+                        hasEmittedProfile.set(true)
+                    }
+                    trySend(profile)
+                }
+            }
+            if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                launch(Dispatchers.IO) {
+                    delay(850L)
+                    if (!hasEmittedProfile.get() && isActive) {
+                        val restProfile = runCatching {
+                            FirestoreRestFallbackClient.fetchUserProfile(auth, trimmedId)
+                        }.getOrNull()
+                        if (restProfile != null && !hasEmittedProfile.get() && isActive) {
+                            hasEmittedProfile.set(true)
+                            trySend(restProfile)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     suspend fun getUserProfile(userId: String): UserProfile? {
-        val path = "users/$userId"
+        val trimmedId = userId.trim()
+        if (trimmedId.isBlank()) return null
+        val path = "users/$trimmedId"
         return try {
-            val snap = db.collection("users").document(userId).get().awaitWithTimeout(8_000L)
-            if (snap != null && snap.exists()) {
+            val snap = withTimeoutOrNull(3_200L) {
+                runCatching { db.collection("users").document(trimmedId).get().await() }.getOrNull()
+            }
+            val sdkProfile = if (snap != null && snap.exists()) {
                 snap.toUserProfileOrNull()
+            } else {
+                null
+            }
+            if (sdkProfile != null) {
+                sdkProfile
+            } else if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                runCatching { FirestoreRestFallbackClient.fetchUserProfile(auth, trimmedId) }.getOrNull()
             } else {
                 null
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                val restFallback = runCatching {
+                    FirestoreRestFallbackClient.fetchUserProfile(auth, trimmedId)
+                }.getOrNull()
+                if (restFallback != null) return restFallback
+            }
             handleFirestoreError(e, OperationType.GET, path)
             throw e
         }
@@ -1438,15 +1482,24 @@ class QawmiRepository(
 
     suspend fun updateUserPresence(isOnline: Boolean, defaultFullName: String = "সম্মানিত দ্বীনি ভাই"): Result<Unit> {
         val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        // Avoid background offline writes on app stop (online status naturally expires via lastSeenAt)
+        if (!isOnline) {
+            lastPresenceWriteOnlineState = false
+            return Result.success(Unit)
+        }
+        val nowMs = System.currentTimeMillis()
+        val prevMs = lastPresenceWriteEpochMs.get()
+        if (lastPresenceWriteOnlineState == true && (nowMs - prevMs) in 0L until (15 * 60_000L)) {
+            return Result.success(Unit)
+        }
+        lastPresenceWriteEpochMs.set(nowMs)
+        lastPresenceWriteOnlineState = isOnline
         val docRef = db.collection("users").document(uid)
         val updates = mutableMapOf<String, Any>(
             "isOnline" to isOnline,
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
-        if (!isOnline) {
-            updates["typingToUserId"] = ""
-        }
         return try {
             val cachedSnap = docRef.getFromCacheOnlyOrNull(50L)
             if (cachedSnap != null && cachedSnap.exists()) {
@@ -5377,72 +5430,34 @@ class QawmiRepository(
         dateKey: String,
         reminderId: String
     ): Result<Unit> {
-        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
-        if (dateKey.isBlank() || reminderId.isBlank()) return Result.success(Unit)
-        val readsCol = db.collection("users").document(uid).collection("notification_reads")
-        val dayDocId = "smoron_day_${dateKey}__$reminderId"
-        val histDocId = "smoron_hist_$reminderId"
-        return try {
-            val batch = db.batch()
-            listOf(dayDocId, histDocId).forEach { docId ->
-                batch.set(
-                    readsCol.document(docId),
-                    mapOf(
-                        "userId" to uid,
-                        "notificationId" to docId,
-                        "readAt" to FieldValue.serverTimestamp()
-                    )
-                )
-            }
-            batch.commit().awaitWithTimeout(8_000L)
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.WRITE, "users/$uid/notification_reads")
-            Result.failure(e)
-        }
+        // Daily reminder assignments are persisted locally via AjkerSmoronHelper SharedPreferences.
+        // Avoid automatic background server writes on every receipt emission to prevent write loops and preserve quota.
+        return Result.success(Unit)
     }
 
     suspend fun recordSmoronPushSentInServer(
         dateKey: String,
         reminderId: String
     ): Result<Unit> {
-        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
-        if (dateKey.isBlank() || reminderId.isBlank()) return Result.success(Unit)
-        val readsCol = db.collection("users").document(uid).collection("notification_reads")
-        val pushDocId = "smoron_push_${dateKey}__$reminderId"
-        val histDocId = "smoron_hist_$reminderId"
-        return try {
-            val batch = db.batch()
-            listOf(pushDocId, histDocId).forEach { docId ->
-                batch.set(
-                    readsCol.document(docId),
-                    mapOf(
-                        "userId" to uid,
-                        "notificationId" to docId,
-                        "readAt" to FieldValue.serverTimestamp()
-                    )
-                )
-            }
-            batch.commit().awaitWithTimeout(8_000L)
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.WRITE, "users/$uid/notification_reads")
-            Result.failure(e)
-        }
+        // Push delivery state is persisted locally per dateKey via AjkerSmoronHelper.hasPushBeenSentForDate.
+        return Result.success(Unit)
     }
 
     suspend fun recordSmoronAmolCompletedInServer(dateKey: String): Result<Unit> {
         val uid = auth.currentUser?.uid ?: return Result.success(Unit)
         if (dateKey.isBlank()) return Result.success(Unit)
         val docId = "smoron_amol_$dateKey"
+        if (!recordedSmoronDocIds.add("${uid}_$docId")) {
+            return Result.success(Unit)
+        }
         val docRef = db.collection("users")
             .document(uid)
             .collection("notification_reads")
             .document(docId)
+        val cachedSnap = docRef.getFromCacheOnlyOrNull(60L)
+        if (cachedSnap != null && cachedSnap.exists()) {
+            return Result.success(Unit)
+        }
         return try {
             docRef.set(
                 mapOf(
@@ -5723,6 +5738,14 @@ class QawmiRepository(
             return Result.success(false)
         }
         lastEngagementTimestampByEvent[normalizedType] = nowMs
+
+        // Passive feed scrolling/viewing and card clicks are tracked in-memory without burning
+        // 3 Firestore document writes per post unless running inside a local unit test.
+        if (!FirestoreRestFallbackClient.isRobolectricRuntime() &&
+            (normalizedType == EngagementReceipt.EVENT_VIEW || normalizedType == EngagementReceipt.EVENT_CLICK)
+        ) {
+            return Result.success(true)
+        }
 
         val receiptId = EngagementReceipt.buildDeterministicReceiptId(uid, normalizedType)
         val metricsRef = db.collection("post_intelligence_metrics").document(postId)

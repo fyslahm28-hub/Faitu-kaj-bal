@@ -631,4 +631,113 @@ object FirestoreRestFallbackClient {
             merged.values.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
         }
     }
+
+    private fun executeGetDocumentHttp(
+        idToken: String?,
+        collection: String,
+        documentId: String,
+        databaseId: String = DEFAULT_DATABASE_ID,
+        projectId: String = DEFAULT_PROJECT_ID
+    ): JSONObject? {
+        val resolvedProject = projectId.trim().ifBlank { DEFAULT_PROJECT_ID }
+        val resolvedDb = databaseId.trim().ifBlank { DEFAULT_DATABASE_ID }
+        val endpoint = "https://firestore.googleapis.com/v1/projects/$resolvedProject/databases/$resolvedDb/documents/$collection/$documentId"
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5_000
+                readTimeout = 7_000
+                if (!idToken.isNullOrBlank()) {
+                    setRequestProperty("Authorization", "Bearer $idToken")
+                }
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Cache-Control", "no-cache")
+            }
+            if (conn.responseCode !in 200..299) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            if (body.isBlank()) return null
+            JSONObject(body)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { conn?.disconnect() }
+        }
+    }
+
+    /**
+     * Fetches the offloaded `mediaDataUrl` from `/feed_post_attachments/{attachmentDocId}` directly via HTTPS REST.
+     */
+    suspend fun fetchAttachmentMediaDataUrl(
+        attachmentDocId: String,
+        auth: FirebaseAuth? = runCatching { FirebaseAuth.getInstance() }.getOrNull(),
+        databaseId: String = DEFAULT_DATABASE_ID,
+        projectId: String = DEFAULT_PROJECT_ID
+    ): String? = withContext(Dispatchers.IO) {
+        val trimmedId = attachmentDocId.trim()
+        if (trimmedId.isBlank() || isRobolectricRuntime()) return@withContext null
+        val idToken = resolveIdToken(auth)
+        val docObj = executeGetDocumentHttp(
+            idToken = idToken,
+            collection = "feed_post_attachments",
+            documentId = trimmedId,
+            databaseId = databaseId,
+            projectId = projectId
+        ) ?: return@withContext null
+        val fields = docObj.optJSONObject("fields") ?: return@withContext null
+        extractStringField(fields, "mediaDataUrl").takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Fetches a `/users/{userId}` document directly via HTTPS REST so partner names, avatars,
+     * and last-seen timestamps resolve even if gRPC document listeners are delayed.
+     */
+    suspend fun fetchUserProfile(
+        auth: FirebaseAuth?,
+        userId: String,
+        databaseId: String = DEFAULT_DATABASE_ID,
+        projectId: String = DEFAULT_PROJECT_ID
+    ): com.example.data.model.UserProfile? = withContext(Dispatchers.IO) {
+        val trimmedUid = userId.trim()
+        if (trimmedUid.isBlank() || isRobolectricRuntime()) return@withContext null
+        val idToken = resolveIdToken(auth) ?: return@withContext null
+        val docObj = executeGetDocumentHttp(
+            idToken = idToken,
+            collection = "users",
+            documentId = trimmedUid,
+            databaseId = databaseId,
+            projectId = projectId
+        ) ?: return@withContext null
+        val fields = docObj.optJSONObject("fields") ?: return@withContext null
+        val createTimeFallback = parseIsoTimestamp(docObj.optString("createTime", ""))
+        val updateTimeFallback = parseIsoTimestamp(docObj.optString("updateTime", ""))
+        com.example.data.model.UserProfile(
+            id = trimmedUid,
+            userId = extractStringField(fields, "userId", trimmedUid).ifBlank { trimmedUid },
+            fullName = extractStringField(fields, "fullName"),
+            accountType = extractStringField(fields, "accountType", "khadim"),
+            district = extractStringField(fields, "district"),
+            designation = extractStringField(fields, "designation"),
+            qualification = extractStringField(fields, "qualification"),
+            experience = extractStringField(fields, "experience"),
+            preferredDistricts = extractStringField(fields, "preferredDistricts"),
+            bio = extractStringField(fields, "bio"),
+            contactInfo = extractStringField(fields, "contactInfo"),
+            contactEmail = extractStringField(fields, "contactEmail"),
+            phonePrivacy = com.example.data.model.UserProfile.normalizePrivacyMode(extractStringField(fields, "phonePrivacy")),
+            emailPrivacy = com.example.data.model.UserProfile.normalizePrivacyMode(extractStringField(fields, "emailPrivacy")),
+            madrasaName = extractStringField(fields, "madrasaName"),
+            photoUrl = extractStringField(fields, "photoUrl"),
+            isOnline = extractBooleanField(fields, "isOnline", false),
+            lastSeenAt = extractTimestampField(fields, "lastSeenAt") ?: updateTimeFallback,
+            typingToUserId = extractStringField(fields, "typingToUserId"),
+            typingUpdatedAt = extractTimestampField(fields, "typingUpdatedAt"),
+            blockedUserIds = extractStringListField(fields, "blockedUserIds"),
+            chatThemes = extractStringMapField(fields, "chatThemes"),
+            isVerified = extractBooleanField(fields, "isVerified", false),
+            createdAt = extractTimestampField(fields, "createdAt") ?: createTimeFallback,
+            updatedAt = extractTimestampField(fields, "updatedAt") ?: updateTimeFallback
+        )
+    }
 }
+

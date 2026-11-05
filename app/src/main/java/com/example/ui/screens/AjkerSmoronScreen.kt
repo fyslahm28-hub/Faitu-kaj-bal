@@ -110,7 +110,6 @@ fun AjkerSmoronScreen(
         if (focusedReminderId.isNullOrBlank()) {
             activeReminder = synced
         }
-        onSyncAssignmentToServer(todayDateKey, synced.id)
     }
 
     LaunchedEffect(focusedReminderId) {

@@ -319,22 +319,18 @@ fun getConfiguredFirestoreInstance(databaseId: String = DEFAULT_NAMED_FIRESTORE_
     }
     val cacheKey = "${System.identityHashCode(db)}:${cleanId.ifBlank { DEFAULT_NAMED_FIRESTORE_DATABASE_ID }}"
     if (configuredFirestoreDatabases.putIfAbsent(cacheKey, true) == null) {
-        val appliedLruMemory = runCatching {
-            val lruMemoryCache = MemoryCacheSettings.newBuilder()
-                .setGcSettings(
-                    MemoryLruGcSettings.newBuilder()
-                        .setSizeBytes(50L * 1024L * 1024L)
-                        .build()
-                )
+        val appliedPersistent = runCatching {
+            val persistentCache = com.google.firebase.firestore.PersistentCacheSettings.newBuilder()
+                .setSizeBytes(100L * 1024L * 1024L)
                 .build()
             val settings = FirebaseFirestoreSettings.Builder()
-                .setLocalCacheSettings(lruMemoryCache)
+                .setLocalCacheSettings(persistentCache)
                 .build()
             db.firestoreSettings = settings
             true
         }.getOrDefault(false)
 
-        if (!appliedLruMemory) {
+        if (!appliedPersistent) {
             runCatching {
                 val fallbackSettings = FirebaseFirestoreSettings.Builder()
                     .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
@@ -452,6 +448,17 @@ fun translateFirestoreExceptionToBangla(exception: Exception): Exception {
     ) {
         return IllegalStateException(
             "কাঙ্ক্ষিত তথ্যটি সার্ভারে পাওয়া যায়নি। অনুগ্রহ করে পৃষ্ঠাটি রিফ্রেশ করে পুনরায় চেষ্টা করুন।",
+            exception
+        )
+    }
+    if (codeName == "RESOURCE_EXHAUSTED" ||
+        msg.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ||
+        msg.contains("Quota limit exceeded", ignoreCase = true) ||
+        msg.contains("Quota exceeded", ignoreCase = true) ||
+        msg.contains("HTTP 429", ignoreCase = true)
+    ) {
+        return IllegalStateException(
+            "ফায়ারবেস সার্ভারের দৈনিক ফ্রি রাইট কোটা (Daily Free Write Quota) আজকের মতো পূর্ণ হয়েছে। কোটা স্বয়ংক্রিয়ভাবে রিসেট হলে পুনরায় পয়গাম ও পোস্ট পাঠানো যাবে।",
             exception
         )
     }

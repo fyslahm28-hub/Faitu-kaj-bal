@@ -87,7 +87,7 @@ object ProfilePhotoHelper {
         if (!cached.isNullOrBlank()) {
             decodeDataUrlToImageBitmap(cached)?.let { return it }
         }
-        val dataUrl = withTimeoutOrNull(6000L) {
+        val sdkDataUrl = withTimeoutOrNull(2_400L) {
             try {
                 val db = firestoreInstance
                     ?: com.example.data.repository.getConfiguredFirestoreInstance(FIRESTORE_DATABASE_ID)
@@ -103,7 +103,10 @@ object ProfilePhotoHelper {
             } catch (_: Exception) {
                 null
             }
-        } ?: return null
+        }
+        val dataUrl = sdkDataUrl ?: com.example.data.repository.FirestoreRestFallbackClient
+            .fetchAttachmentMediaDataUrl(attachmentDocId = attachmentDocId)
+            ?: return null
 
         attachmentDataUrlCache[attachmentDocId] = dataUrl
         return decodeDataUrlToImageBitmap(dataUrl)

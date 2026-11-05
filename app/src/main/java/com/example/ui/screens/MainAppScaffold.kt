@@ -171,10 +171,10 @@ fun MainAppScaffold(
         }
     }
 
-    // Periodic foreground presence heartbeat so active users never appear offline while using the app
+    // Periodic foreground presence heartbeat (throttled every 15 minutes to preserve Firestore write quota)
     LaunchedEffect(viewModel.currentUserId) {
         while (true) {
-            kotlinx.coroutines.delay(60_000L)
+            kotlinx.coroutines.delay(15 * 60_000L)
             if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                 viewModel.setUserOnlineStatus(true)
             }
@@ -269,7 +269,6 @@ fun MainAppScaffold(
             receiptTimestamps = smoronServerReceipts,
             dateKey = todayDateKey
         )
-        viewModel.syncSmoronAssignmentToServer(todayDateKey, assigned.id)
 
         if (AjkerSmoronHelper.isNotificationEnabled(context)) {
             val (prefHour, prefMin) = AjkerSmoronHelper.getPreferredNotificationTime(context)
@@ -282,15 +281,12 @@ fun MainAppScaffold(
             if (nowMinutes >= targetMinutes &&
                 !AjkerSmoronHelper.hasPushBeenSentForDate(context, viewModel.currentUserId, todayDateKey)
             ) {
-                val delivered = QawmiNotificationHelper.deliverDailyAjkerSmoronPushNotification(
+                QawmiNotificationHelper.deliverDailyAjkerSmoronPushNotification(
                     context = context,
                     userId = viewModel.currentUserId,
                     reminder = assigned,
                     dateKey = todayDateKey
                 )
-                if (delivered) {
-                    viewModel.syncSmoronPushSentToServer(todayDateKey, assigned.id)
-                }
             }
         }
     }
@@ -1488,8 +1484,11 @@ fun MainAppScaffold(
         val isOwnPost = post.authorId == viewModel.currentUserId
         val ownProfile = (userProfileState as? UiState.Success)?.data
         val liveAuthorProfile = if (isOwnPost) ownProfile else chatPartnerProfiles[post.authorId]
+        val liveAuthorName = liveAuthorProfile?.fullName?.trim()?.takeIf {
+            it.isNotBlank() && it != "ব্যবহারকারী" && it != "সম্মানিত দ্বীনি ভাই"
+        }
         val resolvedPost = post.copy(
-            authorName = liveAuthorProfile?.fullName?.takeIf { it.isNotBlank() } ?: post.authorName,
+            authorName = liveAuthorName ?: post.authorName.ifBlank { liveAuthorProfile?.fullName.orEmpty() },
             authorPhotoUrl = liveAuthorProfile?.photoUrl?.takeIf { it.isNotBlank() } ?: post.authorPhotoUrl
         )
         PostDetailDialog(

@@ -441,8 +441,11 @@ fun FeedScreen(
                             } else {
                                 authorProfiles[post.authorId]
                             }
+                            val liveAuthorName = liveAuthor?.fullName?.trim()?.takeIf {
+                                it.isNotBlank() && it != "ব্যবহারকারী" && it != "সম্মানিত দ্বীনি ভাই"
+                            }
                             val resolvedPost = post.copy(
-                                authorName = liveAuthor?.fullName?.takeIf { it.isNotBlank() } ?: post.authorName,
+                                authorName = liveAuthorName ?: post.authorName.ifBlank { liveAuthor?.fullName.orEmpty() },
                                 authorPhotoUrl = liveAuthor?.photoUrl?.takeIf { it.isNotBlank() } ?: post.authorPhotoUrl
                             )
                             val rawPostComments = commentsByPostId[post.id] ?: emptyList()
@@ -452,8 +455,11 @@ fun FeedScreen(
                                 } else {
                                     authorProfiles[c.authorId]
                                 }
+                                val liveCommentAuthorName = liveCommentAuthor?.fullName?.trim()?.takeIf {
+                                    it.isNotBlank() && it != "ব্যবহারকারী" && it != "সম্মানিত দ্বীনি ভাই"
+                                }
                                 c.copy(
-                                    authorName = liveCommentAuthor?.fullName?.takeIf { it.isNotBlank() } ?: c.authorName,
+                                    authorName = liveCommentAuthorName ?: c.authorName.ifBlank { liveCommentAuthor?.fullName.orEmpty() },
                                     authorPhotoUrl = liveCommentAuthor?.photoUrl?.takeIf { it.isNotBlank() } ?: c.authorPhotoUrl
                                 )
                             }

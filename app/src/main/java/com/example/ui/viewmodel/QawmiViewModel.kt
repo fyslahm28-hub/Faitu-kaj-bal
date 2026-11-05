@@ -849,9 +849,9 @@ class QawmiViewModel(
                             id = uid,
                             userId = uid,
                             fullName = if (uid == _messageTargetUser.value?.first) {
-                                _messageTargetUser.value?.second.orEmpty().ifBlank { "ব্যবহারকারী" }
+                                _messageTargetUser.value?.second.orEmpty()
                             } else {
-                                "ব্যবহারকারী"
+                                ""
                             }
                         )
                         uid to effective
@@ -1066,10 +1066,7 @@ class QawmiViewModel(
                 if (unacknowledged.isNotEmpty()) {
                     val ackIds = unacknowledged.map { it.id }
                     ackIds.forEach { acknowledgedDeliveredIds.add(it) }
-                    val ackRes = repository.acknowledgeMessagesDelivered(unacknowledged)
-                    if (ackRes.isFailure) {
-                        ackIds.forEach { acknowledgedDeliveredIds.remove(it) }
-                    }
+                    repository.acknowledgeMessagesDelivered(unacknowledged)
                 }
             }
         }

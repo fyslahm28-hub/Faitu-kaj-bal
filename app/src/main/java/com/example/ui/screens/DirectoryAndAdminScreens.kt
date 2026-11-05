@@ -1085,9 +1085,13 @@ fun MessagesScreen(
                     it.isUnreadForUser(currentUserId) && !it.isDeletedForEveryone
                 }
 
+                val livePartnerName = liveProfile?.fullName?.trim()?.takeIf {
+                    it.isNotBlank() && it != "ব্যবহারকারী" && it != "সম্মানিত দ্বীনি ভাই"
+                }
+
                 ConversationSummary(
                     partnerId = partnerId,
-                    partnerName = liveProfile?.fullName?.takeIf { it.isNotBlank() } ?: fallbackName,
+                    partnerName = livePartnerName ?: fallbackName,
                     partnerPhotoUrl = liveProfile?.photoUrl?.takeIf { it.isNotBlank() } ?: fallbackPhoto,
                     isPartnerOnline = liveProfile?.isCurrentlyOnline(presenceNowMillis) == true,
                     isPartnerTyping = isPartnerCurrentlyTypingToMe(liveProfile, currentUserId),
