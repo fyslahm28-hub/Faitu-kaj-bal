@@ -1000,8 +1000,7 @@ service cloud.firestore {
                           (incoming().get('groupMemberIds', []) is list && request.auth.uid in incoming().get('groupMemberIds', [])) &&
                           isVerifiedGroupParticipant(incoming().get('groupId', ''))) ||
                          (incoming().get('groupId', '') == '' &&
-                          incoming().receiverId != request.auth.uid &&
-                          !isBlockedBetween(incoming().senderId, incoming().receiverId))
+                          incoming().receiverId != request.auth.uid)
                        ) &&
                        incoming().keys().hasAll([
                          'senderId', 'senderName', 'receiverId', 'receiverName',
@@ -1105,7 +1104,6 @@ service cloud.firestore {
                        (incoming().type != 'BOOST' || isAdmin()) &&
                        (incoming().type != 'VERIFICATION' || isAdmin()) &&
                        (incoming().recipientId != 'ALL_USERS' || incoming().type in ['NEW_CIRCULAR', 'NEW_APPLICATION'] || isAdmin()) &&
-                       (incoming().recipientId == 'ALL_USERS' || !isBlockedBetween(incoming().senderId, incoming().recipientId)) &&
                        isValidAppNotification(incoming());
 
       allow update: if isSignedIn() &&

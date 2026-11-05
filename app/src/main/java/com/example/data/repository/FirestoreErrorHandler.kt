@@ -458,7 +458,7 @@ fun translateFirestoreExceptionToBangla(exception: Exception): Exception {
         msg.contains("HTTP 429", ignoreCase = true)
     ) {
         return IllegalStateException(
-            "ফায়ারবেস সার্ভারের দৈনিক ফ্রি রাইট কোটা (Daily Free Write Quota) আজকের মতো পূর্ণ হয়েছে। কোটা স্বয়ংক্রিয়ভাবে রিসেট হলে পুনরায় পয়গাম ও পোস্ট পাঠানো যাবে।",
+            "ফায়ারবেস ফ্রি সার্ভারের আজকের ডেইলি কোটা (Daily Free Quota) পূর্ণ হয়েছে (প্রতিদিন দুপুর ২টায় কোটা রিসেট হয়)। আপনার মেসেজটি চ্যাটে সংরক্ষিত আছে—কোটা রিসেট হলে 'পুনরায় পাঠান' বাটনে চাপ দিলে সাথে সাথে চলে যাবে।",
             exception
         )
     }

@@ -206,10 +206,15 @@ class QawmiRepository(
                     }
                     val createdSec = obj.optLong("createdAtSeconds", System.currentTimeMillis() / 1000L)
                     val createdNano = obj.optInt("createdAtNanoseconds", 0)
-                    val deliveryState = obj.optString("localDeliveryState", "SENT").ifBlank { "SENT" }
+                    val rawDeliveryState = obj.optString("localDeliveryState", "SENT").ifBlank { "SENT" }
                     val isConfirmed = obj.optBoolean("isConfirmedOnServer", false)
-                    if (isConfirmed) {
+                    val deliveryState = if (isConfirmed) {
                         confirmedServerMessageIds.add(id)
+                        rawDeliveryState
+                    } else if (rawDeliveryState.equals("SENT", ignoreCase = true)) {
+                        "FAILED"
+                    } else {
+                        rawDeliveryState
                     }
                     val msg = DirectMessage(
                         id = id,
@@ -4414,7 +4419,7 @@ class QawmiRepository(
                 readByUserIds = listOf(uid),
                 createdAt = Timestamp.now()
             ).apply {
-                localDeliveryState = "SENT"
+                localDeliveryState = "PENDING"
             }
 
             // Immediately retain in memory and on disk so the message never disappears from the chat screen
@@ -4423,6 +4428,7 @@ class QawmiRepository(
 
             runCatching { db.enableNetwork() }
             val isRobolectric = FirestoreRestFallbackClient.isRobolectricRuntime()
+            var restFailureError: Throwable? = null
 
             if (!isRobolectric) {
                 // Commit directly via HTTPS REST first so we do not queue a duplicate `docRef.set(payload)` in the
@@ -4436,13 +4442,32 @@ class QawmiRepository(
                 )
                 if (restCommitResult.isSuccess) {
                     confirmedServerMessageIds.add(docRef.id)
-                    savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
+                    val sentMsg = outgoingLocalMsg.copy().apply {
+                        localDeliveryState = "SENT"
+                    }
+                    savePersistedLocalMessage(sentMsg, isConfirmedOnServer = true)
                     FirestoreConnectionMonitor.onSnapshotReceived(
                         path = "messages",
                         isFromCache = false,
                         hasPendingWrites = false
                     )
                     return Result.success(docRef.id)
+                } else {
+                    restFailureError = restCommitResult.exceptionOrNull()
+                    val restErrMsg = restFailureError?.message.orEmpty()
+                    val isQuotaExhausted =
+                        (restFailureError as? FirebaseFirestoreException)?.code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED ||
+                            restErrMsg.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ||
+                            restErrMsg.contains("Quota exceeded", ignoreCase = true) ||
+                            restErrMsg.contains("HTTP 429", ignoreCase = true)
+                    if (isQuotaExhausted && restFailureError is Exception) {
+                        val failedLocalMsg = outgoingLocalMsg.copy().apply {
+                            localDeliveryState = "FAILED"
+                        }
+                        savePersistedLocalMessage(failedLocalMsg, isConfirmedOnServer = false)
+                        handleFirestoreError(restFailureError, OperationType.CREATE, docRef.path)
+                        return Result.failure(translateFirestoreExceptionToBangla(restFailureError))
+                    }
                 }
             }
 
@@ -4450,7 +4475,10 @@ class QawmiRepository(
             writeTask.addOnCompleteListener { completedTask ->
                 if (completedTask.isSuccessful) {
                     confirmedServerMessageIds.add(docRef.id)
-                    savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
+                    val sentMsg = outgoingLocalMsg.copy().apply {
+                        localDeliveryState = "SENT"
+                    }
+                    savePersistedLocalMessage(sentMsg, isConfirmedOnServer = true)
                     FirestoreConnectionMonitor.onSnapshotReceived(
                         path = "messages",
                         isFromCache = false,
@@ -4471,10 +4499,17 @@ class QawmiRepository(
 
             if (sdkCompletedFast) {
                 confirmedServerMessageIds.add(docRef.id)
-                savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
+                val sentMsg = outgoingLocalMsg.copy().apply {
+                    localDeliveryState = "SENT"
+                }
+                savePersistedLocalMessage(sentMsg, isConfirmedOnServer = true)
             } else {
-                val taskError = writeTask.exception
+                val taskError = writeTask.exception ?: (restFailureError as? Exception)
                 if (taskError != null) {
+                    val failedLocalMsg = outgoingLocalMsg.copy().apply {
+                        localDeliveryState = "FAILED"
+                    }
+                    savePersistedLocalMessage(failedLocalMsg, isConfirmedOnServer = false)
                     handleFirestoreError(taskError, OperationType.CREATE, docRef.path)
                     return Result.failure(translateFirestoreExceptionToBangla(taskError))
                 }
@@ -4483,13 +4518,20 @@ class QawmiRepository(
                     snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("senderId") == uid
                 }.getOrDefault(false)
                 if (!serverConfirmed) {
+                    val failedLocalMsg = outgoingLocalMsg.copy().apply {
+                        localDeliveryState = "FAILED"
+                    }
+                    savePersistedLocalMessage(failedLocalMsg, isConfirmedOnServer = false)
                     runCatching { db.enableNetwork() }
                     return Result.failure(
                         IllegalStateException("সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। মেসেজটি আপনার চ্যাটে সংরক্ষিত আছে; পুনরায় পাঠাতে ট্যাপ করুন।")
                     )
                 }
                 confirmedServerMessageIds.add(docRef.id)
-                savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
+                val sentMsg = outgoingLocalMsg.copy().apply {
+                    localDeliveryState = "SENT"
+                }
+                savePersistedLocalMessage(sentMsg, isConfirmedOnServer = true)
             }
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.
