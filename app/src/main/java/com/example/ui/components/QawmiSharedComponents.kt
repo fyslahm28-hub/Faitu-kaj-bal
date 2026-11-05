@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -585,36 +586,53 @@ fun ChatAttachmentImage(
     imageUrl: String,
     contentDescription: String = "সংযুক্ত ছবি",
     contentScale: ContentScale = ContentScale.Crop,
+    fallbackAttachmentDocIds: List<String> = emptyList(),
+    postId: String = "",
+    mediaIndex: Int = 0,
     modifier: Modifier = Modifier
 ) {
-    val attachmentDocId = remember(imageUrl) {
+    val attachmentDocId = remember(imageUrl, fallbackAttachmentDocIds, postId, mediaIndex) {
         ProfilePhotoHelper.extractAttachmentDocId(imageUrl)
+            ?: fallbackAttachmentDocIds.firstOrNull { it.isNotBlank() }
+            ?: if (postId.isNotBlank() && imageUrl.contains("firebasestorage.googleapis.com", ignoreCase = true)) {
+                "${postId}_media_$mediaIndex"
+            } else {
+                null
+            }
     }
-    val initialBitmap = remember(imageUrl) {
-        ProfilePhotoHelper.getCachedDecodedBitmap(imageUrl)
+    val initialBitmap = remember(imageUrl, fallbackAttachmentDocIds) {
+        ProfilePhotoHelper.getCachedDecodedBitmap(imageUrl, fallbackAttachmentDocIds)
     }
-    var fetchedAttachmentBitmap by remember(imageUrl) {
+    var fetchedAttachmentBitmap by remember(imageUrl, attachmentDocId, postId, mediaIndex) {
         mutableStateOf<ImageBitmap?>(initialBitmap)
     }
-    var isFetchingAttachment by remember(imageUrl) {
+    var retryCounter by remember(imageUrl) { mutableStateOf(0) }
+    var isFetchingAttachment by remember(imageUrl, attachmentDocId) {
         mutableStateOf(
             initialBitmap == null &&
-                (!attachmentDocId.isNullOrBlank() || imageUrl.startsWith("data:image", ignoreCase = true))
+                (!attachmentDocId.isNullOrBlank() ||
+                    fallbackAttachmentDocIds.isNotEmpty() ||
+                    imageUrl.startsWith("data:image", ignoreCase = true))
         )
     }
 
-    LaunchedEffect(attachmentDocId, imageUrl) {
+    LaunchedEffect(attachmentDocId, imageUrl, postId, mediaIndex, retryCounter) {
         if (fetchedAttachmentBitmap == null) {
-            if (!attachmentDocId.isNullOrBlank()) {
-                isFetchingAttachment = true
-                val resolved = ProfilePhotoHelper.fetchAndDecodeAttachmentBitmap(attachmentDocId)
-                fetchedAttachmentBitmap = resolved
-                isFetchingAttachment = false
-            } else if (imageUrl.startsWith("data:image", ignoreCase = true)) {
+            if (imageUrl.startsWith("data:image", ignoreCase = true)) {
                 isFetchingAttachment = true
                 val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                     ProfilePhotoHelper.decodeDataUrlToImageBitmap(imageUrl)
                 }
+                fetchedAttachmentBitmap = resolved
+                isFetchingAttachment = false
+            } else if (!attachmentDocId.isNullOrBlank() || fallbackAttachmentDocIds.isNotEmpty() || postId.isNotBlank()) {
+                isFetchingAttachment = true
+                val resolved = ProfilePhotoHelper.fetchAndDecodeAttachmentBitmap(
+                    attachmentDocId = attachmentDocId.orEmpty(),
+                    fallbackDocIds = fallbackAttachmentDocIds,
+                    postId = postId,
+                    mediaIndex = mediaIndex
+                )
                 fetchedAttachmentBitmap = resolved
                 isFetchingAttachment = false
             }
@@ -622,6 +640,10 @@ fun ChatAttachmentImage(
     }
 
     val activeBitmap = fetchedAttachmentBitmap ?: initialBitmap
+    val isUnprovisionedProjectStorageUrl = remember(imageUrl) {
+        imageUrl.contains("gen-lang-client-0048059944.firebasestorage.app", ignoreCase = true) ||
+            imageUrl.contains("gen-lang-client-0048059944.appspot.com", ignoreCase = true)
+    }
 
     when {
         activeBitmap != null -> {
@@ -649,6 +671,7 @@ fun ChatAttachmentImage(
             imageUrl.startsWith("https://", ignoreCase = true) ||
             imageUrl.startsWith("content://", ignoreCase = true) ||
             imageUrl.startsWith("file://", ignoreCase = true)) &&
+            !isUnprovisionedProjectStorageUrl &&
             attachmentDocId.isNullOrBlank() -> {
             coil.compose.AsyncImage(
                 model = imageUrl,
@@ -660,7 +683,9 @@ fun ChatAttachmentImage(
         }
         else -> {
             Box(
-                modifier = modifier.background(QawmiMintSurface),
+                modifier = modifier
+                    .background(QawmiMintSurface)
+                    .clickable { retryCounter++ },
                 contentAlignment = Alignment.Center
             ) {
                 Icon(

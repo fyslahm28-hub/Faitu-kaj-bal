@@ -434,6 +434,32 @@ object FirestoreRestFallbackClient {
         val createdAt = extractTimestampField(fields, "createdAt") ?: createTimeFallback
         val updatedAt = extractTimestampField(fields, "updatedAt") ?: updateTimeFallback ?: createdAt
 
+        val imageUrls = extractStringListField(fields, "imageUrls")
+        val mediaMetadata = extractMapListField(fields, "mediaMetadata")
+        val attachmentDocId = extractStringField(fields, "attachmentDocId")
+
+        mediaMetadata.forEachIndexed { idx, meta ->
+            val preview = meta["previewDataUrl"]?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                ?: meta["mediaDataUrl"]?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+            if (!preview.isNullOrBlank()) {
+                meta["attachmentDocId"]?.takeIf { it.isNotBlank() }?.let {
+                    com.example.ui.util.ProfilePhotoHelper.cacheAttachmentDataUrl(it, preview)
+                }
+                com.example.ui.util.ProfilePhotoHelper.extractAttachmentDocId(meta["url"].orEmpty())?.let {
+                    com.example.ui.util.ProfilePhotoHelper.cacheAttachmentDataUrl(it, preview)
+                }
+                imageUrls.getOrNull(idx)?.let { imgUrl ->
+                    com.example.ui.util.ProfilePhotoHelper.extractAttachmentDocId(imgUrl)?.let {
+                        com.example.ui.util.ProfilePhotoHelper.cacheAttachmentDataUrl(it, preview)
+                    }
+                }
+                com.example.ui.util.ProfilePhotoHelper.cacheAttachmentDataUrl("${docId}_media_$idx", preview)
+                if (idx == 0 && attachmentDocId.isNotBlank() && !attachmentDocId.endsWith("_ext_text")) {
+                    com.example.ui.util.ProfilePhotoHelper.cacheAttachmentDataUrl(attachmentDocId, preview)
+                }
+            }
+        }
+
         return FeedPost(
             id = docId,
             authorId = extractStringField(fields, "authorId"),
@@ -454,10 +480,10 @@ object FirestoreRestFallbackClient {
             isBoosted = extractBooleanField(fields, "isBoosted", false),
             khedmotCategories = extractStringListField(fields, "khedmotCategories"),
             customCategory = extractStringField(fields, "customCategory"),
-            imageUrls = extractStringListField(fields, "imageUrls"),
+            imageUrls = imageUrls,
             mediaTypes = extractStringListField(fields, "mediaTypes"),
-            mediaMetadata = extractMapListField(fields, "mediaMetadata"),
-            attachmentDocId = extractStringField(fields, "attachmentDocId"),
+            mediaMetadata = mediaMetadata,
+            attachmentDocId = attachmentDocId,
             userReactions = extractStringMapField(fields, "userReactions"),
             userReactionNames = extractStringMapField(fields, "userReactionNames"),
             commentCount = extractIntField(fields, "commentCount", 0),
@@ -646,8 +672,8 @@ object FirestoreRestFallbackClient {
         return try {
             conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 5_000
-                readTimeout = 7_000
+                connectTimeout = 8_000
+                readTimeout = 14_000
                 if (!idToken.isNullOrBlank()) {
                     setRequestProperty("Authorization", "Bearer $idToken")
                 }
@@ -685,7 +711,9 @@ object FirestoreRestFallbackClient {
             projectId = projectId
         ) ?: return@withContext null
         val fields = docObj.optJSONObject("fields") ?: return@withContext null
-        extractStringField(fields, "mediaDataUrl").takeIf { it.isNotBlank() }
+        extractStringField(fields, "mediaDataUrl").takeIf { it.startsWith("data:image", ignoreCase = true) }
+            ?: extractStringField(fields, "downloadUrl").takeIf { it.startsWith("data:image", ignoreCase = true) }
+            ?: extractStringField(fields, "extendedText").takeIf { it.startsWith("data:image", ignoreCase = true) }
     }
 
     /**

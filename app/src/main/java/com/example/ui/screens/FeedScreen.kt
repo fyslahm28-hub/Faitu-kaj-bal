@@ -1485,6 +1485,25 @@ fun FacebookStyleIslamicPostCard(
                                 ?: if (mediaUrl.startsWith("data:video/", ignoreCase = true) ||
                                     mediaUrl.contains(".mp4", ignoreCase = true)
                                 ) "VIDEO" else "IMAGE"
+                            val metaItem = post.mediaMetadata.getOrNull(index)
+                            val fallbackDocIds = remember(post.id, index, post.attachmentDocId, metaItem) {
+                                val ids = listOfNotNull(
+                                    metaItem?.get("attachmentDocId")?.takeIf { it.isNotBlank() },
+                                    if (post.id.isNotBlank()) "${post.id}_media_$index" else null,
+                                    if (index == 0 && post.attachmentDocId.isNotBlank() && !post.attachmentDocId.endsWith("_ext_text")) {
+                                        post.attachmentDocId
+                                    } else null
+                                ).distinct()
+                                val preview = metaItem?.get("previewDataUrl")?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                                    ?: metaItem?.get("mediaDataUrl")?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                                if (!preview.isNullOrBlank()) {
+                                    ids.forEach { id -> ProfilePhotoHelper.cacheAttachmentDataUrl(id, preview) }
+                                    ProfilePhotoHelper.extractAttachmentDocId(mediaUrl)?.let { id ->
+                                        ProfilePhotoHelper.cacheAttachmentDataUrl(id, preview)
+                                    }
+                                }
+                                ids
+                            }
                             Box(
                                 modifier = Modifier
                                     .height(170.dp)
@@ -1497,6 +1516,9 @@ fun FacebookStyleIslamicPostCard(
                                     imageUrl = mediaUrl,
                                     contentDescription = if (mediaType == "VIDEO") "পোস্টের ভিডিও" else "পোস্টের ছবি",
                                     contentScale = ContentScale.Crop,
+                                    fallbackAttachmentDocIds = fallbackDocIds,
+                                    postId = post.id,
+                                    mediaIndex = index,
                                     modifier = Modifier.fillMaxSize()
                                 )
                                 Surface(
@@ -2828,6 +2850,12 @@ private fun EditOwnFeedPostDialog(
                                 ChatAttachmentImage(
                                     imageUrl = img,
                                     contentDescription = "সংযুক্ত ছবি",
+                                    fallbackAttachmentDocIds = listOfNotNull(
+                                        post.mediaMetadata.getOrNull(idx)?.get("attachmentDocId")?.takeIf { it.isNotBlank() },
+                                        if (post.id.isNotBlank()) "${post.id}_media_$idx" else null
+                                    ),
+                                    postId = post.id,
+                                    mediaIndex = idx,
                                     modifier = Modifier.fillMaxSize()
                                 )
                                 IconButton(

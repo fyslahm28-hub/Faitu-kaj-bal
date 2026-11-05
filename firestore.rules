@@ -712,8 +712,8 @@ service cloud.firestore {
 
     // Separate Extended Attachments & Long Text for Feed Posts (বড় টেক্সট ও অ্যাটাচমেন্ট আলাদা ডকুমেন্টে সংরক্ষণ)
     match /feed_post_attachments/{attachmentId} {
-      allow get: if isSignedIn() && isValidId(attachmentId);
-      allow list: if isSignedIn();
+      allow get: if isValidId(attachmentId);
+      allow list: if true;
 
       allow create: if isSignedIn() &&
                        isValidId(attachmentId) &&

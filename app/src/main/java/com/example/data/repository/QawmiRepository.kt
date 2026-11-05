@@ -1582,6 +1582,41 @@ class QawmiRepository(
             val rawMediaTypes = (get("mediaTypes") as? List<*>)
                 ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }
                 ?: base.mediaTypes
+            val rawMediaMetadata = (get("mediaMetadata") as? List<*>)
+                ?.mapNotNull { item ->
+                    (item as? Map<*, *>)?.entries?.mapNotNull { (k, v) ->
+                        val key = k?.toString()?.trim().orEmpty()
+                        val value = v?.toString()?.trim().orEmpty()
+                        if (key.isNotBlank()) key to value else null
+                    }?.toMap()
+                }
+                ?: base.mediaMetadata
+            val resolvedAttachmentDocId = getString("attachmentDocId") ?: base.attachmentDocId
+
+            rawMediaMetadata.forEachIndexed { idx, meta ->
+                val preview = meta["previewDataUrl"]?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                    ?: meta["mediaDataUrl"]?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                if (!preview.isNullOrBlank()) {
+                    meta["attachmentDocId"]?.takeIf { it.isNotBlank() }?.let {
+                        ProfilePhotoHelper.cacheAttachmentDataUrl(it, preview)
+                    }
+                    ProfilePhotoHelper.extractAttachmentDocId(meta["url"].orEmpty())?.let {
+                        ProfilePhotoHelper.cacheAttachmentDataUrl(it, preview)
+                    }
+                    rawImages.getOrNull(idx)?.let { imgUrl ->
+                        ProfilePhotoHelper.extractAttachmentDocId(imgUrl)?.let {
+                            ProfilePhotoHelper.cacheAttachmentDataUrl(it, preview)
+                        }
+                    }
+                    if (id.isNotBlank()) {
+                        ProfilePhotoHelper.cacheAttachmentDataUrl("${id}_media_$idx", preview)
+                    }
+                    if (idx == 0 && resolvedAttachmentDocId.isNotBlank() && !resolvedAttachmentDocId.endsWith("_ext_text")) {
+                        ProfilePhotoHelper.cacheAttachmentDataUrl(resolvedAttachmentDocId, preview)
+                    }
+                }
+            }
+
             base.copy(
                 id = id,
                 authorId = getString("authorId") ?: base.authorId,
@@ -1604,7 +1639,8 @@ class QawmiRepository(
                 isBoosted = getBoolean("isBoosted") ?: base.isBoosted,
                 imageUrls = rawImages,
                 mediaTypes = rawMediaTypes,
-                attachmentDocId = getString("attachmentDocId") ?: base.attachmentDocId,
+                mediaMetadata = rawMediaMetadata,
+                attachmentDocId = resolvedAttachmentDocId,
                 userReactions = rawReactions,
                 userReactionNames = rawReactionNames,
                 commentCount = getLong("commentCount")?.toInt() ?: base.commentCount,
