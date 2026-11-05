@@ -148,6 +148,183 @@ class QawmiRepository(
         kotlinx.coroutines.flow.MutableStateFlow<Map<String, DirectMessage>>(emptyMap())
     private val restServerPostsFlow =
         kotlinx.coroutines.flow.MutableStateFlow<Map<String, FeedPost>>(emptyMap())
+    private val localMessagesDiskLock = Any()
+
+    init {
+        if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
+            val persisted = loadPersistedLocalMessages()
+            if (persisted.isNotEmpty()) {
+                restServerMessagesFlow.value = persisted
+            }
+        }
+    }
+
+    private fun getLocalMessagesStoreFile(): java.io.File? {
+        if (FirestoreRestFallbackClient.isRobolectricRuntime()) return null
+        return runCatching {
+            val ctx = com.google.firebase.FirebaseApp.getInstance().applicationContext
+            java.io.File(ctx.filesDir, "qawmi_local_messages.json")
+        }.getOrNull()
+    }
+
+    private fun loadPersistedLocalMessages(): Map<String, DirectMessage> {
+        val file = getLocalMessagesStoreFile() ?: return emptyMap()
+        return synchronized(localMessagesDiskLock) {
+            runCatching {
+                if (!file.exists()) return@runCatching emptyMap()
+                val raw = file.readText(Charsets.UTF_8)
+                if (raw.isBlank()) return@runCatching emptyMap()
+                val arr = org.json.JSONArray(raw)
+                val map = mutableMapOf<String, DirectMessage>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val id = obj.optString("id").trim()
+                    if (id.isBlank()) continue
+                    val imageList = mutableListOf<String>()
+                    val imgArr = obj.optJSONArray("imageUrls")
+                    if (imgArr != null) {
+                        for (j in 0 until imgArr.length()) {
+                            val url = imgArr.optString(j).trim()
+                            if (url.isNotBlank()) imageList.add(url)
+                        }
+                    }
+                    val groupMembers = mutableListOf<String>()
+                    val grpArr = obj.optJSONArray("groupMemberIds")
+                    if (grpArr != null) {
+                        for (j in 0 until grpArr.length()) {
+                            val m = grpArr.optString(j).trim()
+                            if (m.isNotBlank()) groupMembers.add(m)
+                        }
+                    }
+                    val readByList = mutableListOf<String>()
+                    val readArr = obj.optJSONArray("readByUserIds")
+                    if (readArr != null) {
+                        for (j in 0 until readArr.length()) {
+                            val r = readArr.optString(j).trim()
+                            if (r.isNotBlank()) readByList.add(r)
+                        }
+                    }
+                    val createdSec = obj.optLong("createdAtSeconds", System.currentTimeMillis() / 1000L)
+                    val createdNano = obj.optInt("createdAtNanoseconds", 0)
+                    val deliveryState = obj.optString("localDeliveryState", "SENT").ifBlank { "SENT" }
+                    val isConfirmed = obj.optBoolean("isConfirmedOnServer", false)
+                    if (isConfirmed) {
+                        confirmedServerMessageIds.add(id)
+                    }
+                    val msg = DirectMessage(
+                        id = id,
+                        senderId = obj.optString("senderId"),
+                        senderName = obj.optString("senderName"),
+                        senderPhotoUrl = obj.optString("senderPhotoUrl"),
+                        receiverId = obj.optString("receiverId"),
+                        receiverName = obj.optString("receiverName"),
+                        groupId = obj.optString("groupId"),
+                        groupName = obj.optString("groupName"),
+                        groupMemberIds = groupMembers,
+                        subject = obj.optString("subject"),
+                        body = obj.optString("body"),
+                        imageUrls = imageList,
+                        isRead = obj.optBoolean("isRead", false),
+                        readByUserIds = readByList,
+                        createdAt = Timestamp(createdSec, createdNano)
+                    ).apply {
+                        localDeliveryState = deliveryState
+                    }
+                    map[id] = msg
+                }
+                map
+            }.getOrDefault(emptyMap())
+        }
+    }
+
+    private fun savePersistedLocalMessage(msg: DirectMessage, isConfirmedOnServer: Boolean) {
+        if (msg.id.isBlank() || FirestoreRestFallbackClient.isRobolectricRuntime()) return
+        val updatedMap = restServerMessagesFlow.value.toMutableMap()
+        updatedMap[msg.id] = msg
+        restServerMessagesFlow.value = updatedMap
+
+        val file = getLocalMessagesStoreFile() ?: return
+        synchronized(localMessagesDiskLock) {
+            runCatching {
+                val recentMessages = updatedMap.values
+                    .sortedByDescending { it.createdAt?.seconds ?: 0L }
+                    .take(250)
+                val arr = org.json.JSONArray()
+                recentMessages.forEach { item ->
+                    val obj = org.json.JSONObject()
+                    obj.put("id", item.id)
+                    obj.put("senderId", item.senderId)
+                    obj.put("senderName", item.senderName)
+                    obj.put("senderPhotoUrl", item.senderPhotoUrl)
+                    obj.put("receiverId", item.receiverId)
+                    obj.put("receiverName", item.receiverName)
+                    obj.put("groupId", item.groupId)
+                    obj.put("groupName", item.groupName)
+                    obj.put("groupMemberIds", org.json.JSONArray(item.groupMemberIds))
+                    obj.put("subject", item.subject)
+                    obj.put("body", item.body)
+                    obj.put("imageUrls", org.json.JSONArray(item.imageUrls))
+                    obj.put("isRead", item.isRead)
+                    obj.put("readByUserIds", org.json.JSONArray(item.readByUserIds))
+                    obj.put("createdAtSeconds", item.createdAt?.seconds ?: (System.currentTimeMillis() / 1000L))
+                    obj.put("createdAtNanoseconds", item.createdAt?.nanoseconds ?: 0)
+                    obj.put("localDeliveryState", item.localDeliveryState.ifBlank { "SENT" })
+                    obj.put(
+                        "isConfirmedOnServer",
+                        if (item.id == msg.id) isConfirmedOnServer else (item.id in confirmedServerMessageIds)
+                    )
+                    arr.put(obj)
+                }
+                file.writeText(arr.toString(), Charsets.UTF_8)
+            }
+        }
+    }
+
+    private suspend fun flushPendingLocalMessagesToServer(effectiveUid: String) {
+        if (effectiveUid.isBlank() || FirestoreRestFallbackClient.isRobolectricRuntime()) return
+        val pendingMessages = restServerMessagesFlow.value.values.filter { msg ->
+            msg.id.isNotBlank() &&
+                msg.senderId == effectiveUid &&
+                msg.id !in confirmedServerMessageIds
+        }
+        for (pending in pendingMessages) {
+            val isGroupMsg = pending.groupId.isNotBlank() || pending.receiverId.startsWith("GROUP:", ignoreCase = true)
+            val payload = mutableMapOf<String, Any>(
+                "senderId" to pending.senderId,
+                "senderName" to pending.senderName.ifBlank { "সম্মানিত দ্বীনি ভাই" }.take(145),
+                "senderPhotoUrl" to pending.senderPhotoUrl,
+                "receiverId" to pending.receiverId,
+                "receiverName" to pending.receiverName.ifBlank { "সম্মানিত প্রাপক" }.take(145),
+                "groupMemberIds" to if (isGroupMsg) pending.groupMemberIds else emptyList<String>(),
+                "subject" to pending.subject.ifBlank { "খেদমত সংক্রান্ত যোগাযোগ" }.take(195),
+                "body" to pending.body.take(1450),
+                "isRead" to pending.isRead,
+                "readByUserIds" to pending.readByUserIds.ifEmpty { listOf(pending.senderId) },
+                "userReactions" to emptyMap<String, String>(),
+                "createdAt" to (pending.createdAt ?: FieldValue.serverTimestamp())
+            )
+            if (pending.imageUrls.isNotEmpty()) {
+                payload["imageUrls"] = pending.imageUrls
+            }
+            if (isGroupMsg) {
+                payload["groupId"] = pending.groupId.take(120)
+                payload["groupName"] = pending.groupName.ifBlank { pending.receiverName }.take(145)
+            }
+            val commitRes = FirestoreRestFallbackClient.commitDocumentWrite(
+                collection = "messages",
+                documentId = pending.id,
+                payload = payload,
+                auth = auth
+            )
+            if (commitRes.isSuccess) {
+                confirmedServerMessageIds.add(pending.id)
+                val updated = pending.copy().apply {
+                    localDeliveryState = "SENT"
+                }
+                savePersistedLocalMessage(updated, isConfirmedOnServer = true)
+            }
+        }
+    }
 
     fun isPostConfirmedOnServer(postId: String): Boolean {
         return postId.isNotBlank() && postId in confirmedServerPostIds
@@ -214,6 +391,7 @@ class QawmiRepository(
 
     private suspend fun refreshUserMessagesViaRestIfAvailable(effectiveUid: String) {
         if (effectiveUid.isBlank() || FirestoreRestFallbackClient.isRobolectricRuntime()) return
+        flushPendingLocalMessagesToServer(effectiveUid)
         val messages = FirestoreRestFallbackClient.queryUserMessages(
             auth = auth,
             userId = effectiveUid,
@@ -502,18 +680,17 @@ class QawmiRepository(
                             val isQuotaExhausted =
                                 error.code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED
                             val isDeterministicQueryError =
-                                isQuotaExhausted ||
-                                    error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                     error.code == FirebaseFirestoreException.Code.FAILED_PRECONDITION ||
                                     error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
-                            if (isQuotaExhausted || (isDeterministicQueryError && attempt >= 2)) {
+                            if (isDeterministicQueryError && attempt >= 2) {
                                 hasDeterministicError.set(true)
                                 return@launch
                             }
-                            val backoffMs = if (isDeterministicQueryError) {
-                                4_000L
-                            } else {
-                                minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(4)), 15_000L)
+                            val backoffMs = when {
+                                isQuotaExhausted -> 60_000L
+                                isDeterministicQueryError -> 4_000L
+                                else -> minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(4)), 15_000L)
                             }
                             delay(backoffMs)
                             if (!isActive) return@launch
@@ -793,17 +970,16 @@ class QawmiRepository(
                             val isQuotaExhausted =
                                 error.code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED
                             val isDeterministicDocError =
-                                isQuotaExhausted ||
-                                    error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                     error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
-                            if (isQuotaExhausted || (isDeterministicDocError && attempt >= 2)) {
+                            if (isDeterministicDocError && attempt >= 2) {
                                 hasDeterministicError.set(true)
                                 return@launch
                             }
-                            val backoffMs = if (isDeterministicDocError) {
-                                4_000L
-                            } else {
-                                minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(4)), 15_000L)
+                            val backoffMs = when {
+                                isQuotaExhausted -> 60_000L
+                                isDeterministicDocError -> 4_000L
+                                else -> minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(4)), 15_000L)
                             }
                             delay(backoffMs)
                             if (!isActive) return@launch
@@ -4221,6 +4397,30 @@ class QawmiRepository(
                 return Result.success(docRef.id)
             }
 
+            val outgoingLocalMsg = DirectMessage(
+                id = docRef.id,
+                senderId = uid,
+                senderName = safeSenderName,
+                senderPhotoUrl = compactSenderPhoto,
+                receiverId = (payload["receiverId"] as? String).orEmpty(),
+                receiverName = safeReceiverName,
+                groupId = (payload["groupId"] as? String).orEmpty(),
+                groupName = (payload["groupName"] as? String).orEmpty(),
+                groupMemberIds = (payload["groupMemberIds"] as? List<*>)?.mapNotNull { it as? String }.orEmpty(),
+                subject = (payload["subject"] as? String).orEmpty(),
+                body = (payload["body"] as? String).orEmpty(),
+                imageUrls = uploadedImages,
+                isRead = false,
+                readByUserIds = listOf(uid),
+                createdAt = Timestamp.now()
+            ).apply {
+                localDeliveryState = "SENT"
+            }
+
+            // Immediately retain in memory and on disk so the message never disappears from the chat screen
+            // even if the Firestore SDK rolls back its SQLite cache due to HTTP 429 (RESOURCE_EXHAUSTED) or app restart.
+            savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = false)
+
             runCatching { db.enableNetwork() }
             val isRobolectric = FirestoreRestFallbackClient.isRobolectricRuntime()
 
@@ -4236,28 +4436,7 @@ class QawmiRepository(
                 )
                 if (restCommitResult.isSuccess) {
                     confirmedServerMessageIds.add(docRef.id)
-                    val confirmedMsg = DirectMessage(
-                        id = docRef.id,
-                        senderId = uid,
-                        senderName = safeSenderName,
-                        senderPhotoUrl = compactSenderPhoto,
-                        receiverId = (payload["receiverId"] as? String).orEmpty(),
-                        receiverName = safeReceiverName,
-                        groupId = (payload["groupId"] as? String).orEmpty(),
-                        groupName = (payload["groupName"] as? String).orEmpty(),
-                        groupMemberIds = (payload["groupMemberIds"] as? List<*>)?.mapNotNull { it as? String }.orEmpty(),
-                        subject = (payload["subject"] as? String).orEmpty(),
-                        body = (payload["body"] as? String).orEmpty(),
-                        imageUrls = uploadedImages,
-                        isRead = false,
-                        readByUserIds = listOf(uid),
-                        createdAt = Timestamp.now()
-                    ).apply {
-                        localDeliveryState = "SENT"
-                    }
-                    val updatedMap = restServerMessagesFlow.value.toMutableMap()
-                    updatedMap[docRef.id] = confirmedMsg
-                    restServerMessagesFlow.value = updatedMap
+                    savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
                     FirestoreConnectionMonitor.onSnapshotReceived(
                         path = "messages",
                         isFromCache = false,
@@ -4271,6 +4450,7 @@ class QawmiRepository(
             writeTask.addOnCompleteListener { completedTask ->
                 if (completedTask.isSuccessful) {
                     confirmedServerMessageIds.add(docRef.id)
+                    savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
                     FirestoreConnectionMonitor.onSnapshotReceived(
                         path = "messages",
                         isFromCache = false,
@@ -4291,6 +4471,7 @@ class QawmiRepository(
 
             if (sdkCompletedFast) {
                 confirmedServerMessageIds.add(docRef.id)
+                savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
             } else {
                 val taskError = writeTask.exception
                 if (taskError != null) {
@@ -4304,10 +4485,11 @@ class QawmiRepository(
                 if (!serverConfirmed) {
                     runCatching { db.enableNetwork() }
                     return Result.failure(
-                        IllegalStateException("সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।")
+                        IllegalStateException("সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। মেসেজটি আপনার চ্যাটে সংরক্ষিত আছে; পুনরায় পাঠাতে ট্যাপ করুন।")
                     )
                 }
                 confirmedServerMessageIds.add(docRef.id)
+                savePersistedLocalMessage(outgoingLocalMsg, isConfirmedOnServer = true)
             }
 
             // Note: Paygam/Direct messages do NOT create documents in the `notifications` collection.

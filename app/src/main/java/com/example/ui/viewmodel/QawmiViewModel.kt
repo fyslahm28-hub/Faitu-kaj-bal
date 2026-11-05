@@ -779,11 +779,13 @@ class QawmiViewModel(
                     )
 
                 val isActivelyInFlight = msg.id in inFlightMessageIds
-                val isConfirmedOnServer = msg.id in remoteIds &&
-                    !isActivelyInFlight &&
-                    remoteState != "FAILED" &&
-                    remoteState != "PENDING" &&
-                    remoteState != "SENDING"
+                val isConfirmedOnServer = (repository.isMessageConfirmedOnServer(msg.id) || (
+                    msg.id in remoteIds &&
+                        !isActivelyInFlight &&
+                        remoteState != "FAILED" &&
+                        remoteState != "PENDING" &&
+                        remoteState != "SENDING"
+                    ))
 
                 val resolvedState = when {
                     msg.senderId != currentUserId -> {
@@ -797,7 +799,8 @@ class QawmiViewModel(
                     isReadRemotely || localOverrideState == "READ" || localOverrideState == "SEEN" -> "READ"
                     isDeliveredRemotely || localOverrideState == "DELIVERED" -> "DELIVERED"
                     localOverrideState == "FAILED" && !isConfirmedOnServer -> "FAILED"
-                    isConfirmedOnServer || localOverrideState == "SENT" -> "SENT"
+                    isConfirmedOnServer || localOverrideState == "SENT" || remoteState == "SENT" -> "SENT"
+                    localOverrideState == "PENDING" || remoteState == "PENDING" -> "PENDING"
                     else -> "FAILED"
                 }
                 if (locallyReadIds.contains(msg.id)) {
@@ -1046,9 +1049,10 @@ class QawmiViewModel(
             messagesState.collect { state ->
                 val list = (state as? UiState.Success)?.data ?: return@collect
 
-                // 1. Clean up local optimistic entries that are now confirmed on server and no longer in-flight
+                // 1. Clean up local optimistic entries ONLY when confirmed on server by repository and no longer in-flight
                 val confirmedOwnIds = list.filter { msg ->
                     msg.senderId == currentUserId &&
+                        repository.isMessageConfirmedOnServer(msg.id) &&
                         (msg.localDeliveryState == "SENT" ||
                             msg.localDeliveryState == "DELIVERED" ||
                             msg.localDeliveryState == "READ" ||
