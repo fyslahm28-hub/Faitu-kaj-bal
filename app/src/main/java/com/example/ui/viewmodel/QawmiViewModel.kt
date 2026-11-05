@@ -410,13 +410,15 @@ class QawmiViewModel(
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val rawMergedFeedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
-        repository.observePublicFeedPosts(),
+        _adminDataRefreshToken.flatMapLatest { repository.observePublicFeedPosts() },
         _localOptimisticPosts,
         _rolledBackPostIds,
         _localPostEngagementOverrides,
         _localAdminPostOverrides
     ) { remotePosts, optimisticPosts, rolledBackIds, engagementOverrides, adminOverrides ->
-        val filteredRemotePosts = remotePosts.filterNot { it.id in rolledBackIds }
+        val filteredRemotePosts = remotePosts.filterNot {
+            it.id in rolledBackIds && !repository.isPostConfirmedOnServer(it.id)
+        }
         val remoteIds = filteredRemotePosts.map { it.id }.toSet()
         val optimisticById = optimisticPosts.associateBy { it.id }
         val pendingOptimistic = optimisticPosts.filter { it.id.isNotBlank() && it.id !in remoteIds && it.id !in rolledBackIds }
@@ -1000,6 +1002,7 @@ class QawmiViewModel(
         lastNetworkSyncEpochMs.set(startupEpoch)
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "APP_STARTUP")
+            delay(1_800L)
             repository.refreshCriticalDataInParallel(currentUserId)
         }
         setUserOnlineStatus(true)
@@ -1229,7 +1232,13 @@ class QawmiViewModel(
 
     fun retryFeedStreams() {
         clearBanners()
-        onNetworkRestored()
+        lastNetworkSyncEpochMs.set(System.currentTimeMillis())
+        viewModelScope.launch {
+            repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "MANUAL_RETRY")
+            repository.refreshCriticalDataInParallel(currentUserId)
+            setUserOnlineStatus(true)
+            retryPendingFailedMessagesAutomatically()
+        }
     }
 
     fun openApplyDialog(post: FeedPost?) {

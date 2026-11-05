@@ -100,11 +100,15 @@ class QawmiRepository(
      */
     suspend fun ensureLiveConnectionActive(forceTokenRefresh: Boolean = false, reason: String = "ENSURE_LIVE") =
         kotlinx.coroutines.withContext(Dispatchers.IO) {
+            if (reason == "NETWORK_RESTORED" || reason == "MANUAL_RETRY") {
+                FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
+            }
+
             val currentUser = runCatching { auth.currentUser }.getOrNull()
-            if (currentUser != null && forceTokenRefresh) {
+            if (currentUser != null) {
                 runCatching {
                     withTimeoutOrNull(1_800L) {
-                        currentUser.getIdToken(true).await()
+                        currentUser.getIdToken(forceTokenRefresh).await()
                     }
                 }
             }
@@ -113,10 +117,6 @@ class QawmiRepository(
                 withTimeoutOrNull(1_500L) {
                     db.enableNetwork().await()
                 }
-            }
-
-            if (reason == "NETWORK_RESTORED") {
-                FirestoreConnectionMonitor.onNetworkAvailabilityChanged(true)
             }
 
             if (reason != "APP_STARTUP" && reason != "AUTH_TOKEN_REFRESHED") {
@@ -145,6 +145,14 @@ class QawmiRepository(
     private val confirmedServerPostIds = ConcurrentHashMap.newKeySet<String>()
     private val inFlightServerPostIds = ConcurrentHashMap.newKeySet<String>()
 
+    fun isPostConfirmedOnServer(postId: String): Boolean {
+        return postId.isNotBlank() && postId in confirmedServerPostIds
+    }
+
+    fun isMessageConfirmedOnServer(messageId: String): Boolean {
+        return messageId.isNotBlank() && messageId in confirmedServerMessageIds
+    }
+
     private fun notifyQueryServerCallbacks(path: String, snap: QuerySnapshot) {
         activeQueryServerCallbacks[path]?.values?.forEach { callback ->
             runCatching { callback(snap) }
@@ -162,14 +170,14 @@ class QawmiRepository(
         path: String
     ) {
         if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return
-        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L)) return
+        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 8_000L)) return
 
-        // If an active snapshot listener is already attached for this path, give it a brief window
-        // (up to 350ms) to deliver its server snapshot over the shared gRPC stream so we avoid duplicate reads.
+        // If an active snapshot listener is already attached for this path, let its shared gRPC
+        // watch stream deliver the server snapshot first (up to 1.5s) to avoid flooding FirestoreWorker.
         if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0) {
-            repeat(7) {
-                delay(50L)
-                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L) ||
+            repeat(15) {
+                delay(100L)
+                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 10_000L) ||
                     !FirestoreConnectionMonitor.isNetworkAvailable.value
                 ) {
                     return
@@ -177,9 +185,7 @@ class QawmiRepository(
             }
         }
 
-        val snap = withTimeoutOrNull(2_200L) {
-            runCatching { query.get(Source.SERVER).await() }.getOrNull()
-        } ?: withTimeoutOrNull(1_200L) {
+        val snap = withTimeoutOrNull(4_000L) {
             runCatching { query.get().await() }.getOrNull()
         }
 
@@ -198,12 +204,12 @@ class QawmiRepository(
         path: String
     ) {
         if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return
-        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L)) return
+        if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 8_000L)) return
 
         if (FirestoreConnectionMonitor.getActiveListenersForPath(path) > 0) {
-            repeat(7) {
-                delay(50L)
-                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 3_000L) ||
+            repeat(15) {
+                delay(100L)
+                if (FirestoreConnectionMonitor.hasRecentServerConfirmation(path, withinMs = 10_000L) ||
                     !FirestoreConnectionMonitor.isNetworkAvailable.value
                 ) {
                     return
@@ -211,9 +217,7 @@ class QawmiRepository(
             }
         }
 
-        val snap = withTimeoutOrNull(2_200L) {
-            runCatching { docRef.get(Source.SERVER).await() }.getOrNull()
-        } ?: withTimeoutOrNull(1_200L) {
+        val snap = withTimeoutOrNull(4_000L) {
             runCatching { docRef.get().await() }.getOrNull()
         }
 
@@ -239,7 +243,7 @@ class QawmiRepository(
         if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return@withContext
         FirestoreConnectionMonitor.onFullSyncStarted("PARALLEL_FULL_SYNC")
         try {
-            withTimeoutOrNull(1_950L) {
+            withTimeoutOrNull(6_000L) {
                 coroutineScope {
                     val jobs = mutableListOf<kotlinx.coroutines.Deferred<Unit>>()
 
@@ -540,10 +544,18 @@ class QawmiRepository(
                         if (!isFromCache) {
                             hasReceivedServerSnapshot.set(true)
                         }
-                        val shouldEmitPayload = !listenerHasEmitted.get() ||
-                            !isFromCache ||
-                            includeMetadataChanges ||
-                            snapshot.documentChanges.isNotEmpty()
+                        // If local cache is empty on startup while online and server hasn't responded yet,
+                        // wait for the server snapshot (!isFromCache) instead of prematurely emitting an empty list.
+                        val isInitialEmptyCacheWhileOnline = isFromCache &&
+                            snapshot.isEmpty &&
+                            !hasReceivedServerSnapshot.get() &&
+                            FirestoreConnectionMonitor.isNetworkAvailable.value
+                        val shouldEmitPayload = !isInitialEmptyCacheWhileOnline && (
+                            !listenerHasEmitted.get() ||
+                                !isFromCache ||
+                                includeMetadataChanges ||
+                                snapshot.documentChanges.isNotEmpty()
+                            )
                         if (shouldEmitPayload) {
                             val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
                             tryEmitSafe(mapped, fromListener = true, isServerData = !isFromCache)
@@ -571,13 +583,14 @@ class QawmiRepository(
             }
         }
 
-        // 1. Attach real-time snapshot listener immediately
+        // 1. Attach real-time snapshot listener immediately (automatically delivers cached snapshot first, then server snapshot)
         attachSnapshotListener()
 
-        // 2. Instant zero-delay local cache seed on Dispatchers.IO (< 100ms) so UI shows cached data immediately
+        // 2. Fallback local cache seed if the snapshot listener hasn't emitted cached data within 250ms
         launch(Dispatchers.IO) {
+            delay(250L)
             if (listenerHasEmitted.get() || hasEmittedAny.get()) return@launch
-            val cachedSnap = withTimeoutOrNull(200L) {
+            val cachedSnap = withTimeoutOrNull(250L) {
                 runCatching { query.get(Source.CACHE).await() }.getOrNull()
             }
             if (cachedSnap != null &&
@@ -610,10 +623,10 @@ class QawmiRepository(
                     FirestoreConnectionMonitor.isNetworkAvailable.value &&
                     !hasDeterministicError.get()
                 ) {
-                    delay(250L)
+                    delay(400L)
                     if (!isActive || hasReceivedServerSnapshot.get()) return@collect
-                    val freshSnap = withTimeoutOrNull(1_800L) {
-                        runCatching { query.get(Source.SERVER).await() }.getOrNull()
+                    val freshSnap = withTimeoutOrNull(3_500L) {
+                        runCatching { query.get().await() }.getOrNull()
                     }
                     if (freshSnap != null && isActive) {
                         FirestoreConnectionMonitor.onSnapshotReceived(
@@ -630,21 +643,17 @@ class QawmiRepository(
             }
         }
 
-        // 4. Bounded fast server sync if this flow's watch stream hasn't confirmed yet
+        // 4. Bounded fallback server sync if this flow's watch stream hasn't confirmed yet
         launch(Dispatchers.IO) {
-            delay(initialServerTimeoutMs)
+            delay(initialServerTimeoutMs.coerceAtLeast(2_200L))
             if (hasReceivedServerSnapshot.get()) {
                 return@launch
             }
             var serverErr: Throwable? = null
             val serverSnap = if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
-                withTimeoutOrNull(2_800L) {
-                    runCatching { query.get(Source.SERVER).await() }
-                        .onFailure { serverErr = it }
-                        .getOrNull()
-                } ?: withTimeoutOrNull(1_800L) {
+                withTimeoutOrNull(4_500L) {
                     runCatching { query.get().await() }
-                        .onFailure { if (serverErr == null) serverErr = it }
+                        .onFailure { serverErr = it }
                         .getOrNull()
                 }
             } else {
@@ -1877,7 +1886,7 @@ class QawmiRepository(
                 }
             }
 
-            val writeTimeoutMs = if (FirestoreConnectionMonitor.isNetworkAvailable.value) 12_000L else 3_500L
+            val writeTimeoutMs = 20_000L
             try {
                 kotlinx.coroutines.withTimeout(writeTimeoutMs) {
                     com.google.android.gms.tasks.Tasks.whenAll(allWriteTasks).await()
@@ -1890,8 +1899,8 @@ class QawmiRepository(
                     handleFirestoreError(primaryError, OperationType.CREATE, docRef.path)
                     return Result.failure(translateFirestoreExceptionToBangla(primaryError))
                 }
-                val serverConfirmed = runCatching {
-                    val snap = withTimeoutOrNull(1_500L) { docRef.get(Source.SERVER).await() }
+                val serverConfirmed = (docRef.id in confirmedServerPostIds) || runCatching {
+                    val snap = withTimeoutOrNull(2_500L) { docRef.get().await() }
                     snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("authorId") == uid
                 }.getOrDefault(false)
                 if (!serverConfirmed) {
@@ -3657,14 +3666,9 @@ class QawmiRepository(
                 }
             }
 
-            // Actively fetch historical messages from server in parallel
-            launch(Dispatchers.IO) {
-                runCatching { syncUserMessagesFromServer(effectiveUid) }
-            }
-
             // Bounded safety timeout so Permission Denied, Query Error, Timeout, or Empty Result never leaves UI stuck on Loading
             launch(Dispatchers.IO) {
-                delay(900L)
+                delay(2_500L)
                 if (!hasEmittedInitial.get()) {
                     emitMergedIfReady(forceEmit = true)
                 }
@@ -3816,24 +3820,8 @@ class QawmiRepository(
                 )
             }
 
-            if (preallocatedMessageId.isNotBlank()) {
-                if (docRef.id in confirmedServerMessageIds) {
-                    return Result.success(docRef.id)
-                }
-                val existingSnap = docRef.getCacheFirstOrNull(1_500L)
-                if (existingSnap != null &&
-                    existingSnap.exists() &&
-                    !existingSnap.metadata.hasPendingWrites() &&
-                    existingSnap.getString("senderId") == uid
-                ) {
-                    confirmedServerMessageIds.add(docRef.id)
-                    FirestoreConnectionMonitor.onSnapshotReceived(
-                        path = "messages",
-                        isFromCache = false,
-                        hasPendingWrites = false
-                    )
-                    return Result.success(docRef.id)
-                }
+            if (preallocatedMessageId.isNotBlank() && docRef.id in confirmedServerMessageIds) {
+                return Result.success(docRef.id)
             }
 
             runCatching { db.enableNetwork() }
@@ -3853,7 +3841,7 @@ class QawmiRepository(
                 }
             }
 
-            val writeTimeoutMs = if (FirestoreConnectionMonitor.isNetworkAvailable.value) 12_000L else 3_000L
+            val writeTimeoutMs = 20_000L
             try {
                 kotlinx.coroutines.withTimeout(writeTimeoutMs) {
                     writeTask.await()
@@ -3865,8 +3853,8 @@ class QawmiRepository(
                     handleFirestoreError(taskError, OperationType.CREATE, docRef.path)
                     return Result.failure(translateFirestoreExceptionToBangla(taskError))
                 }
-                val serverConfirmed = runCatching {
-                    val snap = withTimeoutOrNull(1_500L) { docRef.get(Source.SERVER).await() }
+                val serverConfirmed = (docRef.id in confirmedServerMessageIds) || runCatching {
+                    val snap = withTimeoutOrNull(2_500L) { docRef.get().await() }
                     snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("senderId") == uid
                 }.getOrDefault(false)
                 if (!serverConfirmed) {

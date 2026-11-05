@@ -493,25 +493,17 @@ fun AppNavigation(
                     network: android.net.Network,
                     networkCapabilities: android.net.NetworkCapabilities
                 ) {
-                    val hasInternet = networkCapabilities.hasCapability(
-                        android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET
-                    )
-                    val transport = when {
-                        networkCapabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
-                        networkCapabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
-                        networkCapabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
-                        else -> if (hasInternet) "ONLINE" else "NONE"
-                    }
+                    val (isOnline, transport) = resolveNetworkStatus(connectivityManager, network)
                     val prevAvailable = com.example.data.repository.FirestoreConnectionMonitor.isNetworkAvailable.value
-                    val transportSwitched = hasInternet &&
+                    val transportSwitched = isOnline &&
                         lastTransportType != "UNKNOWN" &&
                         lastTransportType != "NONE" &&
                         lastTransportType != transport
-                    if (hasInternet) {
+                    if (isOnline) {
                         lastTransportType = transport
                     }
-                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(transport, hasInternet)
-                    if (hasInternet && (!prevAvailable || transportSwitched)) {
+                    com.example.data.repository.FirestoreConnectionMonitor.onNetworkTypeChanged(transport, isOnline)
+                    if (isOnline && (!prevAvailable || transportSwitched)) {
                         qawmiViewModel.onNetworkRestored()
                     }
                 }
