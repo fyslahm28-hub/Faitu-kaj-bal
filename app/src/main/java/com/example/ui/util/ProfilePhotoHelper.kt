@@ -53,6 +53,29 @@ object ProfilePhotoHelper {
     // In-memory cache mapping attachmentDocId -> data:image/jpeg;base64,... for instant cross-screen rendering
     private val attachmentDataUrlCache = ConcurrentHashMap<String, String>()
 
+    // Thread-safe LRU cache of already-decoded ImageBitmaps so Base64 + BitmapFactory never re-runs on UI recomposition/scroll
+    private val decodedBitmapCache = android.util.LruCache<String, ImageBitmap>(80)
+
+    private fun buildBitmapCacheKey(photoUrl: String): String {
+        val len = photoUrl.length
+        if (len <= 160) return photoUrl
+        return "${len}_${photoUrl.hashCode()}_${photoUrl.substring(len - 64)}"
+    }
+
+    fun getCachedDecodedBitmap(photoUrl: String): ImageBitmap? {
+        if (photoUrl.isBlank()) return null
+        val effectiveUrl = if (photoUrl.startsWith("data:image")) {
+            photoUrl
+        } else {
+            val docId = extractAttachmentDocId(photoUrl)
+            if (docId != null) attachmentDataUrlCache[docId] ?: return null else return null
+        }
+        val key = buildBitmapCacheKey(effectiveUrl)
+        return synchronized(decodedBitmapCache) {
+            decodedBitmapCache.get(key)
+        }
+    }
+
     fun cacheAttachmentDataUrl(attachmentDocId: String, dataUrl: String) {
         if (attachmentDocId.isNotBlank() && dataUrl.isNotBlank()) {
             attachmentDataUrlCache[attachmentDocId] = dataUrl
@@ -76,16 +99,16 @@ object ProfilePhotoHelper {
 
     /**
      * Fetches the offloaded image data URL from `/feed_post_attachments/{attachmentDocId}`
-     * when a post's media URL contains `attachmentDocId=...`, caches it in memory, and decodes it.
+     * when a post's media URL contains `attachmentDocId=...`, caches it in memory, and decodes it on Dispatchers.IO.
      */
     suspend fun fetchAndDecodeAttachmentBitmap(
         attachmentDocId: String,
         firestoreInstance: FirebaseFirestore? = null
-    ): ImageBitmap? {
-        if (attachmentDocId.isBlank()) return null
+    ): ImageBitmap? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        if (attachmentDocId.isBlank()) return@withContext null
         val cached = attachmentDataUrlCache[attachmentDocId]
         if (!cached.isNullOrBlank()) {
-            decodeDataUrlToImageBitmap(cached)?.let { return it }
+            decodeDataUrlToImageBitmap(cached)?.let { return@withContext it }
         }
         val sdkDataUrl = withTimeoutOrNull(2_400L) {
             try {
@@ -106,10 +129,10 @@ object ProfilePhotoHelper {
         }
         val dataUrl = sdkDataUrl ?: com.example.data.repository.FirestoreRestFallbackClient
             .fetchAttachmentMediaDataUrl(attachmentDocId = attachmentDocId)
-            ?: return null
+            ?: return@withContext null
 
         attachmentDataUrlCache[attachmentDocId] = dataUrl
-        return decodeDataUrlToImageBitmap(dataUrl)
+        decodeDataUrlToImageBitmap(dataUrl)
     }
 
     /**
@@ -773,6 +796,10 @@ object ProfilePhotoHelper {
             val docId = extractAttachmentDocId(photoUrl)
             if (docId != null) attachmentDataUrlCache[docId] ?: return null else return null
         }
+        val cacheKey = buildBitmapCacheKey(effectiveUrl)
+        synchronized(decodedBitmapCache) {
+            decodedBitmapCache.get(cacheKey)?.let { return it }
+        }
         return try {
             val commaIndex = effectiveUrl.indexOf(',')
             if (commaIndex == -1) return null
@@ -782,7 +809,11 @@ object ProfilePhotoHelper {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
-            bitmap.asImageBitmap()
+            val imageBitmap = bitmap.asImageBitmap()
+            synchronized(decodedBitmapCache) {
+                decodedBitmapCache.put(cacheKey, imageBitmap)
+            }
+            imageBitmap
         } catch (e: Exception) {
             null
         }

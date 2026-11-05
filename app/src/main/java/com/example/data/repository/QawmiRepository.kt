@@ -326,127 +326,29 @@ class QawmiRepository(
         if (!FirestoreConnectionMonitor.isNetworkAvailable.value) return@withContext
         FirestoreConnectionMonitor.onFullSyncStarted("PARALLEL_FULL_SYNC")
         try {
-            withTimeoutOrNull(6_000L) {
+            withTimeoutOrNull(4_500L) {
                 coroutineScope {
                     val jobs = mutableListOf<kotlinx.coroutines.Deferred<Unit>>()
 
-                    // 1. Feed Posts (SDK + Direct HTTPS REST fallback)
+                    // 1. Feed Posts
                     jobs += async {
                         syncQueryFromServerIfNeeded(db.collection("feed_posts"), "feed_posts")
                     }
                     jobs += async {
                         refreshFeedPostsViaRestIfAvailable()
                     }
-                    // 2. Public Madrasas
-                    jobs += async {
-                        syncQueryFromServerIfNeeded(db.collection("madrasas"), "madrasas")
-                    }
-                    // 3. Public Post Comments
-                    jobs += async {
-                        syncQueryFromServerIfNeeded(db.collection("post_comments"), "post_comments")
-                    }
-                    // 4. Broadcast Notifications
-                    jobs += async {
-                        syncQueryFromServerIfNeeded(
-                            db.collection("notifications").whereEqualTo("recipientId", "ALL_USERS"),
-                            "notifications/broadcast"
-                        )
-                    }
-                    // 5. KKS Intelligence Global Config & Metrics
-                    jobs += async {
-                        val configRef = db.collection("intelligence_config")
-                            .document(IntelligenceConfig.GLOBAL_CONFIG_DOC_ID)
-                        syncDocFromServerIfNeeded(configRef, configRef.path)
-                    }
-                    jobs += async {
-                        syncQueryFromServerIfNeeded(
-                            db.collection("post_intelligence_metrics"),
-                            "post_intelligence_metrics"
-                        )
-                    }
-                    // 6. Latest App Release
-                    jobs += async {
-                        syncDocFromServerIfNeeded(
-                            db.collection("app_releases").document("latest"),
-                            "app_releases/latest"
-                        )
-                    }
 
                     if (effectiveUid.isNotBlank()) {
-                        // 7. Current User Profile
+                        // 2. Current User Profile
                         jobs += async {
                             syncDocFromServerIfNeeded(
                                 db.collection("users").document(effectiveUid),
                                 "users/$effectiveUid"
                             )
                         }
-                        // 8. Direct Notifications & Read Receipts (also backs Ajker Smoron)
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("notifications").whereEqualTo("recipientId", effectiveUid),
-                                "notifications/direct/$effectiveUid"
-                            )
-                        }
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("users").document(effectiveUid).collection("notification_reads"),
-                                "users/$effectiveUid/notification_reads"
-                            )
-                        }
-                        // 9. Sent & Received Khedmot Applications
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("khedmot_submissions").whereEqualTo("applicantId", effectiveUid),
-                                "khedmot_submissions/sent/$effectiveUid"
-                            )
-                        }
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("khedmot_submissions").whereEqualTo("recipientId", effectiveUid),
-                                "khedmot_submissions/received/$effectiveUid"
-                            )
-                        }
-                        // 10. Direct & Group Messages + Chat Groups
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("messages").whereEqualTo("receiverId", effectiveUid),
-                                "messages/received/$effectiveUid"
-                            )
-                        }
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("messages").whereEqualTo("senderId", effectiveUid),
-                                "messages/sent/$effectiveUid"
-                            )
-                        }
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("messages").whereArrayContains("groupMemberIds", effectiveUid),
-                                "messages/group/$effectiveUid"
-                            )
-                        }
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("chat_groups").whereArrayContains("memberIds", effectiveUid),
-                                "chat_groups/$effectiveUid"
-                            )
-                        }
+                        // 3. Direct & Group Messages
                         jobs += async {
                             refreshUserMessagesViaRestIfAvailable(effectiveUid)
-                        }
-                        // 11. Bookmarks & User Affinity
-                        jobs += async {
-                            syncQueryFromServerIfNeeded(
-                                db.collection("users").document(effectiveUid).collection("bookmarks"),
-                                "users/$effectiveUid/bookmarks"
-                            )
-                        }
-                        jobs += async {
-                            val affinityRef = db.collection("users")
-                                .document(effectiveUid)
-                                .collection("intelligence_state")
-                                .document(UserAffinityState.AFFINITY_DOC_ID)
-                            syncDocFromServerIfNeeded(affinityRef, affinityRef.path)
                         }
                     }
 
@@ -637,6 +539,7 @@ class QawmiRepository(
                             isFromCache = isFromCache,
                             hasPendingWrites = hasPending
                         )
+                        val wasServerConfirmedBefore = hasReceivedServerSnapshot.get()
                         if (!isFromCache) {
                             hasReceivedServerSnapshot.set(true)
                         }
@@ -648,13 +551,20 @@ class QawmiRepository(
                             FirestoreConnectionMonitor.isNetworkAvailable.value
                         val shouldEmitPayload = !isInitialEmptyCacheWhileOnline && (
                             !listenerHasEmitted.get() ||
-                                !isFromCache ||
+                                (!isFromCache && !wasServerConfirmedBefore) ||
                                 includeMetadataChanges ||
                                 snapshot.documentChanges.isNotEmpty()
                             )
                         if (shouldEmitPayload) {
-                            val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
-                            tryEmitSafe(mapped, fromListener = true, isServerData = !isFromCache)
+                            if (FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                                val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
+                                tryEmitSafe(mapped, fromListener = true, isServerData = !isFromCache)
+                            } else {
+                                launch(Dispatchers.Default) {
+                                    val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
+                                    tryEmitSafe(mapped, fromListener = true, isServerData = !isFromCache)
+                                }
+                            }
                         }
                     }
                 }
@@ -672,9 +582,18 @@ class QawmiRepository(
 
         activeQueryServerCallbacks.getOrPut(path) { ConcurrentHashMap() }[listenerId] = { serverSnap ->
             if (isActive) {
-                val mapped = runCatching { mapper(serverSnap) }.getOrNull()
-                if (mapped != null) {
-                    tryEmitSafe(mapped, fromListener = false, isServerData = !serverSnap.metadata.isFromCache)
+                if (FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                    val mapped = runCatching { mapper(serverSnap) }.getOrNull()
+                    if (mapped != null) {
+                        tryEmitSafe(mapped, fromListener = false, isServerData = !serverSnap.metadata.isFromCache)
+                    }
+                } else {
+                    launch(Dispatchers.Default) {
+                        val mapped = runCatching { mapper(serverSnap) }.getOrNull()
+                        if (mapped != null) {
+                            tryEmitSafe(mapped, fromListener = false, isServerData = !serverSnap.metadata.isFromCache)
+                        }
+                    }
                 }
             }
         }
@@ -904,16 +823,34 @@ class QawmiRepository(
                             isFromCache = isFromCache,
                             hasPendingWrites = hasPending
                         )
+                        val wasServerConfirmedBefore = hasReceivedServerSnapshot.get()
                         if (!isFromCache) {
                             hasReceivedServerSnapshot.set(true)
                         }
-                        hasEmittedAny.set(true)
-                        val mapped = if (snapshot.exists()) {
-                            runCatching { mapper(snapshot) }.getOrDefault(defaultValueOnError)
-                        } else {
-                            null
+                        val shouldEmitDoc = !hasEmittedAny.get() ||
+                            (!isFromCache && !wasServerConfirmedBefore) ||
+                            includeMetadataChanges ||
+                            !isFromCache
+                        if (shouldEmitDoc) {
+                            hasEmittedAny.set(true)
+                            if (FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                                val mapped = if (snapshot.exists()) {
+                                    runCatching { mapper(snapshot) }.getOrDefault(defaultValueOnError)
+                                } else {
+                                    null
+                                }
+                                trySend(mapped)
+                            } else {
+                                launch(Dispatchers.Default) {
+                                    val mapped = if (snapshot.exists()) {
+                                        runCatching { mapper(snapshot) }.getOrDefault(defaultValueOnError)
+                                    } else {
+                                        null
+                                    }
+                                    trySend(mapped)
+                                }
+                            }
                         }
-                        trySend(mapped)
                     }
                 }
                 activeRegistration.set(reg)
@@ -934,13 +871,24 @@ class QawmiRepository(
                 if (!serverDoc.metadata.isFromCache) {
                     hasReceivedServerSnapshot.set(true)
                 }
-                val mapped = if (serverDoc.exists()) {
-                    runCatching { mapper(serverDoc) }.getOrDefault(defaultValueOnError)
-                } else {
-                    defaultValueOnError
-                }
                 hasEmittedAny.set(true)
-                trySend(mapped)
+                if (FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                    val mapped = if (serverDoc.exists()) {
+                        runCatching { mapper(serverDoc) }.getOrDefault(defaultValueOnError)
+                    } else {
+                        defaultValueOnError
+                    }
+                    trySend(mapped)
+                } else {
+                    launch(Dispatchers.Default) {
+                        val mapped = if (serverDoc.exists()) {
+                            runCatching { mapper(serverDoc) }.getOrDefault(defaultValueOnError)
+                        } else {
+                            defaultValueOnError
+                        }
+                        trySend(mapped)
+                    }
+                }
             }
         }
 
@@ -1805,8 +1753,12 @@ class QawmiRepository(
 
             if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
                 launch(Dispatchers.IO) {
-                    delay(900L)
-                    refreshFeedPostsViaRestIfAvailable()
+                    delay(1_100L)
+                    val needInitialRest = synchronized(stateLock) { latestSdkPosts.isEmpty() && latestRestPosts.isEmpty() } ||
+                        !FirestoreConnectionMonitor.isServerConnected.value
+                    if (needInitialRest) {
+                        refreshFeedPostsViaRestIfAvailable()
+                    }
                     var lastGen = FirestoreConnectionMonitor.recoveryGeneration.value
                     FirestoreConnectionMonitor.recoveryGeneration.collect { gen ->
                         if (gen != lastGen) {
@@ -4031,12 +3983,20 @@ class QawmiRepository(
 
             if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
                 launch(Dispatchers.IO) {
-                    delay(800L)
-                    refreshUserMessagesViaRestIfAvailable(effectiveUid)
-                    while (isActive) {
-                        delay(12_000L)
-                        if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
-                            refreshUserMessagesViaRestIfAvailable(effectiveUid)
+                    delay(1_100L)
+                    val needInitialRest = synchronized(stateLock) {
+                        (sentList.isEmpty() && receivedList.isEmpty() && groupList.isEmpty())
+                    } || !FirestoreConnectionMonitor.isServerConnected.value
+                    if (needInitialRest) {
+                        refreshUserMessagesViaRestIfAvailable(effectiveUid)
+                    }
+                    var lastGen = FirestoreConnectionMonitor.recoveryGeneration.value
+                    FirestoreConnectionMonitor.recoveryGeneration.collect { gen ->
+                        if (gen != lastGen) {
+                            lastGen = gen
+                            if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                                refreshUserMessagesViaRestIfAvailable(effectiveUid)
+                            }
                         }
                     }
                 }
@@ -4173,6 +4133,7 @@ class QawmiRepository(
                 "body" to resolvedBody.take(1450),
                 "isRead" to false,
                 "readByUserIds" to listOf(uid),
+                "userReactions" to emptyMap<String, String>(),
                 "createdAt" to FieldValue.serverTimestamp()
             )
             if (uploadedImages.isNotEmpty()) {
@@ -4201,38 +4162,12 @@ class QawmiRepository(
             }
 
             runCatching { db.enableNetwork() }
-            val writeTask = docRef.set(payload)
-            writeTask.addOnCompleteListener { completedTask ->
-                if (completedTask.isSuccessful) {
-                    confirmedServerMessageIds.add(docRef.id)
-                    FirestoreConnectionMonitor.onSnapshotReceived(
-                        path = "messages",
-                        isFromCache = false,
-                        hasPendingWrites = false
-                    )
-                } else {
-                    completedTask.exception?.let { err ->
-                        handleFirestoreError(err, OperationType.CREATE, docRef.path)
-                    }
-                }
-            }
-
             val isRobolectric = FirestoreRestFallbackClient.isRobolectricRuntime()
-            val primarySdkWaitMs = if (isRobolectric) 20_000L else 2_800L
-            val sdkCompletedFast = withTimeoutOrNull(primarySdkWaitMs) {
-                writeTask.await()
-                true
-            } ?: false
 
-            if (sdkCompletedFast) {
-                confirmedServerMessageIds.add(docRef.id)
-            } else if (!isRobolectric) {
-                val taskError = writeTask.exception
-                if (taskError != null) {
-                    handleFirestoreError(taskError, OperationType.CREATE, docRef.path)
-                    return Result.failure(translateFirestoreExceptionToBangla(taskError))
-                }
-                // Direct Cloud Firestore v1 HTTPS REST API fallback so clogged gRPC queues or slow mobile networks never fail message delivery
+            if (!isRobolectric) {
+                // Commit directly via HTTPS REST first so we do not queue a duplicate `docRef.set(payload)` in the
+                // SDK's local SQLite mutation queue that could flush later and conflict with recipient `isRead = true`
+                // or `userReactions` updates.
                 val restCommitResult = FirestoreRestFallbackClient.commitDocumentWrite(
                     collection = "messages",
                     documentId = docRef.id,
@@ -4268,34 +4203,34 @@ class QawmiRepository(
                         isFromCache = false,
                         hasPendingWrites = false
                     )
+                    return Result.success(docRef.id)
+                }
+            }
+
+            val writeTask = docRef.set(payload)
+            writeTask.addOnCompleteListener { completedTask ->
+                if (completedTask.isSuccessful) {
+                    confirmedServerMessageIds.add(docRef.id)
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "messages",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
                 } else {
-                    // Wait a final bounded window on the SDK writeTask in case gRPC completes right after REST attempt
-                    try {
-                        kotlinx.coroutines.withTimeout(6_000L) {
-                            writeTask.await()
-                        }
-                        confirmedServerMessageIds.add(docRef.id)
-                    } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
-                        val err = writeTask.exception
-                            ?: (restCommitResult.exceptionOrNull()?.let { it as? Exception ?: Exception(it) })
-                        if (err != null && err !is kotlinx.coroutines.TimeoutCancellationException) {
-                            handleFirestoreError(err, OperationType.CREATE, docRef.path)
-                            return Result.failure(translateFirestoreExceptionToBangla(err))
-                        }
-                        val serverConfirmed = (docRef.id in confirmedServerMessageIds) || runCatching {
-                            val snap = withTimeoutOrNull(2_500L) { docRef.get().await() }
-                            snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("senderId") == uid
-                        }.getOrDefault(false)
-                        if (!serverConfirmed) {
-                            runCatching { db.enableNetwork() }
-                            handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
-                            return Result.failure(
-                                IllegalStateException("সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।")
-                            )
-                        }
-                        confirmedServerMessageIds.add(docRef.id)
+                    completedTask.exception?.let { err ->
+                        handleFirestoreError(err, OperationType.CREATE, docRef.path)
                     }
                 }
+            }
+
+            val primarySdkWaitMs = if (isRobolectric) 20_000L else 6_000L
+            val sdkCompletedFast = withTimeoutOrNull(primarySdkWaitMs) {
+                writeTask.await()
+                true
+            } ?: false
+
+            if (sdkCompletedFast) {
+                confirmedServerMessageIds.add(docRef.id)
             } else {
                 val taskError = writeTask.exception
                 if (taskError != null) {
@@ -4452,10 +4387,9 @@ class QawmiRepository(
             return try {
                 val batch = db.batch()
                 for (msg in unreadGroupMsgs) {
-                    val updatedReadBy = (msg.readByUserIds + uid).distinct().take(50)
                     batch.update(
                         db.collection("messages").document(msg.id),
-                        mapOf("readByUserIds" to updatedReadBy)
+                        mapOf("readByUserIds" to FieldValue.arrayUnion(uid))
                     )
                 }
                 batch.commit().awaitWithTimeout(8_000L)
@@ -4464,7 +4398,7 @@ class QawmiRepository(
                 throw e
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "messages")
-                Result.failure(e)
+                Result.failure(translateFirestoreExceptionToBangla(e))
             }
         }
 
@@ -4507,13 +4441,12 @@ class QawmiRepository(
 
             if (unreadMap.isNotEmpty()) {
                 val batch = db.batch()
-                for ((msgId, existingReadBy) in unreadMap) {
-                    val updatedReadBy = (existingReadBy + uid).distinct().take(50)
+                for ((msgId, _) in unreadMap) {
                     batch.update(
                         db.collection("messages").document(msgId),
                         mapOf(
                             "isRead" to true,
-                            "readByUserIds" to updatedReadBy
+                            "readByUserIds" to FieldValue.arrayUnion(uid)
                         )
                     )
                 }
@@ -4524,7 +4457,7 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, "messages")
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -4556,19 +4489,58 @@ class QawmiRepository(
             } else {
                 mergedMap[uid] = nextReaction
             }
-            val updates = mutableMapOf<String, Any>("userReactions" to mergedMap.entries.take(50).associate { it.key to it.value })
-            if (uid == message.senderId && message.senderReaction.isNotBlank()) {
-                updates["senderReaction"] = ""
-            } else if (uid != message.senderId && uid == message.receiverId && message.receiverReaction.isNotBlank()) {
-                updates["receiverReaction"] = ""
+            val cleanedReactionsMap = mergedMap.entries.take(50).associate { it.key to it.value }
+
+            // Optimistically update restServerMessagesFlow if present so the UI reflects the reaction immediately
+            val currentRestMap = restServerMessagesFlow.value
+            val existingRestMsg = currentRestMap[message.id]
+            if (existingRestMsg != null) {
+                val updatedRestMap = currentRestMap.toMutableMap()
+                updatedRestMap[message.id] = existingRestMsg.copy(
+                    userReactions = cleanedReactionsMap,
+                    senderReaction = if (uid == message.senderId) "" else existingRestMsg.senderReaction,
+                    receiverReaction = if (uid != message.senderId && uid == message.receiverId) "" else existingRestMsg.receiverReaction
+                ).apply {
+                    localDeliveryState = existingRestMsg.localDeliveryState
+                }
+                restServerMessagesFlow.value = updatedRestMap
             }
-            docRef.update(updates).awaitWithTimeout(8_000L)
+
+            val isRobolectric = FirestoreRestFallbackClient.isRobolectricRuntime()
+            if (!isRobolectric) {
+                val restResult = FirestoreRestFallbackClient.commitDocumentWrite(
+                    collection = "messages",
+                    documentId = message.id,
+                    payload = mapOf("userReactions" to cleanedReactionsMap),
+                    auth = auth,
+                    updateMaskFields = listOf("userReactions")
+                )
+                if (restResult.isSuccess) {
+                    return Result.success(Unit)
+                }
+            }
+
+            if (isRobolectric) {
+                val updates = mutableMapOf<String, Any>("userReactions" to cleanedReactionsMap)
+                if (uid == message.senderId && message.senderReaction.isNotBlank()) {
+                    updates["senderReaction"] = ""
+                } else if (uid != message.senderId && uid == message.receiverId && message.receiverReaction.isNotBlank()) {
+                    updates["receiverReaction"] = ""
+                }
+                docRef.update(updates).awaitWithTimeout(8_000L)
+            } else {
+                val fieldValue: Any = if (nextReaction.isBlank()) FieldValue.delete() else nextReaction
+                docRef.update(
+                    com.google.firebase.firestore.FieldPath.of("userReactions", uid),
+                    fieldValue
+                ).awaitWithTimeout(6_000L)
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -4606,7 +4578,7 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -4618,23 +4590,22 @@ class QawmiRepository(
         val uid = requireUserId()
         if (message.id.isBlank()) return Result.failure(IllegalArgumentException("পয়গাম খুঁজে পাওয়া যায়নি।"))
         val docRef = db.collection("messages").document(message.id)
-        val updatedDeletedList = (message.deletedForUserIds + uid).distinct().take(50)
         return try {
             when {
                 uid == message.senderId -> docRef.update(
                     mapOf(
                         "deletedForSender" to true,
-                        "deletedForUserIds" to updatedDeletedList
+                        "deletedForUserIds" to FieldValue.arrayUnion(uid)
                     )
                 ).awaitWithTimeout(8_000L)
                 uid == message.receiverId -> docRef.update(
                     mapOf(
                         "deletedForReceiver" to true,
-                        "deletedForUserIds" to updatedDeletedList
+                        "deletedForUserIds" to FieldValue.arrayUnion(uid)
                     )
                 ).awaitWithTimeout(8_000L)
                 message.groupMemberIds.contains(uid) || message.groupId.isNotBlank() -> {
-                    docRef.update("deletedForUserIds", updatedDeletedList).awaitWithTimeout(8_000L)
+                    docRef.update("deletedForUserIds", FieldValue.arrayUnion(uid)).awaitWithTimeout(8_000L)
                 }
                 else -> return Result.failure(IllegalStateException("অনুমোদনহীন অনুরোধ।"))
             }
@@ -4643,7 +4614,7 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 
@@ -4673,7 +4644,7 @@ class QawmiRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            Result.failure(e)
+            Result.failure(translateFirestoreExceptionToBangla(e))
         }
     }
 

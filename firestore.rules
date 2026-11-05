@@ -963,7 +963,7 @@ service cloud.firestore {
         let incList = incReadBy is list ? incReadBy : [];
         let extList = extReadBy is list ? extReadBy : [];
         return incList.size() <= 50 &&
-               incList.hasAll(extList) &&
+               incList.hasAll(extList.removeAll(['DELIVERED:' + request.auth.uid])) &&
                incList.removeAll(extList).hasOnly([request.auth.uid, 'DELIVERED:' + request.auth.uid]);
       }
 
@@ -979,7 +979,8 @@ service cloud.firestore {
         let incMap = incReactions is map ? incReactions : {};
         let extMap = extReactions is map ? extReactions : {};
         return incMap.size() <= 50 &&
-               incMap.diff(extMap).affectedKeys().hasOnly([request.auth.uid]);
+               (incMap.diff(extMap).affectedKeys().hasOnly([request.auth.uid]) ||
+                (!(request.auth.uid in incMap) || isValidReactionCode(incMap.get(request.auth.uid, ''))));
       }
 
       allow get: if isSignedIn() && isValidId(messageId) && (resource == null || isMessageParticipant(existing()));
@@ -1053,8 +1054,10 @@ service cloud.firestore {
                          (request.auth.uid == existing().senderId &&
                           incoming().body is string &&
                           incoming().body.size() <= 1500 &&
-                          incoming().get('isRead', false) == existing().get('isRead', false) &&
-                          incoming().get('readByUserIds', []) == existing().get('readByUserIds', []) &&
+                          (incoming().get('isRead', false) == existing().get('isRead', false) ||
+                           (incoming().get('isRead', false) is bool && incoming().body == existing().body)) &&
+                          (incoming().get('readByUserIds', []) == existing().get('readByUserIds', []) ||
+                           (incoming().get('readByUserIds', []) is list && incoming().body == existing().body)) &&
                           (incoming().body == existing().body ||
                            (incoming().createdAt == existing().createdAt &&
                             (incoming().get('isEdited', false) == true || incoming().get('isDeletedForEveryone', false) == true))) &&
@@ -1066,6 +1069,7 @@ service cloud.firestore {
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'body', 'subject', 'senderName', 'senderPhotoUrl', 'receiverName',
                             'groupId', 'groupName', 'groupMemberIds', 'imageUrls',
+                            'isRead', 'readByUserIds',
                             'isEdited', 'editedAt', 'senderReaction', 'userReactions',
                             'deletedForSender', 'deletedForUserIds', 'isDeletedForEveryone',
                             'createdAt'

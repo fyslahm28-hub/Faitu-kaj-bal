@@ -396,9 +396,20 @@ fun UserAvatarImage(
     isOnline: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val decodedBitmap = remember(photoUrl) {
-        ProfilePhotoHelper.decodeDataUrlToImageBitmap(photoUrl)
+    val cachedBitmap = remember(photoUrl) {
+        ProfilePhotoHelper.getCachedDecodedBitmap(photoUrl)
     }
+    var asyncDecodedBitmap by remember(photoUrl) {
+        mutableStateOf(cachedBitmap)
+    }
+    LaunchedEffect(photoUrl) {
+        if (asyncDecodedBitmap == null && photoUrl.startsWith("data:image", ignoreCase = true)) {
+            asyncDecodedBitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                ProfilePhotoHelper.decodeDataUrlToImageBitmap(photoUrl)
+            }
+        }
+    }
+    val decodedBitmap = cachedBitmap ?: asyncDecodedBitmap
 
     Box(
         modifier = modifier.size(size),
@@ -580,21 +591,33 @@ fun ChatAttachmentImage(
         ProfilePhotoHelper.extractAttachmentDocId(imageUrl)
     }
     val initialBitmap = remember(imageUrl) {
-        ProfilePhotoHelper.decodeDataUrlToImageBitmap(imageUrl)
+        ProfilePhotoHelper.getCachedDecodedBitmap(imageUrl)
     }
     var fetchedAttachmentBitmap by remember(imageUrl) {
         mutableStateOf<ImageBitmap?>(initialBitmap)
     }
     var isFetchingAttachment by remember(imageUrl) {
-        mutableStateOf(initialBitmap == null && !attachmentDocId.isNullOrBlank())
+        mutableStateOf(
+            initialBitmap == null &&
+                (!attachmentDocId.isNullOrBlank() || imageUrl.startsWith("data:image", ignoreCase = true))
+        )
     }
 
     LaunchedEffect(attachmentDocId, imageUrl) {
-        if (fetchedAttachmentBitmap == null && !attachmentDocId.isNullOrBlank()) {
-            isFetchingAttachment = true
-            val resolved = ProfilePhotoHelper.fetchAndDecodeAttachmentBitmap(attachmentDocId)
-            fetchedAttachmentBitmap = resolved
-            isFetchingAttachment = false
+        if (fetchedAttachmentBitmap == null) {
+            if (!attachmentDocId.isNullOrBlank()) {
+                isFetchingAttachment = true
+                val resolved = ProfilePhotoHelper.fetchAndDecodeAttachmentBitmap(attachmentDocId)
+                fetchedAttachmentBitmap = resolved
+                isFetchingAttachment = false
+            } else if (imageUrl.startsWith("data:image", ignoreCase = true)) {
+                isFetchingAttachment = true
+                val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    ProfilePhotoHelper.decodeDataUrlToImageBitmap(imageUrl)
+                }
+                fetchedAttachmentBitmap = resolved
+                isFetchingAttachment = false
+            }
         }
     }
 

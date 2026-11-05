@@ -30,6 +30,7 @@ import com.example.ui.util.KksIntelligenceEngine
 import com.example.ui.util.ProfilePhotoHelper
 import com.google.firebase.Timestamp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -44,11 +45,19 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+
+private fun <T> Flow<T>.flowOnBackgroundIfDevice(): Flow<T> =
+    if (com.example.data.repository.FirestoreRestFallbackClient.isRobolectricRuntime()) {
+        this
+    } else {
+        this.flowOn(Dispatchers.Default)
+    }
 
 data class FailedMessageDraft(
     val partnerId: String,
@@ -487,6 +496,7 @@ class QawmiViewModel(
             )
         UiState.Success(merged) as UiState<List<FeedPost>>
     }
+        .flowOnBackgroundIfDevice()
         .catch { e ->
             Log.w(TAG, "Error observing feed posts", e)
             val fallback = _localOptimisticPosts.value
@@ -517,18 +527,23 @@ class QawmiViewModel(
             metricsMap = metricsMap,
             config = config
         )
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }
+        .flowOnBackgroundIfDevice()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val scoredFeedPostsMapState: StateFlow<Map<String, ScoredFeedPost>> = scoredFeedPostsState
         .map { list -> list.associateBy { it.post.id } }
+        .flowOnBackgroundIfDevice()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     val recommendedPostsState: StateFlow<List<ScoredFeedPost>> = scoredFeedPostsState
         .map { scored -> KksIntelligenceEngine.selectRecommendedPosts(scored, currentUserId, limit = 6) }
+        .flowOnBackgroundIfDevice()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val trendingPostsState: StateFlow<List<ScoredFeedPost>> = scoredFeedPostsState
         .map { scored -> KksIntelligenceEngine.selectTrendingPosts(scored, limit = 6) }
+        .flowOnBackgroundIfDevice()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val feedPostsState: StateFlow<UiState<List<FeedPost>>> = combine(
@@ -557,7 +572,9 @@ class QawmiViewModel(
                 }
             }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+    }
+        .flowOnBackgroundIfDevice()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
 
     val postCommentsState: StateFlow<UiState<List<FeedComment>>> = combine(
         _adminDataRefreshToken.flatMapLatest {
@@ -578,6 +595,7 @@ class QawmiViewModel(
             )
         UiState.Success(merged) as UiState<List<FeedComment>>
     }
+        .flowOnBackgroundIfDevice()
         .catch { e ->
             Log.w(TAG, "Error observing post comments", e)
             val fallback = _localOptimisticComments.value.filterNot { it.id in _locallyDeletedCommentIds.value }
@@ -798,6 +816,7 @@ class QawmiViewModel(
             .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
         UiState.Success(deduplicated) as UiState<List<DirectMessage>>
     }
+        .flowOnBackgroundIfDevice()
         .catch { e ->
             Log.w(TAG, "Error observing messages", e)
             val fallback = _localOptimisticMessages.value
@@ -859,6 +878,7 @@ class QawmiViewModel(
                 }
             }
         }
+        .flowOnBackgroundIfDevice()
         .catch { e ->
             Log.w(TAG, "Error observing partner profiles", e)
             emit(emptyMap())
@@ -1000,7 +1020,9 @@ class QawmiViewModel(
             submissions = subs,
             config = config
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), AlgorithmPerformanceSummary())
+    }
+        .flowOnBackgroundIfDevice()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), AlgorithmPerformanceSummary())
 
     private val lastForegroundSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val lastNetworkSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
@@ -1011,8 +1033,6 @@ class QawmiViewModel(
         lastNetworkSyncEpochMs.set(startupEpoch)
         viewModelScope.launch {
             repository.ensureLiveConnectionActive(forceTokenRefresh = false, reason = "APP_STARTUP")
-            delay(1_800L)
-            repository.refreshCriticalDataInParallel(currentUserId)
         }
         setUserOnlineStatus(true)
         verifyAndSyncAdminIdentity()
@@ -2592,7 +2612,7 @@ class QawmiViewModel(
         viewModelScope.launch {
             val result = repository.reactToMessage(message, reactionCode)
             result.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "অভিবাদন যুক্ত করতে ত্রুটি হয়েছে।"
+                _errorBanner.value = formatFirestoreErrorBangla(err, "অভিবাদন যুক্ত করতে ত্রুটি হয়েছে।")
             }
         }
     }
@@ -2608,7 +2628,7 @@ class QawmiViewModel(
             result.onSuccess {
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, আপনার পয়গামটি সম্পাদিত হয়েছে।"
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "পয়গাম সম্পাদনা করতে ত্রুটি হয়েছে।"
+                _errorBanner.value = formatFirestoreErrorBangla(err, "পয়গাম সম্পাদনা করতে ত্রুটি হয়েছে।")
             }
         }
     }
@@ -2619,7 +2639,7 @@ class QawmiViewModel(
             result.onSuccess {
                 _feedbackBanner.value = "পয়গামটি আপনার কথোপকথন থেকে সরিয়ে দেওয়া হয়েছে।"
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "পয়গাম মুছতে ত্রুটি হয়েছে।"
+                _errorBanner.value = formatFirestoreErrorBangla(err, "পয়গাম মুছতে ত্রুটি হয়েছে।")
             }
         }
     }
@@ -2630,7 +2650,7 @@ class QawmiViewModel(
             result.onSuccess {
                 _feedbackBanner.value = "পয়গামটি উভয়ের কথোপকথন থেকে প্রত্যাহার করা হয়েছে।"
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "পয়গাম প্রত্যাহার করতে ত্রুটি হয়েছে।"
+                _errorBanner.value = formatFirestoreErrorBangla(err, "পয়গাম প্রত্যাহার করতে ত্রুটি হয়েছে।")
             }
         }
     }
@@ -2647,7 +2667,7 @@ class QawmiViewModel(
                     "আলহামদুলিল্লাহ, এই ব্যবহারকারীর সাথে পয়গাম আদান-প্রদান পুনরায় চালু হয়েছে।"
                 }
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "ব্লক স্ট্যাটাস পরিবর্তন করতে ত্রুটি হয়েছে।"
+                _errorBanner.value = formatFirestoreErrorBangla(err, "ব্লক স্ট্যাটাস পরিবর্তন করতে ত্রুটি হয়েছে।")
             }
         }
     }
@@ -2660,7 +2680,7 @@ class QawmiViewModel(
             result.onSuccess {
                 _feedbackBanner.value = "আলহামদুলিল্লাহ, কথোপকথনের আবহ ও থিম সংরক্ষিত হয়েছে।"
             }.onFailure { err ->
-                _errorBanner.value = err.localizedMessage ?: "থিম সংরক্ষণ করতে ত্রুটি হয়েছে।"
+                _errorBanner.value = formatFirestoreErrorBangla(err, "থিম সংরক্ষণ করতে ত্রুটি হয়েছে।")
             }
         }
     }
