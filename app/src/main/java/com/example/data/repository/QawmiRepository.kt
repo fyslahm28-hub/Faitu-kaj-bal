@@ -480,8 +480,8 @@ class QawmiRepository(
                         recoveryJob = launch(Dispatchers.IO) {
                             val attempt = retryAttempt.incrementAndGet()
                             // Serve local cache fallback if nothing emitted yet, or emit emptyList so UI never hangs on Loading
-                            if (!hasEmittedAny.get()) {
-                                val cachedFallback = withTimeoutOrNull(200L) {
+                            if (!hasEmittedAny.get() && !listenerHasEmitted.get()) {
+                                val cachedFallback = withTimeoutOrNull(1_500L) {
                                     runCatching { query.get(Source.CACHE).await() }.getOrNull()
                                 }
                                 if (cachedFallback != null) {
@@ -499,18 +499,21 @@ class QawmiRepository(
                                 }
                             }
 
+                            val isQuotaExhausted =
+                                error.code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED
                             val isDeterministicQueryError =
-                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                isQuotaExhausted ||
+                                    error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                     error.code == FirebaseFirestoreException.Code.FAILED_PRECONDITION ||
                                     error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
-                            if (isDeterministicQueryError && attempt >= 2) {
+                            if (isQuotaExhausted || (isDeterministicQueryError && attempt >= 2)) {
                                 hasDeterministicError.set(true)
                                 return@launch
                             }
                             val backoffMs = if (isDeterministicQueryError) {
                                 4_000L
                             } else {
-                                minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
+                                minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(4)), 15_000L)
                             }
                             delay(backoffMs)
                             if (!isActive) return@launch
@@ -556,6 +559,8 @@ class QawmiRepository(
                                 snapshot.documentChanges.isNotEmpty()
                             )
                         if (shouldEmitPayload) {
+                            hasEmittedAny.set(true)
+                            listenerHasEmitted.set(true)
                             if (FirestoreRestFallbackClient.isRobolectricRuntime()) {
                                 val mapped = runCatching { mapper(snapshot) }.getOrDefault(emptyList())
                                 tryEmitSafe(mapped, fromListener = true, isServerData = !isFromCache)
@@ -658,10 +663,10 @@ class QawmiRepository(
             }
         }
 
-        // 4. Bounded fallback server sync if this flow's watch stream hasn't confirmed yet
+        // 4. Bounded fallback sync if this flow hasn't emitted any data yet
         launch(Dispatchers.IO) {
             delay(initialServerTimeoutMs.coerceAtLeast(5_500L))
-            if (hasReceivedServerSnapshot.get()) {
+            if (hasReceivedServerSnapshot.get() || hasEmittedAny.get() || hasDeterministicError.get()) {
                 return@launch
             }
             var serverErr: Throwable? = null
@@ -693,7 +698,7 @@ class QawmiRepository(
                 ) {
                     handleFirestoreError(fsErr, OperationType.LIST, path)
                 }
-                val fallbackCache = withTimeoutOrNull(300L) {
+                val fallbackCache = withTimeoutOrNull(1_000L) {
                     runCatching { query.get(Source.CACHE).await() }.getOrNull()
                 }
                 val fallbackList = if (fallbackCache != null) {
@@ -769,7 +774,7 @@ class QawmiRepository(
                         recoveryJob = launch(Dispatchers.IO) {
                             val attempt = retryAttempt.incrementAndGet()
                             if (!hasEmittedAny.get()) {
-                                val cachedDoc = withTimeoutOrNull(200L) {
+                                val cachedDoc = withTimeoutOrNull(1_000L) {
                                     runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
                                 }
                                 if (cachedDoc != null && cachedDoc.exists()) {
@@ -785,17 +790,20 @@ class QawmiRepository(
                                     trySend(defaultValueOnError)
                                 }
                             }
+                            val isQuotaExhausted =
+                                error.code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED
                             val isDeterministicDocError =
-                                error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                                isQuotaExhausted ||
+                                    error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
                                     error.code == FirebaseFirestoreException.Code.INVALID_ARGUMENT
-                            if (isDeterministicDocError && attempt >= 2) {
+                            if (isQuotaExhausted || (isDeterministicDocError && attempt >= 2)) {
                                 hasDeterministicError.set(true)
                                 return@launch
                             }
                             val backoffMs = if (isDeterministicDocError) {
                                 4_000L
                             } else {
-                                minOf(500L * (1L shl (attempt - 1).coerceAtMost(3)), 4_000L)
+                                minOf(1_000L * (1L shl (attempt - 1).coerceAtMost(4)), 15_000L)
                             }
                             delay(backoffMs)
                             if (!isActive) return@launch
@@ -1558,7 +1566,7 @@ class QawmiRepository(
     private fun DocumentSnapshot.toFeedPostOrNull(): FeedPost? {
         if (!exists()) return null
         return try {
-            val base = toObject(FeedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) ?: FeedPost()
+            val base = safeToObject(FeedPost::class.java) ?: FeedPost()
             val rawReactions = (get("userReactions") as? Map<*, *>)
                 ?.entries
                 ?.mapNotNull { (k, v) ->
@@ -1576,7 +1584,7 @@ class QawmiRepository(
             val rawCategories = (get("khedmotCategories") as? List<*>)
                 ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }
                 ?: base.khedmotCategories
-            val rawImages = (get("imageUrls") as? List<*>)
+            val rawImagesFromField = (get("imageUrls") as? List<*>)
                 ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }
                 ?: base.imageUrls
             val rawMediaTypes = (get("mediaTypes") as? List<*>)
@@ -1591,7 +1599,23 @@ class QawmiRepository(
                     }?.toMap()
                 }
                 ?: base.mediaMetadata
-            val resolvedAttachmentDocId = getString("attachmentDocId") ?: base.attachmentDocId
+            val resolvedAttachmentDocId = getString("attachmentDocId")?.trim() ?: base.attachmentDocId
+
+            val metadataFallbackUrls = rawMediaMetadata.mapNotNull { meta ->
+                meta["previewDataUrl"]?.takeIf { it.isNotBlank() }
+                    ?: meta["mediaDataUrl"]?.takeIf { it.isNotBlank() }
+                    ?: meta["url"]?.takeIf { it.isNotBlank() }
+                    ?: meta["attachmentDocId"]?.takeIf { it.isNotBlank() }?.let {
+                        "https://firestore.googleapis.com/v1/feed_post_attachments?attachmentDocId=$it"
+                    }
+            }
+            val rawImages = when {
+                rawImagesFromField.isNotEmpty() -> rawImagesFromField
+                metadataFallbackUrls.isNotEmpty() -> metadataFallbackUrls
+                resolvedAttachmentDocId.isNotBlank() && !resolvedAttachmentDocId.endsWith("_ext_text") ->
+                    listOf("https://firestore.googleapis.com/v1/feed_post_attachments?attachmentDocId=$resolvedAttachmentDocId")
+                else -> emptyList()
+            }
 
             rawMediaMetadata.forEachIndexed { idx, meta ->
                 val preview = meta["previewDataUrl"]?.takeIf { it.startsWith("data:image", ignoreCase = true) }

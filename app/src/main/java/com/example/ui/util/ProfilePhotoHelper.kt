@@ -52,9 +52,52 @@ object ProfilePhotoHelper {
 
     // In-memory cache mapping attachmentDocId -> data:image/jpeg;base64,... for instant cross-screen rendering
     private val attachmentDataUrlCache = ConcurrentHashMap<String, String>()
+    private val serverQuotaBackoffUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
 
     // Thread-safe LRU cache of already-decoded ImageBitmaps so Base64 + BitmapFactory never re-runs on UI recomposition/scroll
     private val decodedBitmapCache = android.util.LruCache<String, ImageBitmap>(80)
+
+    private fun getAttachmentDiskCacheDir(): java.io.File? {
+        return try {
+            val ctx = com.google.firebase.FirebaseApp.getInstance().applicationContext
+            java.io.File(ctx.filesDir, "qawmi_attachment_cache").apply {
+                if (!exists()) mkdirs()
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun sanitizeCacheFileName(docId: String): String {
+        return docId.trim().replace(Regex("[^a-zA-Z0-9._-]"), "_").take(120)
+    }
+
+    private fun readDiskCachedAttachmentDataUrl(docId: String): String? {
+        if (docId.isBlank()) return null
+        return try {
+            val dir = getAttachmentDiskCacheDir() ?: return null
+            val file = java.io.File(dir, "${sanitizeCacheFileName(docId)}.txt")
+            if (file.exists() && file.length() > 32L) {
+                file.readText(Charsets.UTF_8).trim().takeIf { it.startsWith("data:image", ignoreCase = true) }
+            } else {
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun writeDiskCachedAttachmentDataUrl(docId: String, dataUrl: String) {
+        if (docId.isBlank() || !dataUrl.startsWith("data:image", ignoreCase = true)) return
+        try {
+            val dir = getAttachmentDiskCacheDir() ?: return
+            val file = java.io.File(dir, "${sanitizeCacheFileName(docId)}.txt")
+            if (!file.exists() || file.length() < dataUrl.length.toLong()) {
+                file.writeText(dataUrl, Charsets.UTF_8)
+            }
+        } catch (_: Throwable) {
+        }
+    }
 
     private fun buildBitmapCacheKey(photoUrl: String): String {
         val len = photoUrl.length
@@ -74,8 +117,9 @@ object ProfilePhotoHelper {
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
                 .distinct()
-            candidates.firstNotNullOfOrNull { id -> attachmentDataUrlCache[id]?.takeIf { it.isNotBlank() } }
-                ?: return null
+            candidates.firstNotNullOfOrNull { id ->
+                attachmentDataUrlCache[id]?.takeIf { it.isNotBlank() }
+            } ?: return null
         }
         val key = buildBitmapCacheKey(effectiveUrl)
         return synchronized(decodedBitmapCache) {
@@ -86,12 +130,15 @@ object ProfilePhotoHelper {
     fun cacheAttachmentDataUrl(attachmentDocId: String, dataUrl: String) {
         if (attachmentDocId.isNotBlank() && dataUrl.isNotBlank()) {
             attachmentDataUrlCache[attachmentDocId] = dataUrl
+            writeDiskCachedAttachmentDataUrl(attachmentDocId, dataUrl)
         }
     }
 
     fun getCachedAttachmentDataUrl(attachmentDocId: String): String? {
         if (attachmentDocId.isBlank()) return null
-        return attachmentDataUrlCache[attachmentDocId]
+        return attachmentDataUrlCache[attachmentDocId] ?: readDiskCachedAttachmentDataUrl(attachmentDocId)?.also {
+            attachmentDataUrlCache[attachmentDocId] = it
+        }
     }
 
     private val STORAGE_PATH_MEDIA_REGEX =
@@ -136,8 +183,8 @@ object ProfilePhotoHelper {
 
     /**
      * Fetches the offloaded image data URL from `/feed_post_attachments/{attachmentDocId}`
-     * checking in-memory cache first, then local SQLite `Source.CACHE` (0 network reads, instant offline/quota-resilient),
-     * and finally Firestore SDK / REST with slow-network-safe timeouts.
+     * checking in-memory cache first, then persistent disk cache, then local SQLite `Source.CACHE`
+     * (0 network reads, instant offline/quota-resilient), and finally Firestore REST/SDK.
      */
     suspend fun fetchAndDecodeAttachmentBitmap(
         attachmentDocId: String,
@@ -157,11 +204,11 @@ object ProfilePhotoHelper {
 
         if (candidateIds.isEmpty() && postId.isBlank()) return@withContext null
 
-        // 1. Check in-memory cache across all candidate IDs (0ms)
+        // 1. Check in-memory and persistent disk cache across all candidate IDs (0 network reads)
         for (id in candidateIds) {
-            val cached = attachmentDataUrlCache[id]
+            val cached = getCachedAttachmentDataUrl(id)
             if (!cached.isNullOrBlank()) {
-                candidateIds.forEach { cid -> attachmentDataUrlCache[cid] = cached }
+                candidateIds.forEach { cid -> cacheAttachmentDataUrl(cid, cached) }
                 decodeDataUrlToImageBitmap(cached)?.let { return@withContext it }
             }
         }
@@ -185,12 +232,39 @@ object ProfilePhotoHelper {
                     extractImageDataUrlFromAttachmentSnap(snap)
                 }.getOrNull()
                 if (!cachedUrl.isNullOrBlank()) {
-                    candidateIds.forEach { cid -> attachmentDataUrlCache[cid] = cachedUrl }
+                    candidateIds.forEach { cid -> cacheAttachmentDataUrl(cid, cachedUrl) }
                     decodeDataUrlToImageBitmap(cachedUrl)?.let { return@withContext it }
                 }
             }
 
             if (postId.isNotBlank()) {
+                // Also check if the cached feed_posts/{postId} document has inline previewDataUrl / mediaDataUrl
+                val cachedFromPostDoc = runCatching {
+                    val postSnap = withTimeoutOrNull(1_000L) {
+                        db.collection("feed_posts")
+                            .document(postId.trim())
+                            .get(com.google.firebase.firestore.Source.CACHE)
+                            .await()
+                    }
+                    if (postSnap != null && postSnap.exists()) {
+                        val metaList = postSnap.get("mediaMetadata") as? List<*>
+                        val targetMeta = (metaList?.getOrNull(mediaIndex) ?: metaList?.firstOrNull()) as? Map<*, *>
+                        val fromMeta = targetMeta?.get("previewDataUrl")?.toString()?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                            ?: targetMeta?.get("mediaDataUrl")?.toString()?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                        if (!fromMeta.isNullOrBlank()) {
+                            fromMeta
+                        } else {
+                            val imgList = postSnap.get("imageUrls") as? List<*>
+                            (imgList?.getOrNull(mediaIndex) ?: imgList?.firstOrNull())?.toString()
+                                ?.takeIf { it.startsWith("data:image", ignoreCase = true) }
+                        }
+                    } else null
+                }.getOrNull()
+                if (!cachedFromPostDoc.isNullOrBlank()) {
+                    candidateIds.forEach { cid -> cacheAttachmentDataUrl(cid, cachedFromPostDoc) }
+                    decodeDataUrlToImageBitmap(cachedFromPostDoc)?.let { return@withContext it }
+                }
+
                 val cachedByPostUrl = runCatching {
                     val querySnap = withTimeoutOrNull(1_500L) {
                         db.collection("feed_post_attachments")
@@ -201,7 +275,7 @@ object ProfilePhotoHelper {
                     val docs = querySnap?.documents.orEmpty()
                     docs.forEach { doc ->
                         extractImageDataUrlFromAttachmentSnap(doc)?.let { url ->
-                            attachmentDataUrlCache[doc.id] = url
+                            cacheAttachmentDataUrl(doc.id, url)
                         }
                     }
                     val targetDoc = docs.firstOrNull { it.id.endsWith("_media_$mediaIndex") }
@@ -210,22 +284,34 @@ object ProfilePhotoHelper {
                     extractImageDataUrlFromAttachmentSnap(targetDoc)
                 }.getOrNull()
                 if (!cachedByPostUrl.isNullOrBlank()) {
-                    candidateIds.forEach { cid -> attachmentDataUrlCache[cid] = cachedByPostUrl }
+                    candidateIds.forEach { cid -> cacheAttachmentDataUrl(cid, cachedByPostUrl) }
                     decodeDataUrlToImageBitmap(cachedByPostUrl)?.let { return@withContext it }
                 }
             }
         }
 
-        // 3. Network fetch across candidate IDs (SDK + REST fallback with generous timeout for slow mobile links)
+        // If server recently returned RESOURCE_EXHAUSTED (HTTP 429), fail fast instead of hanging 12s per ID
+        if (System.currentTimeMillis() < serverQuotaBackoffUntilMs.get()) {
+            return@withContext null
+        }
+
+        // 3. Network fetch across candidate IDs (REST first for fast HTTP status, then bounded SDK fallback)
         for (id in candidateIds) {
-            val sdkDataUrl = if (db != null) {
-                withTimeoutOrNull(12_000L) {
+            val restDataUrl = com.example.data.repository.FirestoreRestFallbackClient
+                .fetchAttachmentMediaDataUrl(attachmentDocId = id)
+            val dataUrl = restDataUrl ?: if (db != null && System.currentTimeMillis() >= serverQuotaBackoffUntilMs.get()) {
+                withTimeoutOrNull(4_000L) {
                     try {
                         val snap = db.collection("feed_post_attachments")
                             .document(id)
                             .get()
                             .await()
                         extractImageDataUrlFromAttachmentSnap(snap)
+                    } catch (e: com.google.firebase.firestore.FirebaseFirestoreException) {
+                        if (e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED) {
+                            serverQuotaBackoffUntilMs.set(System.currentTimeMillis() + 60_000L)
+                        }
+                        null
                     } catch (_: Exception) {
                         null
                     }
@@ -233,17 +319,15 @@ object ProfilePhotoHelper {
             } else {
                 null
             }
-            val dataUrl = sdkDataUrl ?: com.example.data.repository.FirestoreRestFallbackClient
-                .fetchAttachmentMediaDataUrl(attachmentDocId = id)
             if (!dataUrl.isNullOrBlank()) {
-                candidateIds.forEach { cid -> attachmentDataUrlCache[cid] = dataUrl }
+                candidateIds.forEach { cid -> cacheAttachmentDataUrl(cid, dataUrl) }
                 decodeDataUrlToImageBitmap(dataUrl)?.let { return@withContext it }
             }
         }
 
         // 4. Final fallback: query by postId from server if document ID differed
-        if (db != null && postId.isNotBlank()) {
-            val serverByPostUrl = withTimeoutOrNull(10_000L) {
+        if (db != null && postId.isNotBlank() && System.currentTimeMillis() >= serverQuotaBackoffUntilMs.get()) {
+            val serverByPostUrl = withTimeoutOrNull(4_000L) {
                 try {
                     val querySnap = db.collection("feed_post_attachments")
                         .whereEqualTo("postId", postId.trim())
@@ -252,19 +336,24 @@ object ProfilePhotoHelper {
                     val docs = querySnap.documents
                     docs.forEach { doc ->
                         extractImageDataUrlFromAttachmentSnap(doc)?.let { url ->
-                            attachmentDataUrlCache[doc.id] = url
+                            cacheAttachmentDataUrl(doc.id, url)
                         }
                     }
                     val targetDoc = docs.firstOrNull { it.id.endsWith("_media_$mediaIndex") }
                         ?: docs.getOrNull(mediaIndex)
                         ?: docs.firstOrNull()
                     extractImageDataUrlFromAttachmentSnap(targetDoc)
+                } catch (e: com.google.firebase.firestore.FirebaseFirestoreException) {
+                    if (e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED) {
+                        serverQuotaBackoffUntilMs.set(System.currentTimeMillis() + 60_000L)
+                    }
+                    null
                 } catch (_: Exception) {
                     null
                 }
             }
             if (!serverByPostUrl.isNullOrBlank()) {
-                candidateIds.forEach { cid -> attachmentDataUrlCache[cid] = serverByPostUrl }
+                candidateIds.forEach { cid -> cacheAttachmentDataUrl(cid, serverByPostUrl) }
                 return@withContext decodeDataUrlToImageBitmap(serverByPostUrl)
             }
         }
