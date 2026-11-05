@@ -8,6 +8,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.MemoryCacheSettings
+import com.google.firebase.firestore.MemoryLruGcSettings
 import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.Source
 import java.util.concurrent.ConcurrentHashMap
@@ -316,20 +317,24 @@ fun getConfiguredFirestoreInstance(databaseId: String = DEFAULT_NAMED_FIRESTORE_
             FirebaseFirestore.getInstance()
         }
     }
-    val cacheKey = cleanId.ifBlank { DEFAULT_NAMED_FIRESTORE_DATABASE_ID }
+    val cacheKey = "${System.identityHashCode(db)}:${cleanId.ifBlank { DEFAULT_NAMED_FIRESTORE_DATABASE_ID }}"
     if (configuredFirestoreDatabases.putIfAbsent(cacheKey, true) == null) {
-        val appliedPersistent = runCatching {
-            val persistentCache = PersistentCacheSettings.newBuilder()
-                .setSizeBytes(100L * 1024L * 1024L)
+        val appliedLruMemory = runCatching {
+            val lruMemoryCache = MemoryCacheSettings.newBuilder()
+                .setGcSettings(
+                    MemoryLruGcSettings.newBuilder()
+                        .setSizeBytes(50L * 1024L * 1024L)
+                        .build()
+                )
                 .build()
             val settings = FirebaseFirestoreSettings.Builder()
-                .setLocalCacheSettings(persistentCache)
+                .setLocalCacheSettings(lruMemoryCache)
                 .build()
             db.firestoreSettings = settings
             true
         }.getOrDefault(false)
 
-        if (!appliedPersistent) {
+        if (!appliedLruMemory) {
             runCatching {
                 val fallbackSettings = FirebaseFirestoreSettings.Builder()
                     .setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())

@@ -3068,6 +3068,52 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("message_status_seen_msg_live_status_1", useUnmergedTree = true).assertExists()
     }
+
+    @Test
+    fun firestoreRestFallbackClient_serializesCommitsAndParsesMessagesAndFeedPosts() {
+        val payload = mapOf(
+            "senderId" to "uid_sender_1",
+            "senderName" to "foysal ahamad",
+            "receiverId" to "uid_receiver_2",
+            "receiverName" to "Sumaya Aktar",
+            "body" to "❤️",
+            "isRead" to false,
+            "readByUserIds" to listOf("uid_sender_1"),
+            "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+        )
+        val commitJson = com.example.data.repository.FirestoreRestFallbackClient.buildCommitRequestBody(
+            collection = "messages",
+            documentId = "msg_test_123",
+            payload = payload
+        )
+        val writes = commitJson.getJSONArray("writes")
+        assertEquals(1, writes.length())
+        val firstWrite = writes.getJSONObject(0)
+        val updateObj = firstWrite.getJSONObject("update")
+        assertEquals(
+            "projects/gen-lang-client-0048059944/databases/ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c/documents/messages/msg_test_123",
+            updateObj.getString("name")
+        )
+        val fields = updateObj.getJSONObject("fields")
+        assertEquals("❤️", fields.getJSONObject("body").getString("stringValue"))
+        assertEquals("uid_sender_1", fields.getJSONObject("senderId").getString("stringValue"))
+        org.junit.Assert.assertFalse(fields.has("createdAt"))
+
+        val transforms = firstWrite.getJSONArray("updateTransforms")
+        assertEquals(1, transforms.length())
+        assertEquals("createdAt", transforms.getJSONObject(0).getString("fieldPath"))
+        assertEquals("REQUEST_TIME", transforms.getJSONObject(0).getString("setToServerValue"))
+
+        val simulatedDoc = org.json.JSONObject()
+            .put("name", updateObj.getString("name"))
+            .put("createTime", "2026-11-05T04:33:12.188000000Z")
+            .put("fields", fields)
+        val parsedMsg = com.example.data.repository.FirestoreRestFallbackClient.parseDirectMessageDocument(simulatedDoc)
+        assertNotNull(parsedMsg)
+        assertEquals("msg_test_123", parsedMsg!!.id)
+        assertEquals("❤️", parsedMsg.body)
+        assertEquals("uid_sender_1", parsedMsg.senderId)
+        assertEquals("uid_receiver_2", parsedMsg.receiverId)
+        assertEquals("SENT", parsedMsg.localDeliveryState)
+    }
 }
-
-

@@ -144,6 +144,10 @@ class QawmiRepository(
     private val confirmedServerMessageIds = ConcurrentHashMap.newKeySet<String>()
     private val confirmedServerPostIds = ConcurrentHashMap.newKeySet<String>()
     private val inFlightServerPostIds = ConcurrentHashMap.newKeySet<String>()
+    private val restServerMessagesFlow =
+        kotlinx.coroutines.flow.MutableStateFlow<Map<String, DirectMessage>>(emptyMap())
+    private val restServerPostsFlow =
+        kotlinx.coroutines.flow.MutableStateFlow<Map<String, FeedPost>>(emptyMap())
 
     fun isPostConfirmedOnServer(postId: String): Boolean {
         return postId.isNotBlank() && postId in confirmedServerPostIds
@@ -151,6 +155,85 @@ class QawmiRepository(
 
     fun isMessageConfirmedOnServer(messageId: String): Boolean {
         return messageId.isNotBlank() && messageId in confirmedServerMessageIds
+    }
+
+    private fun enrichRestDirectMessageDeliveryState(msg: DirectMessage): DirectMessage {
+        if (msg.id.isNotBlank()) {
+            confirmedServerMessageIds.add(msg.id)
+        }
+        val isGroupMsg = msg.groupId.isNotBlank() || msg.receiverId.startsWith("GROUP:", ignoreCase = true)
+        val isReadByRecipient = msg.isRead || if (isGroupMsg) {
+            msg.readByUserIds.any { token ->
+                token.isNotBlank() &&
+                    token != msg.senderId &&
+                    !token.startsWith("DELIVERED:", ignoreCase = true)
+            }
+        } else {
+            msg.receiverId.isNotBlank() && msg.readByUserIds.contains(msg.receiverId)
+        }
+        val isDeliveredToRecipient = if (isGroupMsg) {
+            msg.readByUserIds.any { token ->
+                token.startsWith("DELIVERED:", ignoreCase = true) &&
+                    !token.equals("DELIVERED:${msg.senderId}", ignoreCase = true)
+            }
+        } else {
+            msg.receiverId.isNotBlank() && msg.readByUserIds.contains("DELIVERED:${msg.receiverId}")
+        }
+        val computedState = when {
+            isReadByRecipient -> "READ"
+            isDeliveredToRecipient -> "DELIVERED"
+            else -> "SENT"
+        }
+        return msg.copy().apply {
+            localDeliveryState = computedState
+        }
+    }
+
+    private suspend fun refreshFeedPostsViaRestIfAvailable() {
+        if (FirestoreRestFallbackClient.isRobolectricRuntime()) return
+        val posts = FirestoreRestFallbackClient.queryFeedPosts(
+            auth = auth,
+            limit = 60
+        )
+        if (!posts.isNullOrEmpty()) {
+            val updatedMap = restServerPostsFlow.value.toMutableMap()
+            posts.forEach { post ->
+                if (post.id.isNotBlank()) {
+                    confirmedServerPostIds.add(post.id)
+                    updatedMap[post.id] = post
+                }
+            }
+            restServerPostsFlow.value = updatedMap
+            FirestoreConnectionMonitor.onSnapshotReceived(
+                path = "feed_posts",
+                isFromCache = false,
+                hasPendingWrites = false
+            )
+        }
+    }
+
+    private suspend fun refreshUserMessagesViaRestIfAvailable(effectiveUid: String) {
+        if (effectiveUid.isBlank() || FirestoreRestFallbackClient.isRobolectricRuntime()) return
+        val messages = FirestoreRestFallbackClient.queryUserMessages(
+            auth = auth,
+            userId = effectiveUid,
+            limitPerQuery = 80
+        )
+        if (!messages.isNullOrEmpty()) {
+            val updatedMap = restServerMessagesFlow.value.toMutableMap()
+            messages.forEach { rawMsg ->
+                if (rawMsg.id.isNotBlank()) {
+                    val enriched = enrichRestDirectMessageDeliveryState(rawMsg)
+                    updatedMap[enriched.id] = enriched
+                }
+            }
+            restServerMessagesFlow.value = updatedMap
+            FirestoreConnectionMonitor.onSnapshotReceived(
+                path = "messages/received/$effectiveUid",
+                isFromCache = false,
+                hasPendingWrites = false
+            )
+        }
     }
 
     private fun notifyQueryServerCallbacks(path: String, snap: QuerySnapshot) {
@@ -247,9 +330,12 @@ class QawmiRepository(
                 coroutineScope {
                     val jobs = mutableListOf<kotlinx.coroutines.Deferred<Unit>>()
 
-                    // 1. Feed Posts
+                    // 1. Feed Posts (SDK + Direct HTTPS REST fallback)
                     jobs += async {
                         syncQueryFromServerIfNeeded(db.collection("feed_posts"), "feed_posts")
+                    }
+                    jobs += async {
+                        refreshFeedPostsViaRestIfAvailable()
                     }
                     // 2. Public Madrasas
                     jobs += async {
@@ -345,6 +431,9 @@ class QawmiRepository(
                                 "chat_groups/$effectiveUid"
                             )
                         }
+                        jobs += async {
+                            refreshUserMessagesViaRestIfAvailable(effectiveUid)
+                        }
                         // 11. Bookmarks & User Affinity
                         jobs += async {
                             syncQueryFromServerIfNeeded(
@@ -387,7 +476,7 @@ class QawmiRepository(
         )
 
         coroutineScope {
-            queries.map { (path, query) ->
+            val sdkJobs = queries.map { (path, query) ->
                 async {
                     val snap = if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
                         withTimeoutOrNull(2_500L) {
@@ -409,7 +498,14 @@ class QawmiRepository(
                         notifyQueryServerCallbacks(path, snap)
                     }
                 }
-            }.forEach { it.await() }
+            }
+            val restJob = async {
+                if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                    refreshUserMessagesViaRestIfAvailable(effectiveUid)
+                }
+            }
+            sdkJobs.forEach { it.await() }
+            restJob.await()
         }
     }
 
@@ -645,7 +741,7 @@ class QawmiRepository(
 
         // 4. Bounded fallback server sync if this flow's watch stream hasn't confirmed yet
         launch(Dispatchers.IO) {
-            delay(initialServerTimeoutMs.coerceAtLeast(2_200L))
+            delay(initialServerTimeoutMs.coerceAtLeast(5_500L))
             if (hasReceivedServerSnapshot.get()) {
                 return@launch
             }
@@ -850,7 +946,7 @@ class QawmiRepository(
 
         attachDocListener()
 
-        // Fast zero-delay initial document fetch from local cache on Dispatchers.IO (< 100ms), then < 2s server fallback
+        // Fast zero-delay initial document fetch from local cache on Dispatchers.IO (< 100ms), then bounded server fallback
         launch(Dispatchers.IO) {
             if (!hasEmittedAny.get()) {
                 val cached = withTimeoutOrNull(180L) {
@@ -870,7 +966,7 @@ class QawmiRepository(
                 }
             }
             if (!hasReceivedServerSnapshot.get()) {
-                delay(1_200L)
+                delay(5_500L)
                 if (!hasReceivedServerSnapshot.get() &&
                     FirestoreConnectionMonitor.isNetworkAvailable.value &&
                     isActive
@@ -1579,13 +1675,12 @@ class QawmiRepository(
 
     fun observePublicFeedPosts(): Flow<List<FeedPost>> {
         val path = "feed_posts"
-        return observeQueryWithFastInitialAndFallback(
+        val sdkFeedFlow = observeQueryWithFastInitialAndFallback(
             query = db.collection(path),
             path = path,
             includeMetadataChanges = true,
             initialServerTimeoutMs = 900L
         ) { snapshot ->
-            val currentUid = resolveEffectiveUserId("")
             snapshot.documents
                 .mapNotNull { doc ->
                     val docPending = runCatching { doc.metadata.hasPendingWrites() }.getOrDefault(false)
@@ -1594,18 +1689,82 @@ class QawmiRepository(
                     }
                     doc.toFeedPostOrNull()
                 }
-                .filter { post ->
-                    val notRejected = !post.approvalStatus.equals("REJECTED", ignoreCase = true)
-                    val isPublic = post.visibility.isBlank() ||
-                        post.visibility.equals("PUBLIC", ignoreCase = true)
-                    (notRejected && isPublic) ||
-                        (currentUid.isNotBlank() && post.authorId == currentUid)
+        }
+
+        return channelFlow {
+            val stateLock = Any()
+            var latestSdkPosts: List<FeedPost> = emptyList()
+            var latestRestPosts: Map<String, FeedPost> = restServerPostsFlow.value
+
+            fun emitMergedPosts() {
+                val currentUid = resolveEffectiveUserId("")
+                val merged = synchronized(stateLock) {
+                    val sdkById = latestSdkPosts.associateBy { it.id }
+                    val allIds = (latestRestPosts.keys + sdkById.keys).filter { it.isNotBlank() }
+                    allIds.mapNotNull { postId ->
+                        val sdkPost = sdkById[postId]
+                        val restPost = latestRestPosts[postId]
+                        when {
+                            sdkPost != null && restPost != null -> {
+                                val sdkUpdated = sdkPost.updatedAt?.toDate()?.time ?: 0L
+                                val restUpdated = restPost.updatedAt?.toDate()?.time ?: 0L
+                                if (restUpdated > sdkUpdated) restPost else sdkPost
+                            }
+                            sdkPost != null -> sdkPost
+                            else -> restPost
+                        }
+                    }
+                        .filter { post ->
+                            val notRejected = !post.approvalStatus.equals("REJECTED", ignoreCase = true)
+                            val isPublic = post.visibility.isBlank() ||
+                                post.visibility.equals("PUBLIC", ignoreCase = true)
+                            (notRejected && isPublic) ||
+                                (currentUid.isNotBlank() && post.authorId == currentUid)
+                        }
+                        .distinctBy { it.id }
+                        .sortedWith(
+                            compareByDescending<FeedPost> { it.isBoosted }
+                                .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                        )
                 }
-                .distinctBy { it.id }
-                .sortedWith(
-                    compareByDescending<FeedPost> { it.isBoosted }
-                        .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
-                )
+                trySend(merged)
+            }
+
+            launch {
+                sdkFeedFlow.collect { sdkList ->
+                    synchronized(stateLock) {
+                        latestSdkPosts = sdkList
+                    }
+                    emitMergedPosts()
+                }
+            }
+
+            launch {
+                restServerPostsFlow.collect { restMap ->
+                    synchronized(stateLock) {
+                        latestRestPosts = restMap
+                    }
+                    if (restMap.isNotEmpty()) {
+                        emitMergedPosts()
+                    }
+                }
+            }
+
+            if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                launch(Dispatchers.IO) {
+                    delay(900L)
+                    refreshFeedPostsViaRestIfAvailable()
+                    var lastGen = FirestoreConnectionMonitor.recoveryGeneration.value
+                    FirestoreConnectionMonitor.recoveryGeneration.collect { gen ->
+                        if (gen != lastGen) {
+                            lastGen = gen
+                            refreshFeedPostsViaRestIfAvailable()
+                        }
+                    }
+                }
+            }
+
+            awaitClose { }
         }
     }
 
@@ -1864,9 +2023,11 @@ class QawmiRepository(
             // 7. If this post is a SEEKER_APPLICATION, also register it in /khedmot_submissions
             // so Admin Panel and authorized users can track, approve, and manage it from Firebase.
             var submissionWriteTask: com.google.android.gms.tasks.Task<*>? = null
+            var submissionPayloadForRest: Map<String, Any>? = null
+            val submissionDocId = "app_${docRef.id}"
             if (postType == "SEEKER_APPLICATION") {
                 runCatching {
-                    val submissionRef = db.collection("khedmot_submissions").document("app_${docRef.id}")
+                    val submissionRef = db.collection("khedmot_submissions").document(submissionDocId)
                     val submissionPayload = mapOf(
                         "postId" to docRef.id,
                         "postTitle" to title.trim().ifBlank { "দ্বীনি খেদমত আবেদন" }.take(200),
@@ -1882,18 +2043,138 @@ class QawmiRepository(
                         "createdAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
+                    submissionPayloadForRest = submissionPayload
                     submissionWriteTask = submissionRef.set(submissionPayload)
                 }
             }
 
-            val writeTimeoutMs = 20_000L
-            try {
-                kotlinx.coroutines.withTimeout(writeTimeoutMs) {
-                    com.google.android.gms.tasks.Tasks.whenAll(allWriteTasks).await()
-                    runCatching { submissionWriteTask?.await() }
-                }
+            val isRobolectric = FirestoreRestFallbackClient.isRobolectricRuntime()
+            val primarySdkWaitMs = if (isRobolectric) 20_000L else 3_200L
+            val sdkCompletedFast = withTimeoutOrNull(primarySdkWaitMs) {
+                com.google.android.gms.tasks.Tasks.whenAll(allWriteTasks).await()
+                runCatching { submissionWriteTask?.await() }
+                true
+            } ?: false
+
+            if (sdkCompletedFast) {
                 confirmedServerPostIds.add(docRef.id)
-            } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+            } else if (!isRobolectric) {
+                val primaryError = allWriteTasks.firstNotNullOfOrNull { it.exception }
+                if (primaryError != null) {
+                    handleFirestoreError(primaryError, OperationType.CREATE, docRef.path)
+                    return Result.failure(translateFirestoreExceptionToBangla(primaryError))
+                }
+                // Direct HTTPS REST API fallback so clogged gRPC queues or slow mobile networks never block post creation
+                var allAttachmentsCommitted = true
+                for ((attachRef, attachPayload) in deferredAttachmentWrites) {
+                    val attachRes = FirestoreRestFallbackClient.commitDocumentWrite(
+                        collection = "feed_post_attachments",
+                        documentId = attachRef.id,
+                        payload = attachPayload,
+                        auth = auth
+                    )
+                    if (attachRes.isFailure) {
+                        allAttachmentsCommitted = false
+                        break
+                    }
+                }
+                val restPostCommit = if (allAttachmentsCommitted) {
+                    FirestoreRestFallbackClient.commitDocumentWrite(
+                        collection = "feed_posts",
+                        documentId = docRef.id,
+                        payload = payload,
+                        auth = auth
+                    )
+                } else {
+                    Result.failure(IllegalStateException("Attachment REST commit failed"))
+                }
+
+                if (restPostCommit.isSuccess) {
+                    submissionPayloadForRest?.let { subPayload ->
+                        runCatching {
+                            FirestoreRestFallbackClient.commitDocumentWrite(
+                                collection = "khedmot_submissions",
+                                documentId = submissionDocId,
+                                payload = subPayload,
+                                auth = auth
+                            )
+                        }
+                    }
+                    confirmedServerPostIds.add(docRef.id)
+                    val nowTs = Timestamp.now()
+                    val confirmedPost = FeedPost(
+                        id = docRef.id,
+                        authorId = uid,
+                        authorName = (payload["authorName"] as? String).orEmpty(),
+                        authorPhotoUrl = safeAuthorPhotoUrl,
+                        postType = postType,
+                        title = (payload["title"] as? String).orEmpty(),
+                        district = (payload["district"] as? String).orEmpty(),
+                        upazilaOrLocation = (payload["upazilaOrLocation"] as? String).orEmpty(),
+                        designation = (payload["designation"] as? String).orEmpty(),
+                        qualification = (payload["qualification"] as? String).orEmpty(),
+                        salaryOrExperience = (payload["salaryOrExperience"] as? String).orEmpty(),
+                        deadlineOrPreferredDistricts = (payload["deadlineOrPreferredDistricts"] as? String).orEmpty(),
+                        description = trimmedDesc,
+                        contactNumber = (payload["contactNumber"] as? String).orEmpty(),
+                        madrasaId = (payload["madrasaId"] as? String).orEmpty(),
+                        isVerifiedMadrasa = safeVerified,
+                        isBoosted = false,
+                        khedmotCategories = cleanedCategories,
+                        customCategory = cleanedCustomCategory,
+                        imageUrls = uploadedMedia.map { it.url },
+                        mediaTypes = uploadedMedia.map { it.mediaType },
+                        mediaMetadata = metadataMaps,
+                        attachmentDocId = primaryAttachmentDocId,
+                        sharedPostId = (payload["sharedPostId"] as? String).orEmpty(),
+                        sharedAuthorId = (payload["sharedAuthorId"] as? String).orEmpty(),
+                        sharedAuthorName = (payload["sharedAuthorName"] as? String).orEmpty(),
+                        sharedTitle = (payload["sharedTitle"] as? String).orEmpty(),
+                        sharedDescription = (payload["sharedDescription"] as? String).orEmpty(),
+                        sharedPostType = (payload["sharedPostType"] as? String).orEmpty(),
+                        visibility = "PUBLIC",
+                        approvalStatus = "APPROVED",
+                        createdAt = nowTs,
+                        updatedAt = nowTs
+                    )
+                    val updatedMap = restServerPostsFlow.value.toMutableMap()
+                    updatedMap[docRef.id] = confirmedPost
+                    restServerPostsFlow.value = updatedMap
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "feed_posts",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                } else {
+                    // Final fallback wait on SDK task in case gRPC finishes right after REST attempt
+                    try {
+                        kotlinx.coroutines.withTimeout(8_000L) {
+                            com.google.android.gms.tasks.Tasks.whenAll(allWriteTasks).await()
+                            runCatching { submissionWriteTask?.await() }
+                        }
+                        confirmedServerPostIds.add(docRef.id)
+                    } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+                        val err = allWriteTasks.firstNotNullOfOrNull { it.exception }
+                            ?: (restPostCommit.exceptionOrNull()?.let { it as? Exception ?: Exception(it) })
+                        if (err != null && err !is kotlinx.coroutines.TimeoutCancellationException) {
+                            handleFirestoreError(err, OperationType.CREATE, docRef.path)
+                            return Result.failure(translateFirestoreExceptionToBangla(err))
+                        }
+                        val serverConfirmed = (docRef.id in confirmedServerPostIds) || runCatching {
+                            val snap = withTimeoutOrNull(2_500L) { docRef.get().await() }
+                            snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("authorId") == uid
+                        }.getOrDefault(false)
+                        if (!serverConfirmed) {
+                            runCatching { db.enableNetwork() }
+                            handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
+                            return Result.failure(
+                                IllegalStateException("সার্ভারে পোস্ট সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।")
+                            )
+                        }
+                        confirmedServerPostIds.add(docRef.id)
+                    }
+                }
+            } else {
                 val primaryError = allWriteTasks.firstNotNullOfOrNull { it.exception }
                 if (primaryError != null) {
                     handleFirestoreError(primaryError, OperationType.CREATE, docRef.path)
@@ -1905,7 +2186,6 @@ class QawmiRepository(
                 }.getOrDefault(false)
                 if (!serverConfirmed) {
                     runCatching { db.enableNetwork() }
-                    handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
                     return Result.failure(
                         IllegalStateException("সার্ভারে পোস্ট সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। অনুগ্রহ করে ইন্টারনেট সংযোগ পরীক্ষা করে পুনরায় চেষ্টা করুন।")
                     )
@@ -3610,6 +3890,7 @@ class QawmiRepository(
             var sentList: List<DirectMessage> = emptyList()
             var receivedList: List<DirectMessage> = emptyList()
             var groupList: List<DirectMessage> = emptyList()
+            var restList: List<DirectMessage> = restServerMessagesFlow.value.values.toList()
             var sentEmitted = false
             var receivedEmitted = false
             var groupEmitted = false
@@ -3617,15 +3898,28 @@ class QawmiRepository(
 
             fun emitMergedIfReady(forceEmit: Boolean = false) {
                 val merged: List<DirectMessage>? = synchronized(stateLock) {
-                    val hasAnyNonEmpty = sentList.isNotEmpty() || receivedList.isNotEmpty() || groupList.isNotEmpty()
+                    val hasAnyNonEmpty =
+                        sentList.isNotEmpty() || receivedList.isNotEmpty() || groupList.isNotEmpty() || restList.isNotEmpty()
                     val directQueriesReady = sentEmitted && receivedEmitted
                     val allQueriesReady = directQueriesReady && groupEmitted
                     if (forceEmit || hasAnyNonEmpty || directQueriesReady || allQueriesReady || hasEmittedInitial.get()) {
                         hasEmittedInitial.set(true)
-                        // Merge received and group messages first so read/reaction state is authoritative, and deduplicate strictly by document id
-                        (receivedList + groupList + sentList)
+                        // Merge received, group, REST-confirmed, and sent messages; deduplicate strictly by document id
+                        val sdkAndRest = receivedList + groupList + restList + sentList
+                        sdkAndRest
                             .filter { it.id.isNotBlank() }
-                            .distinctBy { it.id }
+                            .groupBy { it.id }
+                            .map { (_, candidates) ->
+                                // Prefer candidate with highest delivery state (READ > DELIVERED > SENT > PENDING)
+                                candidates.maxByOrNull { candidate ->
+                                    when (candidate.localDeliveryState.uppercase()) {
+                                        "READ", "SEEN" -> 4
+                                        "DELIVERED" -> 3
+                                        "SENT" -> 2
+                                        else -> 1
+                                    }
+                                } ?: candidates.first()
+                            }
                             .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
                     } else {
                         null
@@ -3663,6 +3957,35 @@ class QawmiRepository(
                         groupEmitted = true
                     }
                     emitMergedIfReady()
+                }
+            }
+
+            launch {
+                restServerMessagesFlow.collect { restMap ->
+                    val filteredForUser = restMap.values.filter { msg ->
+                        msg.senderId == effectiveUid ||
+                            msg.receiverId == effectiveUid ||
+                            msg.groupMemberIds.contains(effectiveUid)
+                    }
+                    synchronized(stateLock) {
+                        restList = filteredForUser
+                    }
+                    if (filteredForUser.isNotEmpty()) {
+                        emitMergedIfReady(forceEmit = true)
+                    }
+                }
+            }
+
+            if (!FirestoreRestFallbackClient.isRobolectricRuntime()) {
+                launch(Dispatchers.IO) {
+                    delay(800L)
+                    refreshUserMessagesViaRestIfAvailable(effectiveUid)
+                    while (isActive) {
+                        delay(12_000L)
+                        if (FirestoreConnectionMonitor.isNetworkAvailable.value) {
+                            refreshUserMessagesViaRestIfAvailable(effectiveUid)
+                        }
+                    }
                 }
             }
 
@@ -3841,13 +4164,86 @@ class QawmiRepository(
                 }
             }
 
-            val writeTimeoutMs = 20_000L
-            try {
-                kotlinx.coroutines.withTimeout(writeTimeoutMs) {
-                    writeTask.await()
-                }
+            val isRobolectric = FirestoreRestFallbackClient.isRobolectricRuntime()
+            val primarySdkWaitMs = if (isRobolectric) 20_000L else 2_800L
+            val sdkCompletedFast = withTimeoutOrNull(primarySdkWaitMs) {
+                writeTask.await()
+                true
+            } ?: false
+
+            if (sdkCompletedFast) {
                 confirmedServerMessageIds.add(docRef.id)
-            } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+            } else if (!isRobolectric) {
+                val taskError = writeTask.exception
+                if (taskError != null) {
+                    handleFirestoreError(taskError, OperationType.CREATE, docRef.path)
+                    return Result.failure(translateFirestoreExceptionToBangla(taskError))
+                }
+                // Direct Cloud Firestore v1 HTTPS REST API fallback so clogged gRPC queues or slow mobile networks never fail message delivery
+                val restCommitResult = FirestoreRestFallbackClient.commitDocumentWrite(
+                    collection = "messages",
+                    documentId = docRef.id,
+                    payload = payload,
+                    auth = auth
+                )
+                if (restCommitResult.isSuccess) {
+                    confirmedServerMessageIds.add(docRef.id)
+                    val confirmedMsg = DirectMessage(
+                        id = docRef.id,
+                        senderId = uid,
+                        senderName = safeSenderName,
+                        senderPhotoUrl = compactSenderPhoto,
+                        receiverId = (payload["receiverId"] as? String).orEmpty(),
+                        receiverName = safeReceiverName,
+                        groupId = (payload["groupId"] as? String).orEmpty(),
+                        groupName = (payload["groupName"] as? String).orEmpty(),
+                        groupMemberIds = (payload["groupMemberIds"] as? List<*>)?.mapNotNull { it as? String }.orEmpty(),
+                        subject = (payload["subject"] as? String).orEmpty(),
+                        body = (payload["body"] as? String).orEmpty(),
+                        imageUrls = uploadedImages,
+                        isRead = false,
+                        readByUserIds = listOf(uid),
+                        createdAt = Timestamp.now()
+                    ).apply {
+                        localDeliveryState = "SENT"
+                    }
+                    val updatedMap = restServerMessagesFlow.value.toMutableMap()
+                    updatedMap[docRef.id] = confirmedMsg
+                    restServerMessagesFlow.value = updatedMap
+                    FirestoreConnectionMonitor.onSnapshotReceived(
+                        path = "messages",
+                        isFromCache = false,
+                        hasPendingWrites = false
+                    )
+                } else {
+                    // Wait a final bounded window on the SDK writeTask in case gRPC completes right after REST attempt
+                    try {
+                        kotlinx.coroutines.withTimeout(6_000L) {
+                            writeTask.await()
+                        }
+                        confirmedServerMessageIds.add(docRef.id)
+                    } catch (timeoutEx: kotlinx.coroutines.TimeoutCancellationException) {
+                        val err = writeTask.exception
+                            ?: (restCommitResult.exceptionOrNull()?.let { it as? Exception ?: Exception(it) })
+                        if (err != null && err !is kotlinx.coroutines.TimeoutCancellationException) {
+                            handleFirestoreError(err, OperationType.CREATE, docRef.path)
+                            return Result.failure(translateFirestoreExceptionToBangla(err))
+                        }
+                        val serverConfirmed = (docRef.id in confirmedServerMessageIds) || runCatching {
+                            val snap = withTimeoutOrNull(2_500L) { docRef.get().await() }
+                            snap != null && snap.exists() && !snap.metadata.hasPendingWrites() && snap.getString("senderId") == uid
+                        }.getOrDefault(false)
+                        if (!serverConfirmed) {
+                            runCatching { db.enableNetwork() }
+                            handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
+                            return Result.failure(
+                                IllegalStateException("সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।")
+                            )
+                        }
+                        confirmedServerMessageIds.add(docRef.id)
+                    }
+                }
+            } else {
                 val taskError = writeTask.exception
                 if (taskError != null) {
                     handleFirestoreError(taskError, OperationType.CREATE, docRef.path)
@@ -3859,7 +4255,6 @@ class QawmiRepository(
                 }.getOrDefault(false)
                 if (!serverConfirmed) {
                     runCatching { db.enableNetwork() }
-                    handleFirestoreError(timeoutEx, OperationType.CREATE, docRef.path)
                     return Result.failure(
                         IllegalStateException("সার্ভারে মেসেজ সংরক্ষণে নির্ধারিত সময়ের বেশি লাগছে। 'পুনরায় পাঠান' বাটনে চাপ দিন।")
                     )

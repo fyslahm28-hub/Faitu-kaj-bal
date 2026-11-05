@@ -93,9 +93,20 @@ private fun decodeB64(encoded: String): String {
     return String(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT), Charsets.UTF_8)
 }
 
+private val legacySqlitePurged = java.util.concurrent.atomic.AtomicBoolean(false)
+
 fun ensureFirebaseInitialized(context: Context): Boolean {
     return try {
         val appContext = context.applicationContext ?: context
+        if (legacySqlitePurged.compareAndSet(false, true)) {
+            runCatching {
+                appContext.databaseList()
+                    ?.filter { it.contains("firestore", ignoreCase = true) }
+                    ?.forEach { dbName ->
+                        runCatching { appContext.deleteDatabase(dbName) }
+                    }
+            }
+        }
         if (FirebaseApp.getApps(appContext).isNotEmpty()) {
             true
         } else {

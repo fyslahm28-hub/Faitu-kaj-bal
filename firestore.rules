@@ -34,8 +34,7 @@ service cloud.firestore {
       return isValidId(blockerUid) &&
              isValidId(targetUid) &&
              exists(path) &&
-             (get(path).data.get('blockedUserIds', []) is list) &&
-             (targetUid in get(path).data.get('blockedUserIds', []));
+             (targetUid in (get(path).data.get('blockedUserIds', []) is list ? get(path).data.get('blockedUserIds', []) : []));
     }
 
     function isBlockedBetween(uid1, uid2) {

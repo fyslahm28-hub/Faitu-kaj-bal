@@ -215,12 +215,7 @@ fun MainAppScaffold(
     val userGroupsState by viewModel.userGroupsState.collectAsStateWithLifecycle()
     val notificationsState by viewModel.notificationsState.collectAsStateWithLifecycle()
     val isAdminState by viewModel.isAdminState.collectAsStateWithLifecycle()
-    val telegramNotificationsState by viewModel.telegramNotificationsState.collectAsStateWithLifecycle()
-    val adminUsersState by viewModel.adminUsersState.collectAsStateWithLifecycle()
-    val adminSubmissionsState by viewModel.adminSubmissionsState.collectAsStateWithLifecycle()
-    val adminRegistryListState by viewModel.adminRegistryListState.collectAsStateWithLifecycle()
     val intelligenceConfig by viewModel.intelligenceConfigState.collectAsStateWithLifecycle()
-    val algorithmPerformance by viewModel.algorithmPerformanceState.collectAsStateWithLifecycle()
     val postIntelligenceMetrics by viewModel.postIntelligenceMetricsState.collectAsStateWithLifecycle()
 
     val selectedPostForApply by viewModel.selectedPostForApply.collectAsStateWithLifecycle()
@@ -1292,6 +1287,11 @@ fun MainAppScaffold(
                         }
 
                         MainDestination.ADMIN_PANEL -> {
+                            val telegramNotificationsState by viewModel.telegramNotificationsState.collectAsStateWithLifecycle()
+                            val adminUsersState by viewModel.adminUsersState.collectAsStateWithLifecycle()
+                            val adminSubmissionsState by viewModel.adminSubmissionsState.collectAsStateWithLifecycle()
+                            val adminRegistryListState by viewModel.adminRegistryListState.collectAsStateWithLifecycle()
+                            val algorithmPerformance by viewModel.algorithmPerformanceState.collectAsStateWithLifecycle()
                             val currentUserProf = (userProfileState as? UiState.Success)?.data
                             AdminPanelScreen(
                                 isAdminUser = isAdminState,

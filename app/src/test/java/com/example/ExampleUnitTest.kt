@@ -585,8 +585,23 @@ class ExampleUnitTest {
         assertTrue(hanafiSchedule.countdownBangla.contains("বাকি"))
         assertTrue(hanafiSchedule.countdownEnglish.contains("remaining"))
     }
+
+    @Test
+    fun firestoreRestFallbackClient_parsesIsoTimestampsAndVerifiesProjectAndDatabaseIdentity() {
+        assertEquals(
+            "gen-lang-client-0048059944",
+            com.example.data.repository.FirestoreRestFallbackClient.DEFAULT_PROJECT_ID
+        )
+        assertEquals(
+            "ai-studio-android-811ea734-e9e8-4ff4-8e56-ca97ec8a429c",
+            com.example.data.repository.FirestoreRestFallbackClient.DEFAULT_DATABASE_ID
+        )
+        val parsedTs = com.example.data.repository.FirestoreRestFallbackClient.parseIsoTimestamp(
+            "2026-11-05T04:33:12.188000000Z"
+        )
+        assertNotNull(parsedTs)
+        assertTrue(parsedTs!!.seconds > 1_700_000_000L)
+        assertEquals(188_000_000, parsedTs.nanoseconds)
+    }
 }
-
-
-
 

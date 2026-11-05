@@ -817,12 +817,21 @@ class QawmiViewModel(
     ) { msgState, groupsState, targetUser ->
         val messages = (msgState as? UiState.Success)?.data ?: emptyList()
         val groups = (groupsState as? UiState.Success)?.data ?: emptyList()
-        val ids = messages.flatMap { msg -> listOf(msg.senderId, msg.receiverId) }.toMutableSet()
-        groups.forEach { group -> ids.addAll(group.memberIds) }
-        targetUser?.first?.takeIf { it.isNotBlank() && !it.startsWith("GROUP:") }?.let { ids.add(it) }
-        ids.filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
-            .sorted()
-            .take(20)
+        val directPartnerIds = messages
+            .flatMap { msg -> listOf(msg.senderId, msg.receiverId) }
+            .filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
+            .distinct()
+        val groupMemberIds = groups
+            .flatMap { group -> group.memberIds }
+            .filter { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
+            .distinct()
+        val targetUid = targetUser?.first?.takeIf { it.isNotBlank() && it != currentUserId && !it.startsWith("GROUP:") }
+        val prioritized = buildList {
+            if (targetUid != null) add(targetUid)
+            addAll(directPartnerIds)
+            addAll(groupMemberIds)
+        }.distinct().take(10).sorted()
+        prioritized
     }
         .distinctUntilChanged()
         .flatMapLatest { validIds ->
@@ -901,7 +910,7 @@ class QawmiViewModel(
                     }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), UiState.Loading)
 
     val adminUsersState: StateFlow<UiState<List<UserProfile>>> = combine(
         isAdminState,
@@ -927,7 +936,7 @@ class QawmiViewModel(
                 }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), UiState.Loading)
 
     val adminSubmissionsState: StateFlow<UiState<List<KhedmotSubmission>>> = combine(
         isAdminState,
@@ -954,7 +963,7 @@ class QawmiViewModel(
             Log.w(TAG, "Error observing admin submissions", e)
             emit(UiState.Error(formatFirestoreErrorBangla(e, "আবেদনের তালিকা লোড করা যায়নি")))
         }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), UiState.Loading)
 
     val adminRegistryListState: StateFlow<UiState<List<AdminRegistryEntry>>> = combine(
         isAdminState,
@@ -972,7 +981,7 @@ class QawmiViewModel(
                     }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), UiState.Loading)
 
     /**
      * Real-time KKS Intelligence Engine Analytics & Anomaly Summary for Admin Control Center.
@@ -991,7 +1000,7 @@ class QawmiViewModel(
             submissions = subs,
             config = config
         )
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, AlgorithmPerformanceSummary())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), AlgorithmPerformanceSummary())
 
     private val lastForegroundSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val lastNetworkSyncEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
