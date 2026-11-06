@@ -235,7 +235,7 @@ fun FeedScreen(
         allComments.groupBy { it.postId }
     }
 
-    var visiblePostLimit by remember { mutableIntStateOf(15) }
+    var visiblePostLimit by remember { mutableIntStateOf(60) }
     var showQuickComposerDialog by remember { mutableStateOf(false) }
     var activeSharePost by remember { mutableStateOf<FeedPost?>(null) }
     var activeReactorsModalPost by remember { mutableStateOf<FeedPost?>(null) }

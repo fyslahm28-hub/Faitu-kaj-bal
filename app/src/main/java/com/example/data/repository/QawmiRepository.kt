@@ -1950,7 +1950,17 @@ class QawmiRepository(
                             sdkPost != null && restPost != null -> {
                                 val sdkUpdated = sdkPost.updatedAt?.toDate()?.time ?: 0L
                                 val restUpdated = restPost.updatedAt?.toDate()?.time ?: 0L
-                                if (restUpdated > sdkUpdated) restPost else sdkPost
+                                val primary = if (restUpdated > sdkUpdated) restPost else sdkPost
+                                val secondary = if (restUpdated > sdkUpdated) sdkPost else restPost
+                                if (primary.imageUrls.isEmpty() && secondary.imageUrls.isNotEmpty()) {
+                                    primary.copy(
+                                        imageUrls = secondary.imageUrls,
+                                        mediaMetadata = primary.mediaMetadata.ifEmpty { secondary.mediaMetadata },
+                                        attachmentDocId = primary.attachmentDocId.ifBlank { secondary.attachmentDocId }
+                                    )
+                                } else {
+                                    primary
+                                }
                             }
                             sdkPost != null -> sdkPost
                             else -> restPost

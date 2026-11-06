@@ -434,9 +434,25 @@ object FirestoreRestFallbackClient {
         val createdAt = extractTimestampField(fields, "createdAt") ?: createTimeFallback
         val updatedAt = extractTimestampField(fields, "updatedAt") ?: updateTimeFallback ?: createdAt
 
-        val imageUrls = extractStringListField(fields, "imageUrls")
+        val rawImagesFromField = extractStringListField(fields, "imageUrls")
         val mediaMetadata = extractMapListField(fields, "mediaMetadata")
         val attachmentDocId = extractStringField(fields, "attachmentDocId")
+
+        val metadataFallbackUrls = mediaMetadata.mapNotNull { meta ->
+            meta["previewDataUrl"]?.takeIf { it.isNotBlank() }
+                ?: meta["mediaDataUrl"]?.takeIf { it.isNotBlank() }
+                ?: meta["url"]?.takeIf { it.isNotBlank() }
+                ?: meta["attachmentDocId"]?.takeIf { it.isNotBlank() }?.let {
+                    "https://firestore.googleapis.com/v1/feed_post_attachments?attachmentDocId=$it"
+                }
+        }
+        val imageUrls = when {
+            rawImagesFromField.isNotEmpty() -> rawImagesFromField
+            metadataFallbackUrls.isNotEmpty() -> metadataFallbackUrls
+            attachmentDocId.isNotBlank() && !attachmentDocId.endsWith("_ext_text") ->
+                listOf("https://firestore.googleapis.com/v1/feed_post_attachments?attachmentDocId=$attachmentDocId")
+            else -> emptyList()
+        }
 
         mediaMetadata.forEachIndexed { idx, meta ->
             val preview = meta["previewDataUrl"]?.takeIf { it.startsWith("data:image", ignoreCase = true) }

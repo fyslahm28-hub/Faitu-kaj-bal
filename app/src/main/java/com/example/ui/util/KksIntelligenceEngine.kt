@@ -684,10 +684,17 @@ object KksIntelligenceEngine {
     // =========================================================================
 
     private fun computeQualificationSimilarity(userProfile: UserProfile?, post: FeedPost): Float {
-        if (userProfile == null) return 0.5f
+        val isGeneralPost = post.postType.equals("GENERAL_POST", ignoreCase = true)
+        val hasVisualMedia = post.imageUrls.isNotEmpty() ||
+            post.mediaMetadata.isNotEmpty() ||
+            (post.attachmentDocId.isNotBlank() && !post.attachmentDocId.endsWith("_ext_text"))
+        if (isGeneralPost && post.qualification.isBlank()) {
+            return if (hasVisualMedia) 0.78f else 0.70f
+        }
+        if (userProfile == null) return if (hasVisualMedia) 0.65f else 0.5f
         val userQualText = "${userProfile.qualification} ${userProfile.designation} ${userProfile.bio}".lowercase()
         val postQualText = "${post.qualification} ${post.designation} ${post.title}".lowercase()
-        if (userQualText.isBlank() || postQualText.isBlank()) return 0.45f
+        if (userQualText.isBlank() || postQualText.isBlank()) return if (hasVisualMedia) 0.65f else 0.45f
 
         // Direct token overlap check
         val userTokens = tokenizeBanglaAndEnglish(userProfile.qualification)
@@ -723,11 +730,15 @@ object KksIntelligenceEngine {
             }
         }
 
-        return 0.25f
+        return if (isGeneralPost || hasVisualMedia) 0.62f else 0.25f
     }
 
     private fun computeCategoryAndDesignationSimilarity(userProfile: UserProfile?, post: FeedPost): Float {
-        if (userProfile == null) return 0.5f
+        val isGeneralPost = post.postType.equals("GENERAL_POST", ignoreCase = true)
+        val hasVisualMedia = post.imageUrls.isNotEmpty() ||
+            post.mediaMetadata.isNotEmpty() ||
+            (post.attachmentDocId.isNotBlank() && !post.attachmentDocId.endsWith("_ext_text"))
+        if (userProfile == null) return if (hasVisualMedia) 0.65f else 0.5f
         val userCategories = inferCategoriesFromText(
             "${userProfile.designation} ${userProfile.qualification} ${userProfile.bio}"
         ).toSet()
@@ -750,7 +761,11 @@ object KksIntelligenceEngine {
             if (common.isNotEmpty()) return 0.80f
         }
 
-        return 0.25f
+        if (isGeneralPost && postCategories.isEmpty()) {
+            return if (hasVisualMedia) 0.76f else 0.68f
+        }
+
+        return if (isGeneralPost || hasVisualMedia) 0.62f else 0.25f
     }
 
     private fun computeDistrictSimilarity(userProfile: UserProfile?, post: FeedPost): Float {
